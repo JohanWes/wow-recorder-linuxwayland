@@ -503,6 +503,13 @@ enum Phrase {
   StartManualRecordingTooltip,
   StopManualRecordingTooltip,
   RecordedAt,
+
+  LinuxGsrBufferSecondsDescription,
+  LinuxGsrCodecDescription,
+  LinuxGsrBitrateKbpsDescription,
+  LinuxGsrAudioDescription,
+  LinuxGsrReplayStorageDescription,
+  LinuxGsrLeadInSecondsDescription,
 }
 
 enum Language {

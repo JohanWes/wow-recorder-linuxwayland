@@ -506,6 +506,13 @@ const GERMAN: Translations = {
   [Phrase.StartManualRecordingTooltip]: 'Starte eine manuelle Aufnahme',
   [Phrase.StopManualRecordingTooltip]: 'Beende die manuelle Aufnahme',
   [Phrase.RecordedAt]: 'Aufgenommen am',
+
+  [Phrase.LinuxGsrBufferSecondsDescription]: 'Replay-Pufferlänge in Sekunden bei Verwendung von gpu-screen-recorder unter Linux.',
+  [Phrase.LinuxGsrCodecDescription]: 'Video-Codec für gpu-screen-recorder unter Linux (h264/hevc/av1).',
+  [Phrase.LinuxGsrBitrateKbpsDescription]: 'Ziel-Video-Bitrate in kbps für gpu-screen-recorder unter Linux (CBR).',
+  [Phrase.LinuxGsrAudioDescription]: 'Audio-Eingabespezifikation für gpu-screen-recorder unter Linux (z.B. default_output, default_input, app:<name>).',
+  [Phrase.LinuxGsrReplayStorageDescription]: 'Replay-Puffer-Speichermodus für gpu-screen-recorder unter Linux (ram oder disk).',
+  [Phrase.LinuxGsrLeadInSecondsDescription]: 'Zusätzliche Sekunden vor dem erkannten Aktivitätsstart beim Trimmen des Replay-Vorlaufs unter Linux.',
 };
 
 export default GERMAN;

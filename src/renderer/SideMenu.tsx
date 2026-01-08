@@ -84,6 +84,7 @@ const SideMenu = (props: IProps) => {
   const [appVersion, setAppVersion] = useState<string>();
   const { category, language } = appState;
   const lastManualStartStopClickRef = useRef(0);
+  const isLinux = window.electron.platform === 'linux';
 
   useEffect(() => {
     window.electron.ipcRenderer.on('updateVersionDisplay', (t: unknown) => {
@@ -99,6 +100,10 @@ const SideMenu = (props: IProps) => {
   }, [recorderStatus]);
 
   const renderManualStopStartButton = () => {
+    if (isLinux) {
+      return <></>;
+    }
+
     const recordingOrReady =
       recorderStatus !== RecStatus.Recording &&
       recorderStatus !== RecStatus.ReadyToRecord;
@@ -282,7 +287,7 @@ const SideMenu = (props: IProps) => {
             {getLocalePhrase(language, Phrase.SettingsHeading)}
           </Menu.Label>
           {renderSettingsTab()}
-          {renderSceneTab()}
+          {!isLinux && renderSceneTab()}
         </Menu>
       </ScrollArea>
       <div className="mt-auto w-full">
