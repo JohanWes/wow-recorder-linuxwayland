@@ -522,6 +522,12 @@ const CHINESE_SIMPLIFIED: Translations = {
   [Phrase.Reset]: '重置',
   [Phrase.Render]: '渲染',
   [Phrase.Preparing]: '准备中',
+  [Phrase.LinuxGsrBufferSecondsDescription]: '在 Linux 上使用 gpu-screen-recorder 时的回放缓冲区长度（秒）。',
+  [Phrase.LinuxGsrCodecDescription]: 'Linux 上 gpu-screen-recorder 的视频编码（h264/hevc/av1）。',
+  [Phrase.LinuxGsrBitrateKbpsDescription]: 'Linux 上 gpu-screen-recorder 的目标视频码率（kbps，CBR）。',
+  [Phrase.LinuxGsrAudioDescription]: 'Linux 上 gpu-screen-recorder 的音频输入（例如 default_output、default_input、app:<name>）。',
+  [Phrase.LinuxGsrReplayStorageDescription]: 'Linux 上 gpu-screen-recorder 的回放缓冲区存储方式（ram 或 disk）。',
+  [Phrase.LinuxGsrLeadInSecondsDescription]: 'Linux 上裁剪回放预滚时，在活动开始前额外包含的秒数。',
 };
 
 export default CHINESE_SIMPLIFIED;

@@ -522,6 +522,12 @@ const KOREAN: Translations = {
   [Phrase.Reset]: '초기화',
   [Phrase.Render]: '렌더링',
   [Phrase.Preparing]: '준비 중',
+  [Phrase.LinuxGsrBufferSecondsDescription]: 'Linux에서 gpu-screen-recorder 사용 시 리플레이 버퍼 길이(초).',
+  [Phrase.LinuxGsrCodecDescription]: 'Linux에서 gpu-screen-recorder 비디오 코덱(h264/hevc/av1).',
+  [Phrase.LinuxGsrBitrateKbpsDescription]: 'Linux에서 gpu-screen-recorder 목표 비트레이트(kbps, CBR).',
+  [Phrase.LinuxGsrAudioDescription]: 'Linux에서 gpu-screen-recorder 오디오 입력(예: default_output, default_input, app:<name>).',
+  [Phrase.LinuxGsrReplayStorageDescription]: 'Linux에서 gpu-screen-recorder 리플레이 버퍼 저장 방식(ram 또는 disk).',
+  [Phrase.LinuxGsrLeadInSecondsDescription]: 'Linux에서 리플레이 프리롤을 트리밍할 때 활동 시작 전 추가로 포함할 초.',
 };
 
 export default KOREAN;

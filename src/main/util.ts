@@ -6,7 +6,7 @@ import fs, {
   promises as fspromise,
   Stats,
 } from 'fs';
-import { app, Display, screen } from 'electron';
+import { app, Display, screen, shell } from 'electron';
 import {
   EventType,
   uIOhook,
@@ -22,23 +22,16 @@ import {
   OurDisplayType,
   RendererVideo,
   ObsAudioConfig,
-  ErrorReport,
   CloudSignedMetadata,
   KillVideoSegment,
 } from './types';
 import { VideoCategory } from '../types/VideoCategory';
 import ConfigService from 'config/ConfigService';
 import { AxiosError } from 'axios';
-import { send } from './main';
 import { Readable } from 'stream';
 import { ESupportedEncoders } from './obsEnums';
-import Recorder from './Recorder';
-import { specializationById, wowInstallSearchPaths } from './constants';
-import {
-  getPlayerName,
-  getPlayerSpecID,
-  secToMmSs,
-} from 'renderer/rendererutils';
+import Recorder from './recording/Recorder';
+import { wowInstallSearchPaths } from './constants';
 
 /**
  * When packaged, we need to fix some paths
@@ -64,8 +57,6 @@ const setupApplicationLogging = () => {
   Object.assign(console, log.functions);
   return path.dirname(logPath);
 };
-
-const { exec } = require('child_process');
 
 const getResolvedHtmlPath = () => {
   if (process.env.NODE_ENV === 'development') {
@@ -309,9 +300,7 @@ const writeMetadataFile = async (videoPath: string, metadata: Metadata) => {
  * Open a folder in system explorer.
  */
 const openSystemExplorer = (filePath: string) => {
-  const windowsPath = filePath.replace(/\//g, '\\');
-  const cmd = `explorer.exe /select,"${windowsPath}"`;
-  exec(cmd, () => {});
+  shell.showItemInFolder(path.resolve(filePath));
 };
 
 /**
@@ -416,48 +405,6 @@ const getWowFlavour = (pathSpec: string): string => {
   const content = fs.readFileSync(flavourInfoFile).toString().split('\n');
 
   return content.length > 1 ? content[1] : 'unknown';
-};
-
-/**
- * Check if advanced combat logging is enabled in the Config.wtf file for the given log path.
- */
-const getConfigWtfPath = (logPath: string): string => {
-  return path.normalize(path.join(logPath, '../WTF/Config.wtf'));
-};
-
-const checkAdvancedCombatLogging = async (
-  logPath: string,
-): Promise<boolean> => {
-  const configWtfFile = getConfigWtfPath(logPath);
-
-  if (!(await exists(configWtfFile))) {
-    console.warn('[Util] Config.wtf not found at', configWtfFile);
-    return false;
-  }
-
-  const content = (await fs.promises.readFile(configWtfFile)).toString();
-  const match = content.match(/^SET advancedCombatLogging\s+"(\d+)"/m);
-
-  if (match && match[1] === '1') {
-    return true;
-  }
-
-  console.warn('[Util] Advanced combat logging is disabled', configWtfFile);
-  return false;
-};
-
-/**
- * Adds an error to the error report component.
- */
-const emitErrorReport = (data: unknown) => {
-  console.error('[Util] Emitting error report', String(data));
-
-  const report: ErrorReport = {
-    date: new Date(),
-    reason: String(data),
-  };
-
-  send('updateErrorReport', report);
 };
 
 const isPushToTalkHotkey = (
@@ -600,7 +547,7 @@ const convertUioHookEvent = (
 
 const nextKeyPressPromise = (): Promise<PTTKeyPressEvent> => {
   return new Promise((resolve) => {
-    uIOhook.once('keyup', (event) => {
+    uIOhook.once('keyup', (event: UiohookKeyboardEvent) => {
       resolve(convertUioHookEvent(event));
     });
   });
@@ -610,7 +557,7 @@ const nextMousePressPromise = (): Promise<PTTKeyPressEvent> => {
   return new Promise((resolve) => {
     // Deliberatly 'mousedown' else we fire on the initial click
     // and always get mouse button 1.
-    uIOhook.once('mousedown', (event) => {
+    uIOhook.once('mousedown', (event: UiohookMouseEvent) => {
       resolve(convertUioHookEvent(event));
     });
   });
@@ -647,45 +594,12 @@ const buildKillVideoMetadata = (
   final.category = VideoCategory.Clips;
   final.protected = true;
   final.clippedAt = Date.now();
-  final.tag = `Multipov Kill Video\n`;
-
-  // Build a tag for the video like this:
-  //
-  //   Multipov Kill Video
-  //   Created by WCR at: 2025-10-29 20-38-50
-  //   A YouTube compatible description timeline is below.
-  //
-  //   00:00 - Imprvedziniq (Destruction)
-  //   01:06 - Visk (Arcane)
-  //   02:12 - Phrixosdk (Frost)
-  //   03:18 - Titzy (Elemental)
-  //   04:24 - Alextides (Restoration)
-  //   05:29 - Catza (Restoration)
-  //   06:35 - Meraned (Beast Mastery)
-  //   07:41 - Rubiscodrage (Devastation)
+  final.tag = `WCR Multipov Kill Video`;
 
   if (initial.start) {
     // All modern videos have this. It is possible legacy videos might not.
-    final.tag += `Created by WCR at: ${getOBSFormattedDate(new Date(initial.start))}\n`;
+    final.tag += `. Created by WCR at ${getOBSFormattedDate(new Date(initial.start))}`;
   }
-
-  final.tag += `A YouTube compatible description timeline is below.\n`;
-
-  segments.forEach((segment) => {
-    let playerName = getPlayerName(segment.video);
-    const playerSpecID = getPlayerSpecID(segment.video);
-
-    if (!playerName) {
-      // Should basically never happen but guard for it anyway.
-      playerName = 'Unknown';
-    }
-
-    const spec =
-      playerSpecID < 1 ? 'Unknown' : specializationById[playerSpecID].name;
-
-    final.tag += '\n';
-    final.tag += `${secToMmSs(segment.start)} - ${playerName} (${spec})`;
-  });
 
   final.player = {
     _GUID: 'WCR MultiPov GUID',
@@ -943,10 +857,14 @@ const takeOwnershipBufferDir = async (dir: string) => {
 
   const files = await fs.promises.readdir(dir);
 
+  // Linux MVP uses subdirectories for gpu-screen-recorder outputs.
+  const allowedDirs = new Set(['replay', 'regular', 'staging']);
+
   const unexpected = files
     .filter((file) => !file.endsWith('.mp4'))
     .filter((file) => !file.endsWith('.mkv'))
-    .filter((file) => file !== 'managed.txt');
+    .filter((file) => file !== 'managed.txt')
+    .filter((file) => !allowedDirs.has(file));
 
   if (unexpected.length > 0) {
     console.warn(
@@ -960,18 +878,22 @@ const takeOwnershipBufferDir = async (dir: string) => {
     throw new Error(`Can not take ownership of ${dir}. ${helptext}`);
   }
 
-  const regex = /^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}.(mp4|mkv)$/;
+  // Filename strictness is Windows/OBS-specific; on Linux, gpu-screen-recorder
+  // naming and staging files don't match the legacy pattern.
+  if (process.platform === 'win32') {
+    const regex = /^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}.(mp4|mkv)$/;
 
-  files
-    .filter((file) => file.endsWith('.mp4') || file.endsWith('.mkv'))
-    .forEach((file) => {
-      const match = regex.test(file);
+    files
+      .filter((file) => file.endsWith('.mp4') || file.endsWith('.mkv'))
+      .forEach((file) => {
+        const match = regex.test(file);
 
-      if (!match) {
-        console.warn('[Util] Unrecognized file in buffer dir', file);
-        throw new Error(`Can not take ownership of ${dir}. ${helptext}`);
-      }
-    });
+        if (!match) {
+          console.warn('[Util] Unrecognized file in buffer dir', file);
+          throw new Error(`Can not take ownership of ${dir}. ${helptext}`);
+        }
+      });
+  }
 
   const file = path.join(dir, 'managed.txt');
   await fs.promises.writeFile(file, content);
@@ -1141,13 +1063,8 @@ const runFirstTimeSetupActionsNoObs = () => {
 
   if (!cfg.get<string>('storagePath')) {
     console.info('[Util] Setting up default storage path');
-    const baseVideoPath = app.getPath('userData');
-
-    const initialStorageDir = path.join(
-      baseVideoPath,
-      'Warcraft Recorder Videos',
-    );
-
+    const baseVideoPath = app.getPath('videos');
+    const initialStorageDir = path.join(baseVideoPath, 'Warcraft Recorder');
     fs.mkdirSync(initialStorageDir, { recursive: true });
     cfg.set('storagePath', initialStorageDir);
   }
@@ -1172,7 +1089,6 @@ export {
   nextMousePressPromise,
   convertUioHookEvent,
   getPromiseBomb,
-  emitErrorReport,
   buildClipMetadata,
   buildKillVideoMetadata,
   getOBSFormattedDate,
@@ -1195,6 +1111,4 @@ export {
   handleSafeVodRequest,
   runFirstTimeSetupActionsObs,
   runFirstTimeSetupActionsNoObs,
-  checkAdvancedCombatLogging,
-  getConfigWtfPath,
 };

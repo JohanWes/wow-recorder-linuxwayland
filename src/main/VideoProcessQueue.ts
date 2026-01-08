@@ -19,6 +19,7 @@ import {
   getFileInfo,
   fixPathWhenPackaged,
   logAxiosError,
+  tryUnlink,
   buildKillVideoMetadata,
   getOBSFormattedDate,
 } from './util';
@@ -27,8 +28,7 @@ import { send } from './main';
 import ffmpeg from 'fluent-ffmpeg';
 import axios from 'axios';
 import DiskClient from 'storage/DiskClient';
-import Recorder from './Recorder';
-import { promises as fspromise } from 'fs';
+import Recorder from './recording/Recorder';
 
 const atomicQueue = require('atomic-queue');
 const devMode = process.env.NODE_ENV === 'development';
@@ -264,12 +264,6 @@ export default class VideoProcessQueue {
       // covers the cases where we're cutting a section off the end of
       // the video due to a timeout.
       const videoPath = await this.cutVideo(data, outputDir);
-
-      // Add the size of the newly cut video. We can't do this earlier
-      // as the size will change when we cut/remux.
-      const stat = await fspromise.stat(videoPath);
-      data.metadata.size = stat.size;
-
       await writeMetadataFile(videoPath, data.metadata);
 
       const readyToUpload = await CloudClient.getInstance().ready();
@@ -467,17 +461,10 @@ export default class VideoProcessQueue {
       console.timeEnd(`[VideoProcessQueue] Create ${item.uuid} kill video`);
 
       // Ffmpeg is done. Write out the metadata for the newly generated clip.
+
       const baseMetadata = rendererVideoToMetadata({ ...first }); // Close as will mutate.
       const metadata = buildKillVideoMetadata(baseMetadata, item.segments);
       await writeMetadataFile(videoPath, metadata);
-
-      const readyToUpload = await CloudClient.getInstance().ready();
-      const upload = readyToUpload && shouldUpload(this.cfg, metadata);
-
-      if (upload) {
-        const item: UploadQueueItem = { path: videoPath };
-        this.queueUpload(item);
-      }
     } finally {
       done();
     }
@@ -538,6 +525,23 @@ export default class VideoProcessQueue {
     send('updateSaveStatus', SaveStatus.NotSaving);
     DiskClient.getInstance().refreshStatus();
     DiskClient.getInstance().refreshVideos();
+
+    // Delete the source file if it's not a clip. Clips source files should be retained.
+    if (!item.clip) {
+      console.info('[VideoProcessQueue] Deleting source file', item.source);
+      let success = await tryUnlink(item.source);
+
+      if (!success) {
+        // Wait a couple of seconds and try again.
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        success = await tryUnlink(item.source);
+      }
+
+      if (!success) {
+        // Not much else to do than log it.
+        console.warn('[VideoProcessQueue] Failed to delete src', item.source);
+      }
+    }
   }
 
   /**
@@ -635,7 +639,7 @@ export default class VideoProcessQueue {
 
     // Run the size monitor.
     const sizeMonitor = new DiskSizeMonitor();
-    await sizeMonitor.run();
+    sizeMonitor.run();
 
     // Tidy the recording dir.
     const cfg = ConfigService.getInstance();

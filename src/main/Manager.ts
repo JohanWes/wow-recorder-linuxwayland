@@ -13,11 +13,12 @@ import {
   nextMousePressPromise,
   rendererVideoToMetadata,
 } from './util';
+import { emitErrorReport } from './errorReporting';
 import { VideoCategory } from '../types/VideoCategory';
 import Poller from '../utils/Poller';
 import ClassicLogHandler from '../parsing/ClassicLogHandler';
 import RetailLogHandler from '../parsing/RetailLogHandler';
-import Recorder from './Recorder';
+import Recorder from './recording/Recorder';
 import ConfigService from '../config/ConfigService';
 import {
   RecStatus,
@@ -30,6 +31,8 @@ import {
   KillVideoQueueItem,
   RendererVideo,
   KillVideoSegment,
+  Flavour,
+  Metadata,
 } from './types';
 import {
   getObsVideoConfig,
@@ -515,6 +518,26 @@ export default class Manager {
       this.retailPtrLogHandler = new RetailLogHandler(config.retailPtrLogPath);
       this.retailPtrLogHandler.setIsPtr();
     }
+
+    // Linux MVP: there is no WoW process poller, so start the capture session
+    // as soon as configuration is valid (portal selection is user-driven).
+    if (process.platform === 'linux') {
+      const shouldRecordAnyFlavour =
+        config.recordRetail ||
+        config.recordRetailPtr ||
+        config.recordClassic ||
+        config.recordClassicPtr ||
+        config.recordEra;
+
+      if (shouldRecordAnyFlavour) {
+        try {
+          await this.recorder.startBuffer();
+        } catch (error) {
+          console.error('[Manager] Failed to auto-start Linux capture', error);
+          emitErrorReport(error);
+        }
+      }
+    }
   }
 
   /**
@@ -651,6 +674,86 @@ export default class Manager {
       },
     );
 
+    // Linux capture controls (gpu-screen-recorder).
+    ipcMain.on('recorder', async (_event, args) => {
+      if (process.platform !== 'linux') {
+        return;
+      }
+
+      if (args[0] === 'linuxStartCapture') {
+        console.info('[Manager] Linux Start Capture requested');
+        try {
+          await this.recorder.startBuffer();
+        } catch (error) {
+          console.error('[Manager] Failed to start Linux capture', error);
+          emitErrorReport(error);
+        }
+        this.refreshStatus();
+        return;
+      }
+
+      if (args[0] === 'linuxRestartCapture') {
+        console.info('[Manager] Linux Restart Capture requested');
+        try {
+          this.recorder.shutdownOBS();
+          await this.recorder.startBuffer();
+        } catch (error) {
+          console.error('[Manager] Failed to restart Linux capture', error);
+          emitErrorReport(error);
+        }
+        this.refreshStatus();
+        return;
+      }
+
+      if (args[0] === 'linuxStopCapture') {
+        console.info('[Manager] Linux Stop Capture requested');
+        try {
+          this.recorder.shutdownOBS();
+        } catch (error) {
+          console.error('[Manager] Failed to stop Linux capture', error);
+          emitErrorReport(error);
+        }
+        this.refreshStatus();
+        return;
+      }
+
+      if (args[0] === 'linuxSaveReplay') {
+        console.info('[Manager] Linux Save Replay requested');
+        try {
+          const source = await this.recorder.saveReplayNow();
+          const now = new Date();
+          const duration = this.cfg.get<number>('linuxGsrBufferSeconds') ?? 180;
+
+          const metadata: Metadata = {
+            category: VideoCategory.Clips,
+            parentCategory: VideoCategory.Manual,
+            duration,
+            clippedAt: now.getTime(),
+            result: true,
+            flavour: Flavour.Retail,
+            combatants: [],
+            overrun: 0,
+            protected: true,
+          };
+
+          const clipQueueItem: VideoQueueItem = {
+            source,
+            suffix: `Replay ${getOBSFormattedDate(now)}`,
+            offset: 0,
+            duration,
+            clip: true,
+            metadata,
+          };
+
+          VideoProcessQueue.getInstance().queueVideo(clipQueueItem);
+        } catch (error) {
+          console.error('[Manager] Failed to save Linux replay', error);
+          emitErrorReport(error);
+        }
+        return;
+      }
+    });
+
     // Listens for a manual recording being started via the button. The
     // hotkey listener is handled separately.
     ipcMain.on('toggleManualRecording', async () => {
@@ -693,6 +796,9 @@ export default class Manager {
      * specific to Push to Talk, it's just like that for historical reasons.
      */
     ipcMain.handle('getNextKeyPress', async (): Promise<PTTKeyPressEvent> => {
+      if (process.platform === 'linux') {
+        throw new Error('Global hotkey capture is not supported on Linux MVP.');
+      }
       this.manualHotKeyDisabled = true;
 
       const event = await Promise.race([
@@ -709,6 +815,9 @@ export default class Manager {
      * some of this is very spammy as it fires on every key press.
      */
     uIOhook.on('keydown', (event: UiohookKeyboardEvent) => {
+      if (process.platform === 'linux') {
+        return;
+      }
       if (this.manualHotKeyDisabled) {
         // This user is updating their settings. Don't do anything.
         return;

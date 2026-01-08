@@ -519,6 +519,12 @@ enum Phrase {
   KillVideoDescription,
   KillVideoRemove,
   Preparing,
+  LinuxGsrBufferSecondsDescription,
+  LinuxGsrCodecDescription,
+  LinuxGsrBitrateKbpsDescription,
+  LinuxGsrAudioDescription,
+  LinuxGsrReplayStorageDescription,
+  LinuxGsrLeadInSecondsDescription,
 }
 
 enum Language {
