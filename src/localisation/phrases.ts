@@ -507,6 +507,8 @@ enum Phrase {
   LinuxGsrBufferSecondsDescription,
   LinuxGsrCodecDescription,
   LinuxGsrBitrateKbpsDescription,
+  LinuxGsrAudioOutputDescription,
+  LinuxGsrAudioInputDescription,
   LinuxGsrAudioDescription,
   LinuxGsrReplayStorageDescription,
   LinuxGsrLeadInSecondsDescription,
