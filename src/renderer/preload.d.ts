@@ -28,6 +28,11 @@ declare global {
           previewHeight: number;
         }>;
 
+        getLinuxGsrAudioDevices(): Promise<{
+          inputs: Array<{ value: string; label: string }>;
+          outputs: Array<{ value: string; label: string }>;
+        }>;
+
         configurePreview(
           x: number,
           y: number,
