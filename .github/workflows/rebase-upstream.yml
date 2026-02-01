@@ -51,13 +51,38 @@ jobs:
             exit 0
           fi
 
-          if git rebase upstream/main; then
-            echo "rebase_failed=false" >> "$GITHUB_OUTPUT"
-          else
+          rebase_failed="false"
+
+          if ! git rebase upstream/main; then
+            # If only README.md conflicts, keep the fork's README and continue.
+            while [ -d .git/rebase-apply ] || [ -d .git/rebase-merge ]; do
+              conflicts="$(git diff --name-only --diff-filter=U || true)"
+              conflict_count="$(printf '%s\n' "${conflicts}" | sed '/^$/d' | wc -l | awk '{print $1}')"
+
+              if [ "${conflict_count}" -eq 1 ] && [ "${conflicts}" = "README.md" ]; then
+                echo "Auto-resolving README.md conflict (keeping fork version)."
+                git checkout --theirs README.md
+                git add README.md
+                if ! git rebase --continue; then
+                  rebase_failed="true"
+                  break
+                fi
+              else
+                echo "Rebase conflict(s) require manual resolution:"
+                printf '%s\n' "${conflicts}" | sed '/^$/d' || true
+                rebase_failed="true"
+                break
+              fi
+            done
+          fi
+
+          if [ "${rebase_failed}" = "true" ]; then
             echo "rebase_failed=true" >> "$GITHUB_OUTPUT"
             git rebase --abort || true
             exit 0
           fi
+
+          echo "rebase_failed=false" >> "$GITHUB_OUTPUT"
 
       - name: Push updated main (force-with-lease)
         if: steps.rebase.outputs.behind != '0' && steps.rebase.outputs.rebase_failed == 'false'
