@@ -29,26 +29,70 @@ else
   rg() { grep -n "$@"; }
 fi
 
-repo_already_configured() {
-  # Prefer pacman-conf since it sees Include'd config files too.
-  if command -v pacman-conf >/dev/null 2>&1; then
-    pacman-conf --repo-list 2>/dev/null | rg -xq "${repo_name}" && return 0
-  fi
+collect_pacman_config_files() {
+  # Walk /etc/pacman.conf and all transitive Include= globs to find every config file
+  # that pacman will parse (best-effort).
+  local -a queue out
+  declare -A seen
+  local f inc expanded
 
-  rg -n "^[[]${repo_name}[]]$" "${pacman_conf}" >/dev/null 2>&1
+  queue=("${pacman_conf}")
+  out=()
+
+  while [[ ${#queue[@]} -gt 0 ]]; do
+    f="${queue[0]}"
+    queue=("${queue[@]:1}")
+
+    [[ -f "${f}" ]] || continue
+    if [[ -n "${seen["${f}"]+x}" ]]; then
+      continue
+    fi
+
+    seen["${f}"]=1
+    out+=("${f}")
+
+    while IFS= read -r inc; do
+      inc="${inc#Include}"
+      inc="${inc#*=}"
+      inc="$(echo "${inc}" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+      [[ -n "${inc}" ]] || continue
+
+      # Expand globs; if none match, keep as-is (pacman would error, but we can ignore).
+      shopt -s nullglob
+      expanded=(${inc})
+      shopt -u nullglob
+
+      if [[ ${#expanded[@]} -eq 0 ]]; then
+        expanded=("${inc}")
+      fi
+
+      for e in "${expanded[@]}"; do
+        queue+=("${e}")
+      done
+    done < <(rg -n --no-messages '^[[:space:]]*Include[[:space:]]*=' "${f}" 2>/dev/null | sed -E 's/^[0-9]+://')
+  done
+
+  printf '%s\n' "${out[@]}"
 }
 
 find_repo_headers() {
-  # Return matching lines (with file/line) across common pacman config locations.
-  # This helps diagnose "database already registered" (repo defined multiple times).
-  local pattern
+  local pattern files
   pattern="^[[]${repo_name}[]]$"
-
-  if [[ -d /etc/pacman.d ]]; then
-    rg -n --no-messages "${pattern}" "${pacman_conf}" /etc/pacman.d 2>/dev/null || true
-  else
-    rg -n --no-messages "${pattern}" "${pacman_conf}" 2>/dev/null || true
+  mapfile -t files < <(collect_pacman_config_files)
+  if [[ ${#files[@]} -eq 0 ]]; then
+    return 0
   fi
+  rg -n --no-messages "${pattern}" "${files[@]}" 2>/dev/null || true
+}
+
+repo_header_count() {
+  local matches
+  matches="$(find_repo_headers)"
+  printf '%s\n' "${matches}" | sed '/^$/d' | wc -l | awk '{print $1}'
+}
+
+repo_already_configured() {
+  [[ "$(repo_header_count)" -ge 1 ]]
 }
 
 fail_if_duplicate_repo_headers() {
