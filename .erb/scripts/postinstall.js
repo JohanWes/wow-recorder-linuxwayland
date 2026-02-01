@@ -4,8 +4,6 @@ const { spawnSync } = require('child_process');
 const isWindows = process.platform === 'win32';
 
 const run = (cmd, args) => {
-  // On Windows, lifecycle scripts often need a shell to execute `.cmd` shims
-  // from `node_modules/.bin` (e.g. `electron-builder.cmd`, `npm.cmd`).
   const res = spawnSync(cmd, args, { stdio: 'inherit', shell: isWindows });
   if (res.error) throw res.error;
   if (res.status !== 0) process.exit(res.status ?? 1);
