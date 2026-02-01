@@ -88,9 +88,17 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view nightly >/dev/null 2>&1; then
+            # Ensure existing release is not stuck as draft (fork token workaround)
+            if [ "$(gh release view nightly --json isDraft --jq .isDraft)" = "true" ]; then
+              gh release edit nightly --draft=false
+            fi
             exit 0
           fi
-          gh release create nightly --prerelease --title "Nightly" --notes "Automated nightly builds."
+          git tag -f nightly
+          git push -f origin nightly
+          gh release create nightly --prerelease --title "Nightly" --notes "Automated nightly builds." --verify-tag
+          # Fork GITHUB_TOKEN may still create a draft; ensure published
+          gh release edit nightly --draft=false 2>/dev/null || true
 
       - name: Upload AppImage to nightly Release (optional)
         env:
@@ -170,9 +178,17 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view pacman >/dev/null 2>&1; then
+            # Ensure existing release is not stuck as draft (fork token workaround)
+            if [ "$(gh release view pacman --json isDraft --jq .isDraft)" = "true" ]; then
+              gh release edit pacman --draft=false
+            fi
             exit 0
           fi
-          gh release create pacman --prerelease --title "Pacman repo" --notes "Automated pacman repo artifacts."
+          git tag -f pacman
+          git push -f origin pacman
+          gh release create pacman --prerelease --title "Pacman repo" --notes "Automated pacman repo artifacts." --verify-tag
+          # Fork GITHUB_TOKEN may still create a draft; ensure published
+          gh release edit pacman --draft=false 2>/dev/null || true
 
       - name: Cleanup old package assets (keep only latest)
         env:
