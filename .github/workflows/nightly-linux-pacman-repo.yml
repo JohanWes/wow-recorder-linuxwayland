@@ -31,12 +31,7 @@ jobs:
           set -euo pipefail
 
           # Use the app version as the base (avoid non-semver tags like `pacman`/`nightly`).
-          base="$(python3 - <<'PY' 2>/dev/null || true
-import json
-with open('release/app/package.json', 'r', encoding='utf-8') as f:
-    print(json.load(f).get('version', ''))
-PY
-)"
+          base="$(python3 -c "import json; print(json.load(open('release/app/package.json')).get('version',''))" 2>/dev/null || true)"
           if [ -z "${base}" ]; then
             base="0.0.0"
           fi
