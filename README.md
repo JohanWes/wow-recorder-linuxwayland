@@ -1,14 +1,10 @@
 # Warcraft Recorder
 
-Warcraft Recorder watches the World of Warcraft combat log and automatically records videos for “interesting” activities (arenas, raids, dungeons, etc).
+Warcraft Recorder (Linux/Wayland fork) watches the World of Warcraft combat log and automatically records videos for “interesting” activities (arenas, raids, dungeons, etc).
 
 ## Supported Platforms
 
-| OS | Support |
-|---|---|
-| Windows | Yes |
-| Linux (Wayland) | Yes (MVP) |
-| macOS | No |
+Linux (Wayland).
 
 | WoW flavour | Support |
 |---|---|
@@ -26,15 +22,15 @@ Warcraft Recorder watches the World of Warcraft combat log and automatically rec
    - Set the WoW `Logs` folder for the flavour(s) you play.
 3. Use the Test button with WoW running to validate recording end-to-end.
 
-## Linux (Wayland) Behavior
+## How Linux Capture Works
 
-Linux uses `gpu-screen-recorder` (GSR) instead of OBS.
+This fork uses `gpu-screen-recorder` (GSR) and portals (PipeWire + XDG Desktop Portal).
 
 - Capture is portal-based (PipeWire + XDG Desktop Portal). On first start (or after “Re-select Capture Target”), you must select the WoW window/monitor in the system share dialog.
 - Recording is fully automatic (start/stop is driven by combat log activity detection).
 - The “Replay buffer” is only used for pre-roll; full activities are recorded as regular recordings and are not limited by the buffer length.
 
-### Linux Requirements
+## Prerequisites (Wayland)
 
 Required on most Wayland setups:
 - `gpu-screen-recorder`
@@ -44,22 +40,14 @@ Required on most Wayland setups:
 
 The app performs best-effort runtime checks and reports missing prerequisites via the in-app error indicator.
 
-## Installing (AppImage)
+### CachyOS / Arch packages (example)
 
-1. Install prerequisites (see “Linux Requirements” above). Sanity check: `gpu-screen-recorder --version`.
-2. Common gaming distros (examples):
-   - CachyOS / Arch:
-     - `sudo pacman -S gpu-screen-recorder pipewire xdg-desktop-portal fuse2`
-     - Portal backend (pick one): `sudo pacman -S xdg-desktop-portal-hyprland` (Hyprland) / `xdg-desktop-portal-kde` / `xdg-desktop-portal-gnome` / `xdg-desktop-portal-wlr`
-   - Bazzite (Fedora Atomic):
-     - You likely already have PipeWire + portals; ensure `gpu-screen-recorder` is installed and in `PATH`.
-     - If the AppImage complains about missing FUSE, use `--appimage-extract-and-run` (see below) or install FUSE via `rpm-ostree` if you manage packages that way.
-3. Download the `.AppImage`, make it executable, and run it:
-   - `chmod +x Warcraft-Recorder-*.AppImage`
-   - `./Warcraft-Recorder-*.AppImage`
-   - If FUSE is missing: `./Warcraft-Recorder-*.AppImage --appimage-extract-and-run`
+Install prerequisites (example):
 
-## Installing (CachyOS / Arch via pacman repo)
+- `sudo pacman -S gpu-screen-recorder pipewire xdg-desktop-portal fuse2`
+- Portal backend (pick one): `sudo pacman -S xdg-desktop-portal-hyprland` (Hyprland) / `xdg-desktop-portal-kde` / `xdg-desktop-portal-gnome` / `xdg-desktop-portal-wlr`
+
+## Install (CachyOS / Arch via pacman repo)
 
 This fork publishes a pacman repository via GitHub Releases so you can install/update like any other package.
 
@@ -85,6 +73,10 @@ sudo pacman -Sy warcraft-recorder-linux
 warcraft-recorder-linux
 ```
 
+Updates:
+
+- `sudo pacman -Syu`
+
 ### One-command install (bootstrap)
 
 If you prefer, this script will append the repo to `/etc/pacman.conf` (with a timestamped backup) and install the package:
@@ -99,6 +91,18 @@ If you don’t like piping to `bash`, do:
 curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/scripts/install-pacman-repo.sh -o /tmp/install-warcraft-recorder-linux.sh
 sudo bash /tmp/install-warcraft-recorder-linux.sh
 ```
+
+### Troubleshooting
+
+- If sandboxing causes issues on your system: `WARCRAFTRECORDER_NO_SANDBOX=1 warcraft-recorder-linux`
+
+## Alternative Install (AppImage)
+
+You can also use the AppImage directly (e.g. from the `Nightly` release):
+
+- `chmod +x WarcraftRecorder-*.AppImage`
+- `./WarcraftRecorder-*.AppImage`
+- If FUSE is missing: `./WarcraftRecorder-*.AppImage --appimage-extract-and-run`
 
 ## Building / Packaging (AppImage)
 
@@ -115,6 +119,5 @@ See `docs/CONTRIBUTING.md`.
 
 ## Credits
 
-- Windows recording is based on [OBS](https://obsproject.com/).
 - Linux recording uses [gpu-screen-recorder](https://git.dec05eba.com/gpu-screen-recorder/about/).
 - Built with [Electron](https://www.electronjs.org/) and [React](https://react.dev/) (ERB).
