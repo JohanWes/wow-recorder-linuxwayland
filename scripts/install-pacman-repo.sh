@@ -22,8 +22,24 @@ if ! command -v pacman >/dev/null 2>&1; then
   exit 1
 fi
 
+if command -v rg >/dev/null 2>&1; then
+  :
+else
+  echo "ripgrep (rg) not found; falling back to grep." >&2
+  rg() { grep -n "$@"; }
+fi
+
+repo_already_configured() {
+  # Prefer pacman-conf since it sees Include'd config files too.
+  if command -v pacman-conf >/dev/null 2>&1; then
+    pacman-conf --repo-list 2>/dev/null | rg -xq "${repo_name}" && return 0
+  fi
+
+  rg -n "^[[]${repo_name}[]]$" "${pacman_conf}" >/dev/null 2>&1
+}
+
 ensure_repo_config() {
-  if rg -n "^[[]${repo_name}[]]$" "${pacman_conf}" >/dev/null 2>&1; then
+  if repo_already_configured; then
     return 0
   fi
 
@@ -38,17 +54,9 @@ Server = ${repo_url}
 EOF
 }
 
-if command -v rg >/dev/null 2>&1; then
-  :
-else
-  echo "ripgrep (rg) not found; falling back to grep." >&2
-  rg() { grep -n "$@"; }
-fi
-
 ensure_repo_config
 
 pacman -Sy --needed "${pkg_name}"
 
 echo "Installed: ${pkg_name}"
 echo "Launch: warcraft-recorder-linux"
-
