@@ -52,9 +52,9 @@ collect_pacman_config_files() {
     out+=("${f}")
 
     while IFS= read -r inc; do
-      inc="${inc#Include}"
-      inc="${inc#*=}"
-      inc="$(echo "${inc}" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+      # Normalize: "Include = /path/*.conf" -> "/path/*.conf"
+      inc="$(echo "${inc}" | sed -E 's/^[[:space:]]*Include[[:space:]]*=[[:space:]]*//')"
+      inc="$(echo "${inc}" | sed -E 's/[[:space:]]+$//')"
       [[ -n "${inc}" ]] || continue
 
       # Expand globs; if none match, keep as-is (pacman would error, but we can ignore).
