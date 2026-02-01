@@ -77,7 +77,7 @@ collect_pacman_config_files() {
 
 find_repo_headers() {
   local pattern files
-  pattern="^[[]${repo_name}[]]$"
+  pattern="^\[${repo_name}\]$"
   mapfile -t files < <(collect_pacman_config_files)
   if [[ ${#files[@]} -eq 0 ]]; then
     return 0
