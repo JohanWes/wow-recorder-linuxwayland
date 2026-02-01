@@ -1,0 +1,105 @@
+name: Auto-rebase on upstream
+
+on:
+  schedule:
+    # Daily at 05:17 UTC.
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: auto-rebase-upstream
+  cancel-in-progress: false
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          git fetch --prune origin main --tags
+          git remote add upstream https://github.com/aza547/wow-recorder.git 2>/dev/null || true
+          git remote set-url upstream https://github.com/aza547/wow-recorder.git
+          git fetch --prune upstream main --tags
+
+      - name: Rebase onto upstream/main
+        id: rebase
+        run: |
+          set -euo pipefail
+
+          # We expect this workflow to run on the fork's main branch.
+          git checkout main
+          git reset --hard origin/main
+
+          behind="$(git rev-list --count HEAD..upstream/main)"
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+
+          if [ "$behind" -eq 0 ]; then
+            echo "Already up to date with upstream/main."
+            exit 0
+          fi
+
+          if git rebase upstream/main; then
+            echo "rebase_failed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "rebase_failed=true" >> "$GITHUB_OUTPUT"
+            git rebase --abort || true
+            exit 0
+          fi
+
+      - name: Push updated main (force-with-lease)
+        if: steps.rebase.outputs.behind != '0' && steps.rebase.outputs.rebase_failed == 'false'
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin HEAD:main
+
+      - name: Open issue if rebase failed
+        if: steps.rebase.outputs.rebase_failed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const today = new Date().toISOString().slice(0, 10);
+            const title = `Auto-rebase failed (${today})`;
+            const body = [
+              `The scheduled rebase of \`main\` onto \`upstream/main\` failed due to conflicts.`,
+              ``,
+              `Suggested fix (run locally):`,
+              '```bash',
+              'git fetch upstream main',
+              'git checkout main',
+              'git rebase upstream/main',
+              '# resolve conflicts, then:',
+              'git push --force-with-lease origin main',
+              '```',
+              ``,
+              `See the failing workflow run logs for details.`,
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const alreadyOpen = existing.find((i) => i.title === title);
+            if (alreadyOpen) return;
+
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title,
+              body,
+            });
