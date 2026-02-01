@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Warcraft Recorder (Linux)
+Comment=Automatic WoW activity recorder (Wayland via gpu-screen-recorder)
+Exec=/usr/bin/warcraft-recorder-linux %U
+Terminal=false
+Categories=Video;Game;
+StartupWMClass=WarcraftRecorder
+

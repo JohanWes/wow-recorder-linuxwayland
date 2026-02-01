@@ -1,0 +1,162 @@
+name: Nightly (Linux AppImage + AUR)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-linux-appimage-and-aur
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute nightly pkgver
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # AUR pkgver must change when the source changes.
+          # Use a tag-based version if tags exist, else fall back to r<commits>.g<sha>.
+          base="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -n "${base}" ]; then
+            base="${base#v}"
+          else
+            base="0.0.0"
+          fi
+
+          count="$(git rev-list --count HEAD)"
+          sha="$(git rev-parse --short=7 HEAD)"
+
+          pkgver="${base}.r${count}.g${sha}"
+          pkgver="${pkgver//-/.}"
+          echo "pkgver=${pkgver}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node JS
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          cache: 'npm'
+
+      - name: Install system deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libfuse2
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build AppImage
+        run: npm run package:linux
+
+      - name: Prepare nightly AppImage asset
+        id: appimage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          out="release/build/WarcraftRecorder-nightly.AppImage"
+
+          found="$(ls -1 release/build/WarcraftRecorder-*.AppImage | head -n 1 || true)"
+          if [ -z "${found}" ]; then
+            echo "No AppImage found in release/build/." >&2
+            ls -la release/build || true
+            exit 1
+          fi
+
+          cp -a "${found}" "${out}"
+          sha="$(sha256sum "${out}" | awk '{print $1}')"
+
+          echo "path=${out}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure nightly GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view nightly >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create nightly --prerelease --title "Nightly" --notes "Automated nightly builds."
+
+      - name: Upload AppImage to nightly Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload nightly "${{ steps.appimage.outputs.path }}" --clobber
+
+      - name: Render AUR tree
+        id: aur_tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          out="/tmp/aur-${{ steps.vars.outputs.pkgver }}"
+          bash scripts/aur/render-aur-pkg.sh \
+            "${{ steps.vars.outputs.pkgver }}" \
+            "${{ github.repository_owner }}" \
+            "${repo_name}" \
+            "${{ steps.appimage.outputs.sha256 }}" \
+            "${out}"
+          echo "out=${out}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate .SRCINFO (container)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/aur/generate-srcinfo.sh "${{ steps.aur_tree.outputs.out }}"
+
+      - name: Push to AUR (if configured)
+        if: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+
+      - name: Update AUR repo
+        if: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aur_pkg="${{ secrets.AUR_PKGNAME }}"
+          if [ -z "${aur_pkg}" ]; then
+            aur_pkg="warcraft-recorder-linux"
+          fi
+
+          work="/tmp/aur-repo"
+          rm -rf "${work}"
+          git clone "ssh://aur@aur.archlinux.org/${aur_pkg}.git" "${work}"
+
+          cp -a "${{ steps.aur_tree.outputs.out }}/PKGBUILD" "${work}/PKGBUILD"
+          cp -a "${{ steps.aur_tree.outputs.out }}/.SRCINFO" "${work}/.SRCINFO"
+          cp -a "${{ steps.aur_tree.outputs.out }}/warcraft-recorder-linux.desktop" "${work}/warcraft-recorder-linux.desktop"
+          cp -a "${{ steps.aur_tree.outputs.out }}/warcraft-recorder-linux.sh" "${work}/warcraft-recorder-linux.sh"
+
+          cd "${work}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet; then
+            echo "AUR repo already up to date."
+            exit 0
+          fi
+
+          git add PKGBUILD .SRCINFO warcraft-recorder-linux.desktop warcraft-recorder-linux.sh
+          git commit -m "Update to ${{ steps.vars.outputs.pkgver }}"
+          git push
