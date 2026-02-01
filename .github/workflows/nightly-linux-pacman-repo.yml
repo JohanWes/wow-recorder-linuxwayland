@@ -130,7 +130,7 @@ jobs:
             -v "${out}:/pkg" \
             -w /pkg \
             archlinux:base-devel \
-            bash -lc "set -euo pipefail; pacman -Sy --noconfirm --needed pacman-contrib; useradd -m builder; chown -R builder:builder /pkg; su builder -c 'makepkg -sf --noconfirm'; ls -1 *.pkg.tar.* | head -n 1"
+            bash -lc "set -euo pipefail; useradd -m builder; chown -R builder:builder /pkg; su builder -c 'makepkg -sf --noconfirm --nodeps'; ls -1 *.pkg.tar.* | head -n 1"
 
           pkgfile="$(ls -1 "${out}"/*.pkg.tar.* | head -n 1)"
           pkgname="$(basename "${pkgfile}")"
