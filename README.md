@@ -40,6 +40,8 @@ If you prefer, this script will append the repo to `/etc/pacman.conf` (with a ti
 curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/scripts/install-pacman-repo.sh | sudo bash
 ```
 
+If you see `database already registered`, you have the repo configured more than once (remove duplicates in pacman config and re-run).
+
 If you don’t like piping to `bash`, do:
 
 ```bash
