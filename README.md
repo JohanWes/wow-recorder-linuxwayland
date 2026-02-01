@@ -40,13 +40,6 @@ Required on most Wayland setups:
 
 The app performs best-effort runtime checks and reports missing prerequisites via the in-app error indicator.
 
-### CachyOS / Arch packages (example)
-
-Install prerequisites (example):
-
-- `sudo pacman -S gpu-screen-recorder pipewire xdg-desktop-portal fuse2`
-- Portal backend (pick one): `sudo pacman -S xdg-desktop-portal-hyprland` (Hyprland) / `xdg-desktop-portal-kde` / `xdg-desktop-portal-gnome` / `xdg-desktop-portal-wlr`
-
 ## Install (CachyOS / Arch via pacman repo)
 
 This fork publishes a pacman repository via GitHub Releases so you can install/update like any other package.
@@ -95,6 +88,22 @@ sudo bash /tmp/install-warcraft-recorder-linux.sh
 ### Troubleshooting
 
 - If sandboxing causes issues on your system: `WARCRAFTRECORDER_NO_SANDBOX=1 warcraft-recorder-linux`
+
+## Dependencies
+
+When installing via pacman, these are installed automatically as dependencies:
+
+- `gpu-screen-recorder`
+- `pipewire`
+- `xdg-desktop-portal`
+- `fuse2`
+
+You still need one portal backend for your compositor/DE (install one of):
+
+- `xdg-desktop-portal-hyprland` (Hyprland)
+- `xdg-desktop-portal-kde` (KDE)
+- `xdg-desktop-portal-gnome` (GNOME)
+- `xdg-desktop-portal-wlr` (wlroots)
 
 ## Alternative Install (AppImage)
 

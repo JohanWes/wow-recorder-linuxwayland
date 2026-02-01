@@ -7,12 +7,17 @@ pkgdesc='Warcraft Recorder (Linux AppImage) — pacman repo build'
 arch=('x86_64')
 url='https://github.com/@GITHUB_OWNER@/@GITHUB_REPO@'
 license=('custom')
-depends=()
+depends=(
+  'gpu-screen-recorder'
+  'pipewire'
+  'xdg-desktop-portal'
+  'fuse2'
+)
 optdepends=(
-  'gpu-screen-recorder: Wayland recording backend'
-  'pipewire: screen capture/audio routing'
-  'xdg-desktop-portal: portal-based screen capture'
-  'fuse2: run AppImages via FUSE (else use --appimage-extract-and-run)'
+  'xdg-desktop-portal-hyprland: portal backend (Hyprland)'
+  'xdg-desktop-portal-kde: portal backend (KDE)'
+  'xdg-desktop-portal-gnome: portal backend (GNOME)'
+  'xdg-desktop-portal-wlr: portal backend (wlroots)'
 )
 provides=('warcraft-recorder-linux')
 conflicts=('warcraft-recorder-linux')
@@ -39,4 +44,3 @@ package() {
   install -Dm644 "icon.png" "${pkgdir}/usr/share/pixmaps/${pkgname}.png"
   install -Dm644 "${pkgname}.desktop" "${pkgdir}/usr/share/applications/${pkgname}.desktop"
 }
-
