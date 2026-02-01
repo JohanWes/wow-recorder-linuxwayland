@@ -5,5 +5,6 @@ Comment=Automatic WoW activity recorder (Wayland via gpu-screen-recorder)
 Exec=/usr/bin/warcraft-recorder-linux %U
 Terminal=false
 Categories=Video;Game;
+Icon=warcraft-recorder-linux
 StartupWMClass=WarcraftRecorder
 

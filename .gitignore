@@ -21,6 +21,8 @@ release/app/dist
 release/app-linux/dist
 release/build
 .erb/dll
+release/npm-ls-*.json
+release/npm-list-*.json
 
 .idea
 npm-debug.log.*

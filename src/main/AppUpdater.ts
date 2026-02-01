@@ -12,6 +12,11 @@ const customConsoleLogger = {
 
 export default class AppUpdater {
   constructor(window: BrowserWindow) {
+    if (process.env.WARCRAFTRECORDER_DISABLE_UPDATER === '1') {
+      console.log('[AutoUpdater] Disabled via WARCRAFTRECORDER_DISABLE_UPDATER=1');
+      return;
+    }
+
     autoUpdater.logger = customConsoleLogger;
 
     // Don't auto-install on quit. This would force users to update which

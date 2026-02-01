@@ -1,16 +1,20 @@
-name: Nightly (Linux AppImage + AUR)
+name: Nightly (Linux pacman repo)
 
 on:
   push:
     branches: [main]
+  workflow_run:
+    workflows: ['Auto-rebase on upstream']
+    types: [completed]
   workflow_dispatch:
 
 concurrency:
-  group: nightly-linux-appimage-and-aur
+  group: nightly-linux-pacman-repo
   cancel-in-progress: false
 
 jobs:
   build:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -20,14 +24,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compute nightly pkgver
+      - name: Compute pkgver
         id: vars
         shell: bash
         run: |
           set -euo pipefail
 
-          # AUR pkgver must change when the source changes.
-          # Use a tag-based version if tags exist, else fall back to r<commits>.g<sha>.
           base="$(git describe --tags --abbrev=0 2>/dev/null || true)"
           if [ -n "${base}" ]; then
             base="${base#v}"
@@ -61,14 +63,11 @@ jobs:
       - name: Build AppImage
         run: npm run package:linux
 
-      - name: Prepare nightly AppImage asset
+      - name: Prepare AppImage
         id: appimage
         shell: bash
         run: |
           set -euo pipefail
-
-          out="release/build/WarcraftRecorder-nightly.AppImage"
-
           found="$(ls -1 release/build/WarcraftRecorder-*.AppImage | head -n 1 || true)"
           if [ -z "${found}" ]; then
             echo "No AppImage found in release/build/." >&2
@@ -76,13 +75,14 @@ jobs:
             exit 1
           fi
 
+          out="/tmp/WarcraftRecorder.AppImage"
           cp -a "${found}" "${out}"
           sha="$(sha256sum "${out}" | awk '{print $1}')"
 
           echo "path=${out}" >> "$GITHUB_OUTPUT"
           echo "sha256=${sha}" >> "$GITHUB_OUTPUT"
 
-      - name: Ensure nightly GitHub Release exists
+      - name: Ensure nightly GitHub Release exists (optional)
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -93,70 +93,86 @@ jobs:
           fi
           gh release create nightly --prerelease --title "Nightly" --notes "Automated nightly builds."
 
-      - name: Upload AppImage to nightly Release
+      - name: Upload AppImage to nightly Release (optional)
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release upload nightly "${{ steps.appimage.outputs.path }}" --clobber
+          cp -a "${{ steps.appimage.outputs.path }}" "/tmp/WarcraftRecorder-nightly.AppImage"
+          gh release upload nightly "/tmp/WarcraftRecorder-nightly.AppImage" --clobber
 
-      - name: Render AUR tree
-        id: aur_tree
+      - name: Render pacman package tree
+        id: pkg_tree
         shell: bash
         run: |
           set -euo pipefail
           repo_name="${GITHUB_REPOSITORY#*/}"
-          out="/tmp/aur-${{ steps.vars.outputs.pkgver }}"
-          bash scripts/aur/render-aur-pkg.sh \
+          icon_sha256="$(sha256sum assets/icon.png | awk '{print $1}')"
+          out="/tmp/pkg-${{ steps.vars.outputs.pkgver }}"
+          bash scripts/pacman/render-pkgbuild.sh \
             "${{ steps.vars.outputs.pkgver }}" \
             "${{ github.repository_owner }}" \
             "${repo_name}" \
             "${{ steps.appimage.outputs.sha256 }}" \
-            "${out}"
+            "${icon_sha256}" \
+            "${out}" \
+            "${{ steps.appimage.outputs.path }}"
           echo "out=${out}" >> "$GITHUB_OUTPUT"
 
-      - name: Generate .SRCINFO (container)
+      - name: Build pacman package (container)
+        id: makepkg
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/aur/generate-srcinfo.sh "${{ steps.aur_tree.outputs.out }}"
+          out="${{ steps.pkg_tree.outputs.out }}"
+          docker run --rm \
+            -v "${out}:/pkg" \
+            -w /pkg \
+            archlinux:base-devel \
+            bash -lc "set -euo pipefail; pacman -Sy --noconfirm --needed pacman-contrib; useradd -m builder; chown -R builder:builder /pkg; su builder -c 'makepkg -sf --noconfirm'; ls -1 *.pkg.tar.* | head -n 1"
 
-      - name: Push to AUR (if configured)
-        if: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}
-        uses: webfactory/ssh-agent@v0.9.0
+          pkgfile="$(ls -1 "${out}"/*.pkg.tar.* | head -n 1)"
+          echo "pkgfile=${pkgfile}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout gh-pages
+        uses: actions/checkout@v4
         with:
-          ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          ref: gh-pages
+          path: gh-pages
+        continue-on-error: true
 
-      - name: Update AUR repo
-        if: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}
+      - name: Prepare repo directory
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p gh-pages/repo/x86_64
 
-          aur_pkg="${{ secrets.AUR_PKGNAME }}"
-          if [ -z "${aur_pkg}" ]; then
-            aur_pkg="warcraft-recorder-linux"
-          fi
+      - name: Update repo db (container)
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo_dir="$(realpath gh-pages/repo/x86_64)"
+          cp -a "${{ steps.makepkg.outputs.pkgfile }}" "${repo_dir}/"
 
-          work="/tmp/aur-repo"
-          rm -rf "${work}"
-          git clone "ssh://aur@aur.archlinux.org/${aur_pkg}.git" "${work}"
+          docker run --rm \
+            -v "${repo_dir}:/repo" \
+            -w /repo \
+            archlinux:base-devel \
+            bash -lc "set -euo pipefail; pacman -Sy --noconfirm --needed pacman-contrib; repo-add -R -n warcraft-recorder-linux.db.tar.gz ./*.pkg.tar.*"
 
-          cp -a "${{ steps.aur_tree.outputs.out }}/PKGBUILD" "${work}/PKGBUILD"
-          cp -a "${{ steps.aur_tree.outputs.out }}/.SRCINFO" "${work}/.SRCINFO"
-          cp -a "${{ steps.aur_tree.outputs.out }}/warcraft-recorder-linux.desktop" "${work}/warcraft-recorder-linux.desktop"
-          cp -a "${{ steps.aur_tree.outputs.out }}/warcraft-recorder-linux.sh" "${work}/warcraft-recorder-linux.sh"
-
-          cd "${work}"
+      - name: Publish gh-pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd gh-pages
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          if git diff --quiet; then
-            echo "AUR repo already up to date."
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No gh-pages changes."
             exit 0
           fi
-
-          git add PKGBUILD .SRCINFO warcraft-recorder-linux.desktop warcraft-recorder-linux.sh
-          git commit -m "Update to ${{ steps.vars.outputs.pkgver }}"
+          git commit -m "repo: ${GITHUB_SHA}"
           git push
+
