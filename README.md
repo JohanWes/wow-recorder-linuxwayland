@@ -59,6 +59,47 @@ The app performs best-effort runtime checks and reports missing prerequisites vi
    - `./Warcraft-Recorder-*.AppImage`
    - If FUSE is missing: `./Warcraft-Recorder-*.AppImage --appimage-extract-and-run`
 
+## Installing (CachyOS / Arch via pacman repo)
+
+This fork publishes a pacman repository via GitHub Releases so you can install/update like any other package.
+
+### Manual (recommended)
+
+1. Add the repo to `/etc/pacman.conf` (one-time):
+
+```ini
+[warcraft-recorder-linux]
+SigLevel = Optional TrustAll
+Server = https://github.com/JohanWes/wow-recorder-linuxwayland/releases/download/pacman
+```
+
+2. Sync + install:
+
+```bash
+sudo pacman -Sy warcraft-recorder-linux
+```
+
+3. Launch:
+
+```bash
+warcraft-recorder-linux
+```
+
+### One-command install (bootstrap)
+
+If you prefer, this script will append the repo to `/etc/pacman.conf` (with a timestamped backup) and install the package:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/scripts/install-pacman-repo.sh | sudo bash
+```
+
+If you don’t like piping to `bash`, do:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/scripts/install-pacman-repo.sh -o /tmp/install-warcraft-recorder-linux.sh
+sudo bash /tmp/install-warcraft-recorder-linux.sh
+```
+
 ## Building / Packaging (AppImage)
 
 Linux packaging produces an AppImage:
