@@ -7,14 +7,19 @@ import path from 'path';
 import TsconfigPathsPlugins from 'tsconfig-paths-webpack-plugin';
 import webpackPaths from './webpack.paths';
 import { dependencies as releaseAppDependencies } from '../../release/app/package.json';
+import { dependencies as releaseAppLinuxDependencies } from '../../release/app-linux/package.json';
 
 const isWin = process.platform === 'win32';
 
-const externals = Object.keys(releaseAppDependencies || {}).filter((dep) => {
-  if (isWin) return true;
-  // Linux MVP: bundle stubs for Windows-only native deps.
-  return dep !== 'noobs' && dep !== 'uiohook-napi';
-});
+const externals = isWin
+  ? Object.keys(releaseAppDependencies || {})
+  : [
+      // Use Linux-specific runtime deps as externals; stub Windows-only native deps.
+      ...Object.keys(releaseAppLinuxDependencies || {}),
+      ...Object.keys(releaseAppDependencies || {}).filter(
+        (dep) => dep !== 'noobs' && dep !== 'uiohook-napi',
+      ),
+    ].filter((dep, i, arr) => arr.indexOf(dep) === i);
 
 const linuxStubsAliases = isWin
   ? {}
