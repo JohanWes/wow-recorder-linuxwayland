@@ -29,7 +29,6 @@ import { checkLinuxRuntimePrereqs } from './linuxPrereqs';
 import { OurDisplayType, SoundAlerts, VideoPlayerSettings } from './types';
 import ConfigService from '../config/ConfigService';
 import Manager from './Manager';
-import AppUpdater from './AppUpdater';
 import MenuBuilder from './menu';
 import { Phrase } from 'localisation/phrases';
 import DiskClient from 'storage/DiskClient';
@@ -270,11 +269,6 @@ const createWindow = async () => {
 
   uIOhook.start();
 
-  // Runs the auto-updater, which checks GitHub for new releases
-  // and will prompt the user if any are available.
-  if (process.platform !== 'linux') {
-    new AppUpdater(window);
-  }
 };
 
 /**

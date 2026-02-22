@@ -15,9 +15,7 @@ import {
 import Separator from './components/Separator/Separator';
 import { ScrollArea } from './components/ScrollArea/ScrollArea';
 import LocaleSettings from './LocaleSettings';
-import WindowsSettings from './WindowsSettings';
 import { Phrase } from 'localisation/phrases';
-import ManualSettings from './ManualSettings';
 import LinuxCaptureSettings from './LinuxCaptureSettings';
 
 interface IProps {
@@ -34,7 +32,6 @@ const CategoryHeading = ({ children }: { children: React.ReactNode }) => (
 
 const SettingsPage: React.FC<IProps> = (props: IProps) => {
   const { recorderStatus, config, setConfig, appState, setAppState } = props;
-  const isLinux = window.electron.platform === 'linux';
 
   return (
     <div className="w-full h-full bg-background-higher pt-[32px] px-4">
@@ -71,25 +68,14 @@ const SettingsPage: React.FC<IProps> = (props: IProps) => {
               </div>
               <div>
                 <CategoryHeading>
-                  {!isLinux
-                    ? getLocalePhrase(appState.language, Phrase.WindowsSettingsLabel)
-                    : 'Linux Capture'}
+                  Linux Capture
                 </CategoryHeading>
                 <Separator className="mt-2 mb-4" />
-                {!isLinux && (
-                  <WindowsSettings
-                    appState={appState}
-                    config={config}
-                    setConfig={setConfig}
-                  />
-                )}
-                {isLinux && (
-                  <LinuxCaptureSettings
-                    recorderStatus={recorderStatus}
-                    config={config}
-                    setConfig={setConfig}
-                  />
-                )}
+                <LinuxCaptureSettings
+                  recorderStatus={recorderStatus}
+                  config={config}
+                  setConfig={setConfig}
+                />
               </div>
               <div>
                 <CategoryHeading>
@@ -136,22 +122,6 @@ const SettingsPage: React.FC<IProps> = (props: IProps) => {
                 </CategoryHeading>
                 <Separator className="mt-2 mb-4" />
                 <PVPSettings appState={appState} />
-              </div>
-              <div>
-                <CategoryHeading>
-                  {getLocalePhrase(
-                    appState.language,
-                    Phrase.ManualRecordSettingsLabel,
-                  )}
-                </CategoryHeading>
-                <Separator className="mt-2 mb-4" />
-                {!isLinux && (
-                  <ManualSettings
-                    appState={appState}
-                    config={config}
-                    setConfig={setConfig}
-                  />
-                )}
               </div>
             </div>
           </TabsContent>

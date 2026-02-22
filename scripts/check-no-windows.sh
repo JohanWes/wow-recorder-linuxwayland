@@ -6,12 +6,32 @@ cd "$(git rev-parse --show-toplevel)"
 
 windows_paths=(
   "src/main/Recorder.ts"
+  "src/main/AppUpdater.ts"
   "binaries/rust-ps.exe"
   "installer.nsh"
+  "src/renderer/WindowsSettings.tsx"
+  "src/renderer/ManualSettings.tsx"
+  "src/renderer/SceneEditor.tsx"
+  "src/renderer/RecorderPreview.tsx"
+  "src/renderer/VideoSourceControls.tsx"
+  "src/renderer/AudioSourceControls.tsx"
+  "src/renderer/VideoBaseControls.tsx"
+  "src/renderer/ChatOverlayControls.tsx"
+  "src/renderer/containers/UpdateNotifier/UpdateNotifier.tsx"
 )
 
 banned_patterns=(
   "require('../Recorder')"
+  "from './WindowsSettings'"
+  "from './ManualSettings'"
+  "from './SceneEditor'"
+  "from './RecorderPreview'"
+  "from './VideoSourceControls'"
+  "from './AudioSourceControls'"
+  "from './VideoBaseControls'"
+  "from './ChatOverlayControls'"
+  "from './AppUpdater'"
+  "from './containers/UpdateNotifier/UpdateNotifier'"
 )
 
 failed=0

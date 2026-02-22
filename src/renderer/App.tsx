@@ -11,7 +11,6 @@ import {
   DiskStatus,
   StorageFilter,
   ActivityStatus,
-  KillVideoStatus,
 } from 'main/types';
 import Box from '@mui/material/Box';
 import { getLocalePhrase, Language } from 'localisation/translations';
@@ -23,12 +22,10 @@ import { getCategoryFromConfig } from './rendererutils';
 import { TooltipProvider } from './components/Tooltip/Tooltip';
 import Toaster from './components/Toast/Toaster';
 import SideMenu from './SideMenu';
-import { useToast } from './components/Toast/useToast';
 import { Button } from './components/Button/Button';
 import { ErrorBoundary } from 'react-error-boundary';
 import { RefreshCcw } from 'lucide-react';
 import { VideoCategory } from 'types/VideoCategory';
-import { Phrase } from 'localisation/phrases';
 import { playAudio } from './sounds';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import KillVideoProgress from './KillVideoProgress';
@@ -41,8 +38,6 @@ const WarcraftRecorder = () => {
   const [error, setError] = useState<string>('');
   const [micStatus, setMicStatus] = useState<MicStatus>(MicStatus.NONE);
   const [errorReports, setErrorReports] = useState<ErrorReport[]>([]);
-  const updateNotified = useRef(false);
-  const { toast } = useToast();
 
   const [recorderStatus, setRecorderStatus] = useState<RecStatus>(
     RecStatus.WaitingForWoW,
@@ -55,14 +50,6 @@ const WarcraftRecorder = () => {
   const [savingStatus, setSavingStatus] = useState<SaveStatus>(
     SaveStatus.NotSaving,
   );
-
-  const [killVideoStatus, setKillVideoStatus] = useState<KillVideoStatus>({
-    inProgress: false,
-    perc: 0,
-  });
-
-  const [updateAvailable, setUpdateAvailable] = useState(false);
-
   const [appState, setAppState] = useState<AppState>({
     // Navigation.
     page: Pages.None,
@@ -173,59 +160,6 @@ const WarcraftRecorder = () => {
     });
   };
 
-  const onUpdateAvailable = () => {
-    setUpdateAvailable(true);
-
-    if (updateNotified.current) {
-      // We already told the user. Don't bother them again.
-      return;
-    }
-
-    const title = getLocalePhrase(
-      appState.language,
-      Phrase.UpdateAvailableTitle,
-    );
-
-    const description = getLocalePhrase(
-      appState.language,
-      Phrase.UpdateAvailableText,
-    );
-
-    const installButtonText = getLocalePhrase(
-      appState.language,
-      Phrase.UpdateAvailableInstallButtonText,
-    );
-
-    const remindButtonText = getLocalePhrase(
-      appState.language,
-      Phrase.UpdateAvailableRemindButtonText,
-    );
-
-    const updateToast = toast({
-      title,
-      description,
-      duration: 60000,
-      action: (
-        <div className="flex gap-2">
-          <Button
-            onClick={() => {
-              updateToast.dismiss();
-              ipc.sendMessage('doAppUpdate', []);
-            }}
-          >
-            {installButtonText}
-          </Button>
-          <Button variant="secondary" onClick={() => updateToast.dismiss()}>
-            {remindButtonText}
-          </Button>
-        </div>
-      ),
-    });
-
-    // Don't show this prompt again.
-    updateNotified.current = true;
-  };
-
   const setDiskVideos = (videos: unknown) => {
     setVideoState(videos as RendererVideo[]);
     setAppState((prevState) => {
@@ -245,7 +179,6 @@ const WarcraftRecorder = () => {
     ipc.on('updateMicStatus', updateMicStatus);
     ipc.on('updateErrorReport', updateErrorReports);
     ipc.on('updateDiskStatus', updateDiskStatus);
-    ipc.on('updateAvailable', onUpdateAvailable);
     ipc.on('playAudio', playAudio);
     ipc.on('setDiskVideos', setDiskVideos);
 
@@ -256,7 +189,6 @@ const WarcraftRecorder = () => {
       ipc.removeAllListeners('updateMicStatus');
       ipc.removeAllListeners('updateErrorReport');
       ipc.removeAllListeners('updateDiskStatus');
-      ipc.removeAllListeners('updateAvailable');
       ipc.removeAllListeners('playAudio');
       ipc.removeAllListeners('setDiskVideos');
     };
@@ -290,7 +222,6 @@ const WarcraftRecorder = () => {
                 errorReports={errorReports}
                 savingStatus={savingStatus}
                 config={config}
-                updateAvailable={updateAvailable}
                 recorderCategory={activityStatus?.category}
                 activityStatus={activityStatus}
               />

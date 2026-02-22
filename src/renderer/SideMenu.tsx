@@ -6,9 +6,6 @@ import {
   Dice5,
   Goal,
   HardHat,
-  MonitorCog,
-  Play,
-  Square,
   Sword,
   Swords,
 } from 'lucide-react';
@@ -47,12 +44,7 @@ import TestButton from './TestButton';
 import DiscordButton from './DiscordButton';
 import ApplicationStatusCard from './containers/ApplicationStatusCard/ApplicationStatusCard';
 import { ScrollArea } from './components/ScrollArea/ScrollArea';
-import UpdateNotifier from './containers/UpdateNotifier/UpdateNotifier';
 import { Phrase } from 'localisation/phrases';
-import { Button } from './components/Button/Button';
-import { Tooltip } from './components/Tooltip/Tooltip';
-
-const ipc = window.electron.ipcRenderer;
 
 interface IProps {
   recorderStatus: RecStatus;
@@ -65,7 +57,6 @@ interface IProps {
   errorReports: ErrorReport[];
   savingStatus: SaveStatus;
   config: ConfigurationSchema;
-  updateAvailable: boolean;
   recorderCategory: VideoCategory | undefined;
   activityStatus: ActivityStatus | null;
   advancedLoggingStatus: AdvancedLoggingStatus;
@@ -85,7 +76,6 @@ const SideMenu = (props: IProps) => {
     errorReports,
     savingStatus,
     config,
-    updateAvailable,
     activityStatus,
     advancedLoggingStatus,
     setPreviewEnabled,
@@ -93,8 +83,6 @@ const SideMenu = (props: IProps) => {
 
   const [appVersion, setAppVersion] = useState<string>();
   const { category, language } = appState;
-  const lastManualStartStopClickRef = useRef(0);
-  const isLinux = window.electron.platform === 'linux';
 
   useEffect(() => {
     window.electron.ipcRenderer.on('updateVersionDisplay', (t: unknown) => {
@@ -103,61 +91,6 @@ const SideMenu = (props: IProps) => {
       }
     });
   }, []);
-
-  useEffect(() => {
-    // If the recording status changes, reset the last manual start/stop click time.
-    lastManualStartStopClickRef.current = 0;
-  }, [recorderStatus]);
-
-  const renderManualStopStartButton = () => {
-    if (isLinux) {
-      return <></>;
-    }
-
-    const recordingOrReady =
-      recorderStatus !== RecStatus.Recording &&
-      recorderStatus !== RecStatus.ReadyToRecord;
-
-    const recordingNonManual =
-      recorderCategory && recorderCategory !== VideoCategory.Manual;
-
-    const disabled =
-      !config.manualRecord || // Disable the buttons if manual recording is disabled.
-      recordingOrReady || // Disable if not recording or ready to record.
-      recordingNonManual; // If recording something else don't show the stop button.
-
-    if (disabled) {
-      return <></>;
-    }
-
-    let icon = <Play size={14} fill="currentColor" />;
-    let tooltip = getLocalePhrase(language, Phrase.StartManualRecordingTooltip);
-
-    if (recorderStatus === RecStatus.Recording) {
-      icon = <Square size={14} fill="currentColor" />;
-      tooltip = getLocalePhrase(language, Phrase.StopManualRecordingTooltip);
-    }
-
-    return (
-      <Tooltip content={tooltip}>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="mx-2 p-1 h-6 w-6 hover:bg-secondary"
-          onClick={() => {
-            // Drops spam clicks, only let one click per second.
-            // Gets reset on recorder status change.
-            const now = Date.now();
-            if (now - lastManualStartStopClickRef.current < 1000) return;
-            lastManualStartStopClickRef.current = now;
-            ipc.toggleManualRecording();
-          }}
-        >
-          {icon}
-        </Button>
-      </Tooltip>
-    );
-  };
 
   const renderCategoryTab = (
     tabCategory: VideoCategory,
@@ -194,7 +127,6 @@ const SideMenu = (props: IProps) => {
           )}
         </Menu.Item.Icon>
         {getLocaleCategoryLabel(language, tabCategory)}
-        {tabCategory === VideoCategory.Manual && renderManualStopStartButton()}
         <Menu.Item.Badge value={numCategoryVideos} />
       </Menu.Item>
     );
@@ -207,17 +139,6 @@ const SideMenu = (props: IProps) => {
           <Cog />
         </Menu.Item.Icon>
         {getLocalePhrase(language, Phrase.GeneralButtonText)}
-      </Menu.Item>
-    );
-  };
-
-  const renderSceneTab = () => {
-    return (
-      <Menu.Item value={Pages.SceneEditor} className="py-1.5">
-        <Menu.Item.Icon>
-          <MonitorCog />
-        </Menu.Item.Icon>
-        {getLocalePhrase(language, Phrase.SceneButtonText)}
       </Menu.Item>
     );
   };
@@ -302,16 +223,11 @@ const SideMenu = (props: IProps) => {
             {getLocalePhrase(language, Phrase.SettingsHeading)}
           </Menu.Label>
           {renderSettingsTab()}
-          {!isLinux && renderSceneTab()}
         </Menu>
       </ScrollArea>
       <div className="mt-auto w-full">
         <Separator className="mb-4" />
         <div className="flex items-center justify-center gap-x-4">
-          <UpdateNotifier
-            updateAvailable={updateAvailable}
-            appState={appState}
-          />
           <LogsButton appState={appState} />
           <TestButton recorderStatus={recorderStatus} appState={appState} />
           <DiscordButton appState={appState} />

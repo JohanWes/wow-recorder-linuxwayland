@@ -3,15 +3,6 @@ export const enum ERecordingState {
   Recording = 'recording',
 }
 
-export const enum EOBSOutputSignal {
-  Starting = 'starting',
-  Start = 'start',
-  Stopping = 'stopping',
-  Stop = 'stop',
-  Activate = 'activate',
-  Deactivate = 'deactivate',
-}
-
 export enum ESupportedEncoders {
   OBS_X264 = 'obs_x264',
   AMD_H264 = 'h264_texture_amf',
@@ -29,11 +20,4 @@ export enum QualityPresets {
   HIGH = 'High',
   MODERATE = 'Moderate',
   LOW = 'Low',
-}
-
-export const enum CaptureMode {
-  WINDOW,
-  GAME,
-  MONITOR,
-  NONE,
 }

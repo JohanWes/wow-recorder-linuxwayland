@@ -25,7 +25,6 @@ export type Channels =
   | 'clip'
   | 'deleteVideos'
   | 'writeClipboard'
-  | 'doAppUpdate'
   | 'volmeter'
   | 'audioSettingsOpen'
   | 'audioSettingsClosed'

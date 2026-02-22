@@ -24,7 +24,7 @@ interface IProps {
   setAppState: React.Dispatch<React.SetStateAction<AppState>>;
 }
 
-const WindowsSettings = (props: IProps) => {
+const LocaleSettings = (props: IProps) => {
   const { config, setConfig, appState, setAppState } = props;
   const initialRender = React.useRef(true);
 
@@ -145,4 +145,4 @@ const WindowsSettings = (props: IProps) => {
   );
 };
 
-export default WindowsSettings;
+export default LocaleSettings;

@@ -299,7 +299,6 @@ type AudioSource = {
  */
 enum Pages {
   'None',
-  'SceneEditor',
   'Settings',
 }
 

@@ -108,7 +108,6 @@ enum Phrase {
   SeparateBufferFolderLabel,
   BufferFolderLabel,
   MaxDiskStorageLabel,
-  WindowsSettingsLabel,
   RunOnStartupLabel,
   StartMinimizedLabel,
   MinimizeOnQuitLabel,

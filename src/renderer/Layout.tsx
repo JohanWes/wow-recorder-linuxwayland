@@ -1,14 +1,7 @@
 import * as React from 'react';
-import {
-  AdvancedLoggingStatus,
-  Pages,
-  RecStatus,
-  AppState,
-  RendererVideo,
-} from 'main/types';
+import { Pages, RecStatus, AppState, RendererVideo } from 'main/types';
 import { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import { ConfigurationSchema } from 'config/configSchema';
-import SceneEditor from './SceneEditor';
 import SettingsPage from './SettingsPage';
 import CategoryPage from './CategoryPage';
 
@@ -22,9 +15,6 @@ interface IProps {
   playerHeight: MutableRefObject<number>;
   config: ConfigurationSchema;
   setConfig: Dispatch<SetStateAction<ConfigurationSchema>>;
-  advancedLoggingStatus: AdvancedLoggingStatus;
-  previewEnabled: boolean;
-  setPreviewEnabled: Dispatch<SetStateAction<boolean>>;
 }
 
 /**
@@ -41,9 +31,6 @@ const Layout = (props: IProps) => {
     playerHeight,
     config,
     setConfig,
-    advancedLoggingStatus,
-    previewEnabled,
-    setPreviewEnabled,
   } = props;
   const { page, category } = appState;
 
@@ -69,20 +56,6 @@ const Layout = (props: IProps) => {
         setConfig={setConfig}
         appState={appState}
         setAppState={setAppState}
-        advancedLoggingStatus={advancedLoggingStatus}
-      />
-    );
-  };
-
-  const renderSceneEditor = () => {
-    return (
-      <SceneEditor
-        recorderStatus={recorderStatus}
-        appState={appState}
-        config={config}
-        setConfig={setConfig}
-        previewEnabled={previewEnabled}
-        setPreviewEnabled={setPreviewEnabled}
       />
     );
   };
@@ -90,7 +63,6 @@ const Layout = (props: IProps) => {
   return (
     <>
       {page === Pages.Settings && renderSettingsPage()}
-      {page === Pages.SceneEditor && renderSceneEditor()}
       {page === Pages.None && renderCategoryPage()}
     </>
   );

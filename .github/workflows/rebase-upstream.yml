@@ -51,16 +51,16 @@ jobs:
             exit 0
           fi
 
-          pro_paths_regex='^(src/storage/CloudClient.ts|src/renderer/CloudSettings.tsx|src/renderer/PatreonButton.tsx|src/renderer/VideoChat.tsx|src/renderer/ConfirmChatNamePrompt.tsx|src/renderer/containers/ApplicationStatusCard/CloudStatus.tsx|src/renderer/containers/ApplicationStatusCard/CloudStatusCard.tsx|src/renderer/BulkTransferDialog.tsx|src/renderer/StorageFilterToggle.tsx|src/types/api.ts|src/main/Recorder.ts|binaries/rust-ps.exe|installer.nsh)$'
+          fork_removed_paths_regex='^(src/storage/CloudClient.ts|src/renderer/CloudSettings.tsx|src/renderer/PatreonButton.tsx|src/renderer/VideoChat.tsx|src/renderer/ConfirmChatNamePrompt.tsx|src/renderer/containers/ApplicationStatusCard/CloudStatus.tsx|src/renderer/containers/ApplicationStatusCard/CloudStatusCard.tsx|src/renderer/BulkTransferDialog.tsx|src/renderer/StorageFilterToggle.tsx|src/types/api.ts|src/main/Recorder.ts|src/main/AppUpdater.ts|binaries/rust-ps.exe|installer.nsh|src/renderer/WindowsSettings.tsx|src/renderer/ManualSettings.tsx|src/renderer/SceneEditor.tsx|src/renderer/RecorderPreview.tsx|src/renderer/VideoSourceControls.tsx|src/renderer/AudioSourceControls.tsx|src/renderer/VideoBaseControls.tsx|src/renderer/ChatOverlayControls.tsx|src/renderer/containers/UpdateNotifier/UpdateNotifier.tsx)$'
 
           rebase_failed="false"
 
           if ! git rebase upstream/main; then
-            # Auto-resolve known fork-local conflicts (README + removed pro paths).
+            # Auto-resolve known fork-local conflicts (README + removed fork paths).
             while [ -d .git/rebase-apply ] || [ -d .git/rebase-merge ]; do
               conflicts="$(git diff --name-only --diff-filter=U || true)"
               conflict_count="$(printf '%s\n' "${conflicts}" | sed '/^$/d' | wc -l | awk '{print $1}')"
-              non_pro_conflicts="$(printf '%s\n' "${conflicts}" | sed '/^$/d' | grep -Ev "${pro_paths_regex}" || true)"
+              non_fork_removed_conflicts="$(printf '%s\n' "${conflicts}" | sed '/^$/d' | grep -Ev "${fork_removed_paths_regex}" || true)"
 
               if [ "${conflict_count}" -eq 1 ] && [ "${conflicts}" = "README.md" ]; then
                 echo "Auto-resolving README.md conflict (keeping fork version)."
@@ -70,11 +70,11 @@ jobs:
                   rebase_failed="true"
                   break
                 fi
-              elif [ "${conflict_count}" -gt 0 ] && [ -z "${non_pro_conflicts}" ]; then
-                echo "Auto-resolving pro-only conflict(s) (enforcing fork pro-free state)."
+              elif [ "${conflict_count}" -gt 0 ] && [ -z "${non_fork_removed_conflicts}" ]; then
+                echo "Auto-resolving fork-removed conflict(s) (enforcing pro-free/linux-only state)."
                 while IFS= read -r f; do
                   [ -z "${f}" ] && continue
-                  # This fork permanently removes these pro-only files.
+                  # This fork permanently removes pro-only and windows-only files.
                   # Always stage deletion so they cannot be reintroduced by upstream edits.
                   git rm -f --ignore-unmatch "${f}" || true
                 done <<< "$(printf '%s\n' "${conflicts}" | sed '/^$/d')"
