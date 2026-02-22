@@ -32,7 +32,6 @@ import Manager from './Manager';
 import AppUpdater from './AppUpdater';
 import MenuBuilder from './menu';
 import { Phrase } from 'localisation/phrases';
-import CloudClient from 'storage/CloudClient';
 import DiskClient from 'storage/DiskClient';
 import Poller from 'utils/Poller';
 import Recorder from './recording/Recorder';
@@ -227,14 +226,10 @@ const createWindow = async () => {
     // refresh, otherwise the frontend will be in its default state
     // which may not reflect reality.
     const disk = DiskClient.getInstance();
-    const cloud = CloudClient.getInstance();
-
     await Promise.all([
       manager.refreshStatus(),
       disk.refreshStatus(),
       disk.refreshVideos(),
-      cloud.refreshStatus(),
-      cloud.refreshVideos(),
     ]);
 
     // Linux-only: best-effort dependency checks for portal/PipeWire/GSR.
@@ -582,35 +577,6 @@ ipcMain.on('openURL', (event, args) => {
  */
 ipcMain.handle('getAllDisplays', (): OurDisplayType[] => {
   return getAvailableDisplays();
-});
-
-const refreshCloudGuilds = async () => {
-  console.info('[Main] Frontend triggered cloud guilds refresh');
-  const client = CloudClient.getInstance();
-  await client.fetchAffiliations(true);
-  client.refreshStatus();
-};
-
-ipcMain.on('refreshCloudGuilds', refreshCloudGuilds);
-
-ipcMain.handle('getOrCreateChatCorrelator', async (event, video) => {
-  const client = CloudClient.getInstance();
-  return client.getOrCreateChatCorrelator(video);
-});
-
-ipcMain.handle('getChatMessages', async (event, correlator) => {
-  const client = CloudClient.getInstance();
-  return client.getChatMessages(correlator);
-});
-
-ipcMain.on('postChatMessage', (event, correlator, message) => {
-  const client = CloudClient.getInstance();
-  client.postChatMessage(correlator, message);
-});
-
-ipcMain.on('deleteChatMessage', (event, id) => {
-  const client = CloudClient.getInstance();
-  client.deleteChatMessage(id);
 });
 
 /**

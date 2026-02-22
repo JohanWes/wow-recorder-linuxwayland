@@ -6,7 +6,6 @@ import GeneralSettings from './GeneralSettings';
 import FlavourSettings from './FlavourSettings';
 import PVESettings from './PVESettings';
 import PVPSettings from './PVPSettings';
-import CloudSettings from './CloudSettings';
 import {
   Tabs,
   TabsList,
@@ -49,9 +48,6 @@ const SettingsPage: React.FC<IProps> = (props: IProps) => {
           </TabsTrigger>
           <TabsTrigger value="game">
             {getLocalePhrase(appState.language, Phrase.SettingsPageGameHeader)}
-          </TabsTrigger>
-          <TabsTrigger value="pro">
-            {getLocalePhrase(appState.language, Phrase.SettingsPageProHeader)}
           </TabsTrigger>
         </TabsList>
         <ScrollArea
@@ -156,24 +152,6 @@ const SettingsPage: React.FC<IProps> = (props: IProps) => {
                     setConfig={setConfig}
                   />
                 )}
-              </div>
-            </div>
-          </TabsContent>
-          <TabsContent value="pro">
-            <div className="p-4 flex flex-col gap-y-8">
-              <div>
-                <CategoryHeading>
-                  {getLocalePhrase(
-                    appState.language,
-                    Phrase.CloudSettingsLabel,
-                  )}
-                </CategoryHeading>
-                <Separator className="mt-2 mb-4" />
-                <CloudSettings
-                  appState={appState}
-                  config={config}
-                  setConfig={setConfig}
-                />
               </div>
             </div>
           </TabsContent>

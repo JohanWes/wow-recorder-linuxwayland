@@ -4,7 +4,7 @@ import { RawChallengeModeTimelineSegment } from './keystone';
 import { VideoCategory } from '../types/VideoCategory';
 import { Tag } from 'react-tag-autocomplete';
 import { DateValueType } from 'react-tailwindcss-datepicker';
-import { ESupportedEncoders } from './obsEnums';
+import { QualityPresets } from './obsEnums';
 
 /**
  * Application recording status.
@@ -222,28 +222,6 @@ type Metadata = {
   uniqueHash?: string; // used for cloud video grouping
   bossPercent?: number;
   appVersion?: string;
-  encoder?: ESupportedEncoders; // encoder used to record
-  size?: number; // size of video in bytes
-};
-
-/**
- * We mandata some fields are present for cloud videos that are optional for
- * disk based videos.
- */
-type CloudMetadata = Metadata & {
-  videoName: string;
-  videoKey: string;
-  start: number;
-  uniqueHash: string;
-};
-
-/**
- * When we retrieve state from the WCR API, we have a few additional entries
- * in the data, these are signed by the API so that we can read them without
- * the client having credentials.
- */
-type CloudSignedMetadata = CloudMetadata & {
-  signedVideoKey: string;
 };
 
 /**
@@ -330,8 +308,6 @@ enum Pages {
  */
 enum StorageFilter {
   DISK = 'Disk',
-  CLOUD = 'Cloud',
-  BOTH = 'Both',
 }
 
 /**
@@ -349,25 +325,8 @@ type AppState = {
   videoFullScreen: boolean;
   playing: boolean;
   language: Language;
-  cloudStatus: CloudStatus;
   diskStatus: DiskStatus;
-  chatOpen: boolean;
   preferredViewpoint: string;
-};
-
-type AdvancedLoggingStatus = {
-  retail: boolean;
-  classic: boolean;
-  era: boolean;
-  retailPtr: boolean;
-  classicPtr: boolean;
-};
-
-type CloudState = {
-  uploadProgress: number;
-  downloadProgress: number;
-  queuedUploads: number;
-  queuedDownloads: number;
 };
 
 type TPreviewPosition = {
@@ -446,14 +405,6 @@ type ObsAudioConfig = {
   pushToTalkModifiers: string;
 };
 
-type CloudConfig = {
-  cloudStorage: boolean;
-  cloudUpload: boolean;
-  cloudAccountName: string;
-  cloudAccountPassword: string;
-  cloudGuildName: string;
-};
-
 enum DeathMarkers {
   NONE = 'None',
   OWN = 'Own',
@@ -478,28 +429,9 @@ type SliderMark = {
   label: JSX.Element;
 };
 
-type CloudStatus = {
-  enabled: boolean;
-  authenticated: boolean;
-  authorized: boolean;
-  guild: string;
-  available: string[];
-  read: boolean; // Always true for now.
-  write: boolean;
-  del: boolean;
-  usage: number;
-  limit: number;
-};
-
 type DiskStatus = {
   usage: number;
   limit: number;
-};
-
-type CloudObject = {
-  key: string;
-  size: number;
-  lastMod: Date;
 };
 
 interface IBrowserWindow {
@@ -697,20 +629,15 @@ export {
   ObsVideoConfig,
   ObsOverlayConfig,
   ObsAudioConfig,
-  CloudConfig,
   DeathMarkers,
   VideoMarker,
   MarkerColors,
   MicStatus,
   ErrorReport,
   SliderMark,
-  CloudStatus,
   DiskStatus,
-  CloudObject,
   IBrowserWindow,
   UploadQueueItem,
-  CloudMetadata,
-  CloudSignedMetadata,
   CreateMultiPartUploadResponseBody,
   CompleteMultiPartUploadRequestBody,
   StorageFilter,
@@ -724,9 +651,7 @@ export {
   BoxDimensions,
   WowProcessEvent,
   SoundAlerts,
-  CloudState,
   ActivityStatus,
-  AdvancedLoggingStatus,
   KillVideoQueueItem,
   KillVideoSegment,
   KillVideoStatus,

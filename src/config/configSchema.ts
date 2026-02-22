@@ -61,26 +61,6 @@ export type ConfigurationSchema = {
   obsAudioSuppression: boolean;
   raidOverrun: number;
   dungeonOverrun: number;
-  cloudStorage: boolean;
-  cloudUpload: boolean;
-  cloudUploadRetail: boolean;
-  cloudUploadClassic: boolean;
-  cloudUploadRateLimit: boolean;
-  cloudUploadRateLimitMbps: number;
-  cloudAccountName: string;
-  cloudAccountPassword: string;
-  cloudGuildName: string;
-  cloudUpload2v2: boolean;
-  cloudUpload3v3: boolean;
-  cloudUpload5v5: boolean;
-  cloudUploadSkirmish: boolean;
-  cloudUploadSoloShuffle: boolean;
-  cloudUploadDungeons: boolean;
-  cloudUploadRaids: boolean;
-  cloudUploadBattlegrounds: boolean;
-  cloudUploadRaidMinDifficulty: string;
-  cloudUploadDungeonMinLevel: number;
-  cloudUploadClips: boolean;
   language: string;
   hideEmptyCategories: boolean;
   hardwareAcceleration: boolean;
@@ -483,106 +463,6 @@ export const configSchema = {
     default: 5,
     minimum: 0,
     maximum: 60,
-  },
-  cloudStorage: {
-    description: Phrase.CloudStorageDescription,
-    type: 'boolean',
-    default: false,
-  },
-  cloudUpload: {
-    description: Phrase.CloudUploadDescription,
-    type: 'boolean',
-    default: false,
-  },
-  cloudUploadRetail: {
-    description: Phrase.CloudUploadRetailDescription,
-    type: 'boolean',
-    default: true,
-  },
-  cloudUploadClassic: {
-    description: Phrase.CloudUploadClassicDescription,
-    type: 'boolean',
-    default: true,
-  },
-  cloudUploadRateLimit: {
-    description: Phrase.CloudUploadRateLimitDescription,
-    type: 'boolean',
-    default: false,
-  },
-  cloudUploadRateLimitMbps: {
-    description: Phrase.CloudUploadRateLimitMbpsDescription,
-    type: 'integer',
-    default: 100,
-  },
-  cloudAccountName: {
-    description: Phrase.CloudAccountNameDescription,
-    type: 'string',
-    default: '',
-  },
-  cloudAccountPassword: {
-    description: Phrase.CloudAccountPasswordDescription,
-    type: 'string',
-    default: '',
-  },
-  cloudGuildName: {
-    description: Phrase.CloudGuildNameDescription,
-    type: 'string',
-    default: '',
-  },
-  cloudUpload2v2: {
-    description: Phrase.CloudUpload2v2Description,
-    type: 'boolean',
-    default: true,
-  },
-  cloudUpload3v3: {
-    description: Phrase.CloudUpload3v3Description,
-    type: 'boolean',
-    default: true,
-  },
-  cloudUpload5v5: {
-    description: Phrase.CloudUpload5v5Description,
-    type: 'boolean',
-    default: true,
-  },
-  cloudUploadSkirmish: {
-    description: Phrase.CloudUploadSkirmishDescription,
-    type: 'boolean',
-    default: true,
-  },
-  cloudUploadSoloShuffle: {
-    description: Phrase.CloudUploadSoloShuffleDescription,
-    type: 'boolean',
-    default: true,
-  },
-  cloudUploadDungeons: {
-    description: Phrase.CloudUploadDungeonsDescription,
-    type: 'boolean',
-    default: true,
-  },
-  cloudUploadRaids: {
-    description: Phrase.CloudUploadRaidsDescription,
-    type: 'boolean',
-    default: true,
-  },
-  cloudUploadBattlegrounds: {
-    description: Phrase.CloudUploadBattlegroundsDescription,
-    type: 'boolean',
-    default: true,
-  },
-  cloudUploadRaidMinDifficulty: {
-    description: Phrase.CloudUploadRaidMinDifficultyDescription,
-    type: 'string',
-    default: 'LFR',
-  },
-  cloudUploadDungeonMinLevel: {
-    description: Phrase.CloudUploadDungeonMinLevelDescription,
-    type: 'integer',
-    default: 2,
-  },
-  cloudUploadClips: {
-    description: Phrase.CloudUploadClipsDescription,
-    type: 'boolean',
-    default: true,
   },
   language: {
     description: Phrase.LanguageDescription,

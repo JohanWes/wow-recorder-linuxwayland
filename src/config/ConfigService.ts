@@ -80,10 +80,6 @@ export default class ConfigService
 
     const loggable = this._store.store;
 
-    if (loggable.cloudAccountPassword) {
-      loggable.cloudAccountPassword = '**********';
-    }
-
     console.info('[Config Service] Using configuration', loggable);
 
     this._store.onDidAnyChange((newValue: any, oldValue: any) => {
@@ -281,10 +277,6 @@ export default class ConfigService
   }
 
   private static logConfigChanged(newConfig: { [key: string]: any }): void {
-    if (newConfig.cloudAccountPassword) {
-      newConfig.cloudAccountPassword = '**********';
-    }
-
     console.info('[Config Service] Configuration changed:', newConfig);
   }
 }

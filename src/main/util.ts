@@ -22,7 +22,6 @@ import {
   OurDisplayType,
   RendererVideo,
   ObsAudioConfig,
-  CloudSignedMetadata,
   KillVideoSegment,
 } from './types';
 import { VideoCategory } from '../types/VideoCategory';
@@ -150,9 +149,7 @@ const getMetadataFileNameForVideo = (video: string) => {
  * this translates them back to english so we can process them. This is
  * purely to bridge the gap, and in theory could be removed in the future.
  */
-const convertKoreanVideoCategory = (
-  metadata: Metadata | CloudSignedMetadata,
-) => {
+const convertKoreanVideoCategory = (metadata: Metadata) => {
   const raw = metadata as any;
 
   if (raw.category === '연습전투') {
@@ -712,47 +709,6 @@ const markForVideoForDelete = async (videoPath: string) => {
 };
 
 /**
- * Convert a RendererVideo type to a Metadata type, used when downloading
- * videos from cloud to disk.
- */
-const rendererVideoToMetadata = (video: RendererVideo) => {
-  const data = video as any;
-  delete data.videoSource;
-  delete data.videoName;
-  delete data.mtime;
-  delete data.isProtected;
-  delete data.cloud;
-  delete data.multiPov;
-  delete data.uniqueId;
-  return data as Metadata;
-};
-
-/**
- * Convert a CloudSignedMetadata object to a RendererVideo object.
- */
-const cloudSignedMetadataToRendererVideo = (metadata: CloudSignedMetadata) => {
-  // For cloud videos, the signed URLs are the sources.
-  const videoSource = metadata.signedVideoKey;
-  const uniqueId = `${metadata.videoName}-cloud`;
-
-  // We don't want the signed properties themselves.
-  const mutable: any = metadata;
-  delete mutable.signedVideoKey;
-
-  const video: RendererVideo = {
-    ...mutable,
-    videoSource,
-    multiPov: [],
-    cloud: true,
-    isProtected: Boolean(mutable.protected),
-    mtime: 0,
-    uniqueId,
-  };
-
-  return video;
-};
-
-/**
  * Check if a file or folder exists.
  */
 const exists = async (file: string) => {
@@ -1098,8 +1054,6 @@ export {
   reverseChronologicalVideoSort,
   areDatesWithinSeconds,
   markForVideoForDelete,
-  rendererVideoToMetadata,
-  cloudSignedMetadataToRendererVideo,
   exists,
   isFolderOwned,
   takeOwnershipStorageDir,

@@ -927,8 +927,7 @@ const getVideoCategoryFilter = (category: VideoCategory) => {
 
 const getVideoStorageFilter = (filter: StorageFilter) => {
   if (filter === StorageFilter.DISK) return (rv: RendererVideo) => !rv.cloud;
-  if (filter === StorageFilter.CLOUD) return (rv: RendererVideo) => rv.cloud;
-  return () => true;
+  return (rv: RendererVideo) => !rv.cloud;
 };
 
 const getFirstInCategory = (

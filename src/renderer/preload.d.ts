@@ -1,9 +1,7 @@
 import ElectronStore from 'electron-store';
-import { QualityPresets } from 'main/obsEnums';
 import { Channels } from 'main/preload';
 import { AudioSourceType, KillVideoSegment, RendererVideo, SceneItem } from 'main/types';
 import { ObsProperty, SceneItemPosition, SourceDimensions } from 'noobs';
-import { TChatMessageWithId } from 'types/api';
 
 declare global {
   interface Window {
@@ -76,14 +74,8 @@ declare global {
         reconfigureVideo(): void;
         reconfigureAudio(): void;
         reconfigureOverlay(): void;
-        reconfigureCloud(): void;
 
         getSensibleEncoderDefault(): Promise<string>;
-        refreshCloudGuilds(): void;
-        getOrCreateChatCorrelator(video: RendererVideo): Promise<string>;
-        getChatMessages(correlator: string): Promise<TChatMessageWithId[]>;
-        postChatMessage(correlator: string, message: string): void;
-        deleteChatMessage(id: number): void;
         toggleManualRecording(): void;
         forceStopRecording(): void;
 

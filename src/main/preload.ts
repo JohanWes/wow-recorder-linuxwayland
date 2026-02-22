@@ -1,12 +1,15 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 import { ObsProperty, SceneItemPosition, SourceDimensions } from 'noobs';
-import { AudioSourceType, RendererVideo, SceneItem } from './types';
-import { TChatMessageWithId } from 'types/api';
+import {
+  AudioSourceType,
+  KillVideoSegment,
+  RendererVideo,
+  SceneItem,
+} from './types';
 
 export type Channels =
   | 'window'
-  | 'videoButtonDisk'
-  | 'videoButtonCloud'
+  | 'videoButton'
   | 'logPath'
   | 'openURL'
   | 'test'
@@ -20,10 +23,8 @@ export type Channels =
   | 'selectFile'
   | 'getNextKeyPress'
   | 'clip'
-  | 'deleteVideosDisk'
-  | 'deleteVideosCloud'
+  | 'deleteVideos'
   | 'writeClipboard'
-  | 'getShareableLink'
   | 'doAppUpdate'
   | 'volmeter'
   | 'audioSettingsOpen'
@@ -49,10 +50,8 @@ export type Channels =
   | 'reconfigureVideo'
   | 'reconfigureAudio'
   | 'reconfigureOverlay'
-  | 'reconfigureCloud'
   | 'getSensibleEncoderDefault'
-  | 'getLinuxGsrAudioDevices'
-  | 'refreshCloudGuilds';
+  | 'getLinuxGsrAudioDevices';
 
 contextBridge.exposeInMainWorld('electron', {
   platform: process.platform,
@@ -202,32 +201,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.send('reconfigureOverlay');
     },
 
-    reconfigureCloud() {
-      ipcRenderer.send('reconfigureCloud');
-    },
-
     getSensibleEncoderDefault(): Promise<string> {
       return ipcRenderer.invoke('getSensibleEncoderDefault');
-    },
-
-    refreshCloudGuilds() {
-      ipcRenderer.send('refreshCloudGuilds');
-    },
-
-    getOrCreateChatCorrelator(video: RendererVideo): Promise<string> {
-      return ipcRenderer.invoke('getOrCreateChatCorrelator', video);
-    },
-
-    getChatMessages(correlator: string): Promise<TChatMessageWithId[]> {
-      return ipcRenderer.invoke('getChatMessages', correlator);
-    },
-
-    postChatMessage(correlator: string, message: string) {
-      ipcRenderer.send('postChatMessage', correlator, message);
-    },
-
-    deleteChatMessage(id: number) {
-      ipcRenderer.send('deleteChatMessage', id);
     },
 
     toggleManualRecording() {
@@ -242,7 +217,7 @@ contextBridge.exposeInMainWorld('electron', {
       width: number,
       height: number,
       fps: number,
-      sources: RendererVideo[],
+      sources: KillVideoSegment[],
       audioTrackIndex: number,
     ) {
       ipcRenderer.send(

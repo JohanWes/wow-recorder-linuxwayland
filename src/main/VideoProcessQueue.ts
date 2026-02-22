@@ -1,9 +1,8 @@
 import path from 'path';
-import { getBaseConfig, shouldUpload } from '../utils/configUtils';
+import { getBaseConfig } from '../utils/configUtils';
 import DiskSizeMonitor from '../storage/DiskSizeMonitor';
 import ConfigService from '../config/ConfigService';
 import {
-  CloudMetadata,
   DiskStatus,
   KillVideoQueueItem,
   KillVideoStatus,
@@ -14,19 +13,13 @@ import {
 } from './types';
 import {
   writeMetadataFile,
-  getMetadataForVideo,
-  rendererVideoToMetadata,
-  getFileInfo,
   fixPathWhenPackaged,
-  logAxiosError,
   tryUnlink,
   buildKillVideoMetadata,
   getOBSFormattedDate,
 } from './util';
-import CloudClient from '../storage/CloudClient';
 import { send } from './main';
 import ffmpeg from 'fluent-ffmpeg';
-import axios from 'axios';
 import DiskClient from 'storage/DiskClient';
 import Recorder from './recording/Recorder';
 
@@ -265,14 +258,6 @@ export default class VideoProcessQueue {
       // the video due to a timeout.
       const videoPath = await this.cutVideo(data, outputDir);
       await writeMetadataFile(videoPath, data.metadata);
-
-      const readyToUpload = await CloudClient.getInstance().ready();
-      const upload = readyToUpload && shouldUpload(this.cfg, data.metadata);
-
-      if (upload) {
-        const item: UploadQueueItem = { path: videoPath };
-        this.queueUpload(item);
-      }
     } catch (error) {
       console.error(
         '[VideoProcessQueue] Error processing video:',
@@ -290,68 +275,10 @@ export default class VideoProcessQueue {
     item: UploadQueueItem,
     done: () => void,
   ): Promise<void> {
-    let lastProgress = 0;
-
-    // Decide if we need to use a rate limit or not. Setting to -1 is unlimited.
-    const rateLimit = this.cfg.get<boolean>('cloudUploadRateLimit')
-      ? this.cfg.get<number>('cloudUploadRateLimitMbps')
-      : -1;
-
-    const progressCallback = (progress: number) => {
-      if (progress === lastProgress) {
-        return;
-      }
-
-      send('updateUploadProgress', progress);
-      lastProgress = progress;
-    };
-
-    const client = CloudClient.getInstance();
-
-    try {
-      // Upload the video first, this can take a bit of time, and don't want
-      // to confuse the frontend by having metadata without video.
-      await client.putFile(item.path, rateLimit, progressCallback);
-      progressCallback(100);
-
-      // Now add the metadata.
-      const metadata = await getMetadataForVideo(item.path);
-
-      const cloudMetadata: CloudMetadata = {
-        ...metadata,
-        start: metadata.start || 0,
-        uniqueHash: metadata.uniqueHash || '',
-        videoName: path.basename(item.path, '.mp4'),
-        videoKey: path.basename(item.path),
-      };
-
-      if (cloudMetadata.level) {
-        // The string "level" isn't a valid SQL column name, in new videos we
-        // use the keystoneLevel entry in the metadata, but if we're uploading
-        // an old video correct it here at the point of upload.
-        cloudMetadata.keystoneLevel = cloudMetadata.level;
-        delete cloudMetadata.level;
-      }
-
-      if (cloudMetadata.start === 0) {
-        // Another "old videos don't have..." bug, this time for the start
-        // parameter, which causes dates to be wrong in the UI. Grab the date
-        // from the video file on disk.
-        const stats = await getFileInfo(item.path);
-        cloudMetadata.start = stats.mtime;
-      }
-
-      await client.postVideo(cloudMetadata);
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        const msg = '[CloudClient] Axios error processing video';
-        logAxiosError(msg, error);
-      } else {
-        console.error('[CloudClient] Error processing video', error);
-      }
-
-      progressCallback(100);
-    }
+    console.info(
+      '[VideoProcessQueue] Ignoring upload queue item; cloud features are disabled',
+      item.path,
+    );
 
     done();
   }
@@ -364,43 +291,10 @@ export default class VideoProcessQueue {
     video: RendererVideo,
     done: () => void,
   ): Promise<void> {
-    const storageDir = this.cfg.get<string>('storagePath');
-    const { videoName, videoSource } = video;
-
-    let lastProgress = 0;
-
-    const progressCallback = (progress: number) => {
-      if (progress === lastProgress) {
-        return;
-      }
-
-      send('updateDownloadProgress', progress);
-      lastProgress = progress;
-    };
-
-    const client = CloudClient.getInstance();
-
-    try {
-      await client.getAsFile(
-        `${videoName}.mp4`,
-        videoSource,
-        storageDir,
-        progressCallback,
-      );
-
-      // Spread to force this to be cloned, avoiding modifying the original input,
-      // which is used again later. This manifested as a bug that prevented us clearing
-      // the entry from the inProgressDownloads when done, meaning that a repeated
-      // attempt to download would fail.
-      const metadata = rendererVideoToMetadata({ ...video });
-      const videoPath = path.join(storageDir, `${videoName}.mp4`);
-      await writeMetadataFile(videoPath, metadata);
-    } catch (error) {
-      console.error(
-        '[VideoProcessQueue] Error downloading video:',
-        String(error),
-      );
-    }
+    console.info(
+      '[VideoProcessQueue] Ignoring download queue item; cloud features are disabled',
+      video.videoName,
+    );
 
     done();
   }
@@ -491,14 +385,20 @@ export default class VideoProcessQueue {
    * Log an error uploading the video.
    */
   private static errorUploadingVideo(err: unknown) {
-    console.error('[VideoProcessQueue] Error uploading video', String(err));
+    console.error(
+      '[VideoProcessQueue] Error handling disabled upload queue item',
+      String(err),
+    );
   }
 
   /**
    * Log an error downloading the video.
    */
   private static errorDownloadingVideo(err: unknown) {
-    console.error('[VideoProcessQueue] Error downloading video', String(err));
+    console.error(
+      '[VideoProcessQueue] Error handling disabled download queue item',
+      String(err),
+    );
   }
 
   /**

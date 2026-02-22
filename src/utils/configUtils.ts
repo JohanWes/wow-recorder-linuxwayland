@@ -3,17 +3,11 @@ import {
   ObsVideoConfig,
   ObsAudioConfig,
   ObsOverlayConfig,
-  Metadata,
-  CloudConfig,
-  Flavour,
   AudioSource,
 } from 'main/types';
 import path from 'path';
 import ConfigService from '../config/ConfigService';
-import {
-  categoryRecordingSettings,
-  currentRetailEncounters,
-} from '../main/constants';
+import { categoryRecordingSettings } from '../main/constants';
 import { VideoCategory } from '../types/VideoCategory';
 import { ESupportedEncoders } from '../main/obsEnums';
 import { Language, Phrase } from 'localisation/phrases';
@@ -48,107 +42,6 @@ const allowRecordCategory = (cfg: ConfigService, category: VideoCategory) => {
   }
 
   console.info('[configUtils] Good to record:', category);
-  return true;
-};
-
-const shouldUpload = (cfg: ConfigService, metadata: Metadata) => {
-  const { category, flavour } = metadata;
-
-  const upload = cfg.get<boolean>('cloudUpload');
-
-  if (!upload) {
-    console.info('[configUtils] Cloud upload is disabled');
-    return false;
-  }
-
-  if (flavour === Flavour.Retail && !cfg.get<boolean>('cloudUploadRetail')) {
-    console.info('[configUtils] Retail upload is disabled');
-    return false;
-  }
-
-  if (flavour === Flavour.Classic && !cfg.get<boolean>('cloudUploadClassic')) {
-    console.info('[configUtils] Classic upload is disabled');
-    return false;
-  }
-
-  if (category === VideoCategory.Clips) {
-    const uploadClips = cfg.get<boolean>('cloudUploadClips');
-    console.info('[configUtils] Upload clip?', uploadClips);
-    return uploadClips;
-  }
-
-  const categoryConfig = categoryRecordingSettings[category];
-
-  if (!categoryConfig) {
-    console.info('[configUtils] Unrecognised category', category);
-    return false;
-  }
-
-  const categoryAllowed = cfg.get<boolean>(categoryConfig.autoUploadKey);
-
-  if (!categoryAllowed) {
-    console.info('[configUtils] Configured to not upload:', category);
-    return false;
-  }
-
-  if (category === VideoCategory.Raids) {
-    const { difficulty, encounterID } = metadata;
-
-    const uploadCurrentRaidOnly =
-      flavour === Flavour.Retail &&
-      cfg.get<boolean>('uploadCurrentRaidEncountersOnly');
-
-    if (
-      encounterID !== undefined &&
-      uploadCurrentRaidOnly &&
-      !currentRetailEncounters.includes(encounterID)
-    ) {
-      console.warn('[configUtils] Wont upload, not a current encounter');
-      return;
-    }
-
-    const orderedDifficulty = ['lfr', 'normal', 'heroic', 'mythic'];
-    const orderedDifficultyIDs = ['LFR', 'N', 'HC', 'M'];
-
-    const minDifficultyToUpload = cfg
-      .get<string>('cloudUploadRaidMinDifficulty')
-      .toLowerCase();
-
-    if (difficulty === undefined) {
-      console.info('[configUtils] Undefined difficulty, not blocking');
-      return true;
-    }
-
-    const configuredIndex = orderedDifficulty.indexOf(minDifficultyToUpload);
-    const actualIndex = orderedDifficultyIDs.indexOf(difficulty);
-
-    if (actualIndex < 0) {
-      console.info('[configUtils] Unrecognised difficulty, not blocking');
-      return true;
-    }
-
-    if (actualIndex < configuredIndex) {
-      console.info('[configUtils] Raid encounter below  upload threshold');
-      return false;
-    }
-  }
-
-  if (category === VideoCategory.MythicPlus) {
-    const minKeystoneLevel = cfg.get<number>('cloudUploadDungeonMinLevel');
-    const { keystoneLevel } = metadata;
-
-    if (keystoneLevel === undefined) {
-      console.info('[configUtils] Keystone level undefined, not blocking');
-      return true;
-    }
-
-    if (keystoneLevel < minKeystoneLevel) {
-      console.info('[configUtils] Keystone too low for upload');
-      return false;
-    }
-  }
-
-  console.info('[configUtils] Good to upload:', category);
   return true;
 };
 
@@ -240,18 +133,6 @@ const getOverlayConfig = (cfg: ConfigService): ObsOverlayConfig => {
     chatOverlayYPosition: cfg.get<number>('chatOverlayYPosition'),
     chatOverlayCropX: cfg.get<number>('chatOverlayCropX'),
     chatOverlayCropY: cfg.get<number>('chatOverlayCropY'),
-  };
-};
-
-const getCloudConfig = (): CloudConfig => {
-  const cfg = ConfigService.getInstance();
-
-  return {
-    cloudStorage: cfg.get<boolean>('cloudStorage'),
-    cloudUpload: cfg.get<boolean>('cloudUpload'),
-    cloudAccountName: cfg.get<string>('cloudAccountName'),
-    cloudAccountPassword: cfg.get<string>('cloudAccountPassword'),
-    cloudGuildName: cfg.get<string>('cloudGuildName'),
   };
 };
 
@@ -430,12 +311,10 @@ const validateBaseConfig = async (config: BaseConfig) => {
 
 export {
   allowRecordCategory,
-  shouldUpload,
   getBaseConfig,
   getObsVideoConfig,
   getObsAudioConfig,
   getOverlayConfig,
-  getCloudConfig,
   validateBaseConfig,
   getLocaleError,
 };

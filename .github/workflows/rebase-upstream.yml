@@ -51,18 +51,33 @@ jobs:
             exit 0
           fi
 
+          pro_paths_regex='^(src/storage/CloudClient.ts|src/renderer/CloudSettings.tsx|src/renderer/PatreonButton.tsx|src/renderer/VideoChat.tsx|src/renderer/ConfirmChatNamePrompt.tsx|src/renderer/containers/ApplicationStatusCard/CloudStatus.tsx|src/renderer/containers/ApplicationStatusCard/CloudStatusCard.tsx|src/renderer/BulkTransferDialog.tsx|src/renderer/StorageFilterToggle.tsx|src/types/api.ts)$'
+
           rebase_failed="false"
 
           if ! git rebase upstream/main; then
-            # If only README.md conflicts, keep the fork's README and continue.
+            # Auto-resolve known fork-local conflicts (README + removed pro paths).
             while [ -d .git/rebase-apply ] || [ -d .git/rebase-merge ]; do
               conflicts="$(git diff --name-only --diff-filter=U || true)"
               conflict_count="$(printf '%s\n' "${conflicts}" | sed '/^$/d' | wc -l | awk '{print $1}')"
+              non_pro_conflicts="$(printf '%s\n' "${conflicts}" | sed '/^$/d' | grep -Ev "${pro_paths_regex}" || true)"
 
               if [ "${conflict_count}" -eq 1 ] && [ "${conflicts}" = "README.md" ]; then
                 echo "Auto-resolving README.md conflict (keeping fork version)."
                 git checkout --theirs README.md
                 git add README.md
+                if ! git rebase --continue; then
+                  rebase_failed="true"
+                  break
+                fi
+              elif [ "${conflict_count}" -gt 0 ] && [ -z "${non_pro_conflicts}" ]; then
+                echo "Auto-resolving pro-only conflict(s) (enforcing fork pro-free state)."
+                while IFS= read -r f; do
+                  [ -z "${f}" ] && continue
+                  # This fork permanently removes these pro-only files.
+                  # Always stage deletion so they cannot be reintroduced by upstream edits.
+                  git rm -f --ignore-unmatch "${f}" || true
+                done <<< "$(printf '%s\n' "${conflicts}" | sed '/^$/d')"
                 if ! git rebase --continue; then
                   rebase_failed="true"
                   break
@@ -79,6 +94,12 @@ jobs:
           if [ "${rebase_failed}" = "true" ]; then
             echo "rebase_failed=true" >> "$GITHUB_OUTPUT"
             git rebase --abort || true
+            exit 0
+          fi
+
+          if ! bash scripts/check-no-pro.sh; then
+            echo "Rebase guard failed: pro-only files or hooks reintroduced."
+            echo "rebase_failed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 

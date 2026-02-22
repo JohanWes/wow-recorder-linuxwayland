@@ -1,5 +1,5 @@
 import { CellContext } from '@tanstack/react-table';
-import { CloudStatus, RendererVideo } from 'main/types';
+import { RendererVideo } from 'main/types';
 import {
   getVideoResultText,
   getResultColor,
@@ -101,11 +101,9 @@ export const populateActivityCell = (
 export const populateDetailsCell = (
   ctx: CellContext<RendererVideo, unknown>,
   language: Language,
-  cloudStatus: CloudStatus,
   setVideoState: Dispatch<SetStateAction<RendererVideo[]>>,
 ) => {
   const video = ctx.getValue() as RendererVideo;
-  const { write, del } = cloudStatus;
 
   const renderProtectedIcon = () => {
     // If any videos in our selection are not protected, then the button's
@@ -115,16 +113,13 @@ export const populateDetailsCell = (
 
     // Disable the protect button if there are no selected viewpoints, or if
     // the action is to unprotect and we don't have delete permissions.
-    const noPermission = !del && !lock && toProtect.some((v) => v.cloud);
-    const disabled = noPermission || toProtect.length < 1;
+    const disabled = toProtect.length < 1;
 
     const icon = lock ? <LockOpen size={20} /> : <LockKeyhole size={20} />;
 
     let tooltip = '';
 
-    if (noPermission) {
-      tooltip = getLocalePhrase(language, Phrase.GuildNoPermission);
-    } else if (lock) {
+    if (lock) {
       tooltip = getLocalePhrase(language, Phrase.StarSelected);
     } else {
       tooltip = getLocalePhrase(language, Phrase.UnstarSelected);
@@ -174,14 +169,11 @@ export const populateDetailsCell = (
 
   const renderTagIcon = () => {
     const toTag = [video, ...video.multiPov];
-    const noPermission = !write && toTag.some((v) => v.cloud);
 
     let tag = '';
     let icon = <MessageSquare size={18} />;
 
-    let tooltip = noPermission
-      ? getLocalePhrase(language, Phrase.GuildNoPermission)
-      : getLocalePhrase(language, Phrase.TagButtonTooltip);
+    let tooltip = getLocalePhrase(language, Phrase.TagButtonTooltip);
 
     const foundTag = toTag.map((v) => v.tag).find((t) => t);
 
@@ -205,7 +197,7 @@ export const populateDetailsCell = (
             setVideoState={setVideoState}
             language={language}
           >
-            <Button variant="ghost" size="xs" disabled={noPermission}>
+            <Button variant="ghost" size="xs">
               {icon}
             </Button>
           </TagDialog>

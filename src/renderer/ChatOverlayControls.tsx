@@ -1,6 +1,6 @@
 import { Dispatch, SetStateAction, useEffect, useRef, useState } from 'react';
 import { configSchema, ConfigurationSchema } from 'config/configSchema';
-import { Info, Lock } from 'lucide-react';
+import { Info } from 'lucide-react';
 import { AppState, SceneItem } from 'main/types';
 import { getLocalePhrase } from 'localisation/translations';
 import { setConfigValues } from './useSettings';
@@ -22,7 +22,6 @@ interface IProps {
 
 const ChatOverlayControls = (props: IProps) => {
   const { appState, config, setConfig } = props;
-  const { cloudStatus } = appState;
   const initialRender = useRef(true);
 
   const [cropMaxX, setCropMaxX] = useState(0);
@@ -123,21 +122,14 @@ const ChatOverlayControls = (props: IProps) => {
             )}
             side="right"
           >
-            {cloudStatus.authorized ? (
-              <Info size={20} className="inline-flex" />
-            ) : (
-              <Lock size={20} className="inline-flex" />
-            )}
+            <Info size={20} className="inline-flex" />
           </Tooltip>
         </Label>
         <div className="flex h-10 items-center">
           <Switch
             checked={config.chatOverlayOwnImage}
             onCheckedChange={setOwnImage}
-            disabled={
-              !config.chatOverlayOwnImage &&
-              (!config.chatOverlayEnabled || !cloudStatus.authorized)
-            }
+            disabled={!config.chatOverlayOwnImage && !config.chatOverlayEnabled}
           />
         </div>
       </div>

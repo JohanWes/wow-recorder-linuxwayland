@@ -44,7 +44,6 @@ const obsResolutions = {
 
 interface ICategoryRecordingSettings {
   allowRecordKey: ConfigurationSchemaKey;
-  autoUploadKey: ConfigurationSchemaKey;
 }
 
 /**
@@ -63,39 +62,30 @@ const categoryRecordingSettings: Omit<
 > = {
   [VideoCategory.TwoVTwo]: {
     allowRecordKey: 'recordTwoVTwo',
-    autoUploadKey: 'cloudUpload2v2',
   },
   [VideoCategory.ThreeVThree]: {
     allowRecordKey: 'recordThreeVThree',
-    autoUploadKey: 'cloudUpload3v3',
   },
   [VideoCategory.FiveVFive]: {
     allowRecordKey: 'recordFiveVFive',
-    autoUploadKey: 'cloudUpload5v5',
   },
   [VideoCategory.Skirmish]: {
     allowRecordKey: 'recordSkirmish',
-    autoUploadKey: 'cloudUploadSkirmish',
   },
   [VideoCategory.SoloShuffle]: {
     allowRecordKey: 'recordSoloShuffle',
-    autoUploadKey: 'cloudUploadSoloShuffle',
   },
   [VideoCategory.MythicPlus]: {
     allowRecordKey: 'recordDungeons',
-    autoUploadKey: 'cloudUploadDungeons',
   },
   [VideoCategory.Raids]: {
     allowRecordKey: 'recordRaids',
-    autoUploadKey: 'cloudUploadRaids',
   },
   [VideoCategory.Battlegrounds]: {
     allowRecordKey: 'recordBattlegrounds',
-    autoUploadKey: 'cloudUploadBattlegrounds',
   },
   [VideoCategory.Manual]: {
     allowRecordKey: 'manualRecord',
-    autoUploadKey: 'manualRecordUpload',
   },
 };
 

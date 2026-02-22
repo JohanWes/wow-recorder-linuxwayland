@@ -13,11 +13,6 @@ import {
   LockKeyhole,
   Trash,
   LockOpen,
-  CloudUpload,
-  CloudDownload,
-  ArrowLeftFromLine,
-  ArrowRightToLine,
-  Cloud,
 } from 'lucide-react';
 import { getLocalePhrase } from 'localisation/translations';
 import { VideoCategory } from '../types/VideoCategory';
@@ -25,7 +20,6 @@ import SearchBar from './SearchBar';
 import VideoMarkerToggles from './VideoMarkerToggles';
 import { useSettings } from './useSettings';
 import {
-  getFriendlyCodecName,
   getVideoCategoryFilter,
   getVideoStorageFilter,
   povDiskFirstNameSort,
@@ -40,16 +34,11 @@ import { Resizable, ResizeCallback } from 're-resizable';
 import { Direction } from 're-resizable/lib/resizer';
 import VideoPlayer, { VideoPlayerRef } from './VideoPlayer';
 import Label from './components/Label/Label';
-import ViewpointSelection from './components/Viewpoints/ViewpointSelection';
 import useTable from './components/Tables/TableData';
 import { Tooltip } from './components/Tooltip/Tooltip';
 import DateRangePicker from './DateRangePicker';
-import StorageFilterToggle from './StorageFilterToggle';
 import VideoCorrelator from './VideoCorrelator';
 import { Phrase } from 'localisation/phrases';
-import BulkTransferDialog from './BulkTransferDialog';
-import VideoChat from './VideoChat';
-import ConfirmChatNamePrompt from './ConfirmChatNamePrompt';
 
 interface IProps {
   category: VideoCategory;
@@ -80,12 +69,8 @@ const CategoryPage = (props: IProps) => {
     videoFilterTags,
     language,
     dateRangeFilter,
-    cloudStatus,
     storageFilter,
-    chatOpen,
   } = appState;
-
-  const { write, del } = cloudStatus;
   const [config, setConfig] = useSettings();
 
   // The category state, recalculated only when required.
@@ -144,37 +129,6 @@ const CategoryPage = (props: IProps) => {
     };
   }, [playerHeight]);
 
-  const renderChat = (video: RendererVideo | undefined) => {
-    if (!video) {
-      return (
-        <div className="flex-1 flex flex-col items-center justify-center text-foreground text-sm font-bold">
-          <Cloud size={35} className="mb-2" />
-          {getLocalePhrase(language, Phrase.ChatUploadToCloudText)}
-        </div>
-      );
-    }
-
-    if (config.cloudAccountName !== config.chatUserNameAgreed) {
-      return (
-        <ConfirmChatNamePrompt
-          cloudAccountName={config.cloudAccountName}
-          setConfig={setConfig}
-          language={language}
-        />
-      );
-    }
-
-    return (
-      <VideoChat
-        key={video.videoName}
-        videoPlayerRef={videoPlayerRef}
-        video={video}
-        language={language}
-        deletePermissions={del}
-      />
-    );
-  };
-
   /**
    * Handle a resize event.
    */
@@ -185,85 +139,6 @@ const CategoryPage = (props: IProps) => {
   ) => {
     const height = element.clientHeight;
     playerHeight.current = height;
-  };
-
-  const renderDrawerOpen = (
-    appVersion: string | undefined,
-    encoder: string | undefined,
-  ) => {
-    // Only the first row in the selection is relevant for the drawer display.
-    const selectedRows = table.getSelectedRowModel().rows;
-    const selectedRow = selectedRows[0];
-
-    const activeParentVideo = selectedRow
-      ? selectedRow.original
-      : filteredState[0];
-
-    // Only try to find a chat video if we have a video with cloud storage,
-    // a start time and a hash, else we cannot find the chat correlator.
-    const chatVideo = [activeParentVideo, ...activeParentVideo.multiPov].find(
-      (rv) => rv.cloud && rv.uniqueHash && rv.start,
-    );
-
-    const renderTextDescr = () => {
-      return (
-        <div className="flex items-center justify-start w-full h-[40px] pt-2 mx-2 text-sm font-bold text-foreground">
-          {appVersion && (
-            <>
-              {getLocalePhrase(language, Phrase.RecordedAt)} v{appVersion}.{' '}
-            </>
-          )}
-          {encoder && (
-            <>
-              {getLocalePhrase(language, Phrase.EncodedWith)}{' '}
-              {getFriendlyCodecName(encoder)}.
-            </>
-          )}
-        </div>
-      );
-    };
-
-    return (
-      <div className="max-w-[500px] min-w-[500px] h-full bg-background-higher flex flex-col mx-2 gap-y-2">
-        <div className="flex items-start">
-          <Button
-            onClick={() =>
-              setAppState((prev) => ({ ...prev, chatOpen: false }))
-            }
-            variant="ghost"
-            className="mt-2"
-            size="xs"
-          >
-            <ArrowRightToLine size={18} />
-          </Button>
-          {renderTextDescr()}
-        </div>
-        <div className="flex items-center justify-center w-full">
-          <ViewpointSelection
-            video={activeParentVideo}
-            appState={appState}
-            setAppState={setAppState}
-            persistentProgress={persistentProgress}
-          />
-        </div>
-        {renderChat(chatVideo)}
-      </div>
-    );
-  };
-
-  const renderDrawerClosed = () => {
-    return (
-      <div className="h-full relative">
-        <Button
-          onClick={() => setAppState((prev) => ({ ...prev, chatOpen: true }))}
-          variant="ghost"
-          className="absolute top-0 right-0 m-2"
-          size="xs"
-        >
-          <ArrowLeftFromLine size={18} />
-        </Button>
-      </div>
-    );
   };
 
   /**
@@ -280,12 +155,6 @@ const CategoryPage = (props: IProps) => {
     const videosToPlay =
       selectedVideos.length > 0 ? selectedVideos : povs.slice(0, 1);
 
-    const selectedVideoAppVersion =
-      videosToPlay.length > 1 ? undefined : videosToPlay[0].appVersion;
-
-    const selectedVideoEncoder =
-      videosToPlay.length > 1 ? undefined : videosToPlay[0].encoder;
-
     return (
       <Resizable
         ref={resizableRef}
@@ -296,7 +165,6 @@ const CategoryPage = (props: IProps) => {
         enable={{ bottom: true }}
         bounds="parent"
         onResize={onResize}
-        minHeight={chatOpen ? 500 : undefined}
         handleStyles={{
           bottom: {
             width: '50%',
@@ -312,22 +180,15 @@ const CategoryPage = (props: IProps) => {
           bottom: <GripHorizontal />,
         }}
       >
-        <div className="flex h-full w-full">
-          <VideoPlayer
-            ref={videoPlayerRef}
-            key={videosToPlay.map((rv) => rv.videoName + rv.cloud).join(', ')}
-            videos={videosToPlay}
-            categoryState={categoryState}
-            persistentProgress={persistentProgress}
-            config={config}
-            appState={appState}
-            setAppState={setAppState}
-          />
-
-          {chatOpen &&
-            renderDrawerOpen(selectedVideoAppVersion, selectedVideoEncoder)}
-          {!chatOpen && renderDrawerClosed()}
-        </div>
+        <VideoPlayer
+          ref={videoPlayerRef}
+          key={videosToPlay.map((rv) => rv.videoName + rv.cloud).join(', ')}
+          videos={videosToPlay}
+          persistentProgress={persistentProgress}
+          config={config}
+          appState={appState}
+          setAppState={setAppState}
+        />
       </Resizable>
     );
   };
@@ -385,19 +246,10 @@ const CategoryPage = (props: IProps) => {
       protect: boolean,
       videos: RendererVideo[],
     ) => {
-      const toProtectDisk = videos.filter((v) => !v.cloud);
-      const toProtectCloud = videos.filter((v) => v.cloud);
-
-      window.electron.ipcRenderer.sendMessage('videoButtonDisk', [
+      window.electron.ipcRenderer.sendMessage('videoButton', [
         'protect',
         protect,
-        toProtectDisk,
-      ]);
-
-      window.electron.ipcRenderer.sendMessage('videoButtonCloud', [
-        'protect',
-        protect,
-        toProtectCloud,
+        videos,
       ]);
 
       setVideoState((prev) => {
@@ -428,18 +280,11 @@ const CategoryPage = (props: IProps) => {
       // Disable the protect button if there are no selected viewpoints, if we
       // don't have write permissions, or if the action is to unprotect and we
       // don't have delete permissions.
-      const noPermission =
-        (!write && toProtect.some((v) => v.cloud)) || // Some in the selection are cloud videos and no write permission.
-        (!del && !lock && toProtect.some((v) => v.cloud)); // Some in the selection are locked cloud videos no delete permission.
-
-      const disabled = noPermission || toProtect.length < 1;
+      const disabled = toProtect.length < 1;
       const icon = lock ? <LockKeyhole size={18} /> : <LockOpen size={18} />;
 
       let tooltip = '';
-
-      if (noPermission) {
-        tooltip = getLocalePhrase(language, Phrase.GuildNoPermission);
-      } else if (lock) {
+      if (lock) {
         tooltip = getLocalePhrase(language, Phrase.StarSelected);
       } else {
         tooltip = getLocalePhrase(language, Phrase.UnstarSelected);
@@ -464,13 +309,8 @@ const CategoryPage = (props: IProps) => {
 
     const renderDeleteButton = () => {
       const toDelete = selectedViewpoints;
-
-      const noPermission = !del && toDelete.some((v) => v.cloud);
-      const disabled = toDelete.length < 1 || noPermission;
-
-      const tooltip = noPermission
-        ? getLocalePhrase(language, Phrase.GuildNoPermission)
-        : getLocalePhrase(language, Phrase.BulkDeleteButtonTooltip);
+      const disabled = toDelete.length < 1;
+      const tooltip = getLocalePhrase(language, Phrase.BulkDeleteButtonTooltip);
 
       return (
         <Tooltip content={tooltip}>
@@ -496,57 +336,6 @@ const CategoryPage = (props: IProps) => {
       );
     };
 
-    const renderBulkTransferButton = (upload: boolean) => {
-      const toTransfer = selectedViewpoints
-        .filter((rv) => rv.cloud === !upload)
-        .filter(
-          (rv) =>
-            selectedViewpoints.filter((v) => v.videoName === rv.videoName)
-              .length < 2, // If we have more 2 viewpoints with the same name then one must be disk and one cloud.
-        );
-
-      const noPermission = upload && !write;
-
-      const disabled =
-        toTransfer.length < 1 || noPermission || !cloudStatus.authorized;
-
-      let tooltip = upload
-        ? getLocalePhrase(language, Phrase.BulkUploadButtonTooltip)
-        : getLocalePhrase(language, Phrase.BulkDownloadButtonTooltip);
-
-      if (noPermission) {
-        tooltip = getLocalePhrase(language, Phrase.GuildNoPermission);
-      }
-
-      const icon = upload ? (
-        <CloudUpload size={18} />
-      ) : (
-        <CloudDownload size={18} />
-      );
-
-      return (
-        <Tooltip content={tooltip}>
-          <div>
-            <BulkTransferDialog
-              key={toTransfer.map((v) => v.videoName).join(',')} // Forces a remount on selection change.
-              inScope={toTransfer}
-              appState={appState}
-              upload={upload}
-            >
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={disabled}
-                className="border border-background"
-              >
-                {icon}
-              </Button>
-            </BulkTransferDialog>
-          </div>
-        </Tooltip>
-      );
-    };
-
     const renderSelectionLabel = () => {
       const { language } = appState;
       let text = getLocalePhrase(language, Phrase.Selection);
@@ -554,13 +343,6 @@ const CategoryPage = (props: IProps) => {
       if (selectedRows.length > 1) {
         text += ` (${selectedRows.length})`;
       }
-
-      if (!config.cloudStorage || (write && del)) {
-        // Cloud storage if off, or we have full permission. No need
-        // to render the disk only switch.
-        return <Label>{text}</Label>;
-      }
-
       return <Label>{text}</Label>;
     };
 
@@ -599,20 +381,15 @@ const CategoryPage = (props: IProps) => {
               <Label>
                 {getLocalePhrase(language, Phrase.StorageFilterLabel)}
               </Label>
-              <StorageFilterToggle
-                categoryState={categoryState}
-                appState={appState}
-                setAppState={setAppState}
-                table={table}
-              />
+              <div className="h-10 flex items-center text-xs text-foreground/70">
+                {getLocalePhrase(language, Phrase.ShowDiskOnlyTooltip)}
+              </div>
             </div>
           </div>
 
           <div>
             {renderSelectionLabel()}
             <div className="flex gap-x-1 mr-2 py-[1px]">
-              {config.cloudUpload && renderBulkTransferButton(true)}
-              {config.cloudStorage && renderBulkTransferButton(false)}
               {renderProtectButton()}
               {renderDeleteButton()}
             </div>
@@ -632,7 +409,7 @@ const CategoryPage = (props: IProps) => {
 
   const openSetupInstructions = () => {
     window.electron.ipcRenderer.sendMessage('openURL', [
-      'https://www.warcraftrecorder.com/setup',
+      'https://www.warcraftrecorder.com/about',
     ]);
   };
 
