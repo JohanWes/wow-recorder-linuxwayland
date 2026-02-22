@@ -13,12 +13,8 @@ export default class Recorder extends EventEmitter {
 
   private constructor() {
     super();
-    this.impl =
-      process.platform === 'linux'
-        ? // eslint-disable-next-line @typescript-eslint/no-var-requires
-          require('./LinuxRecorder').default.getInstance()
-        : // eslint-disable-next-line @typescript-eslint/no-var-requires
-          require('../Recorder').default.getInstance();
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    this.impl = require('./LinuxRecorder').default.getInstance();
 
     this.impl.on?.('state-change', (...args: unknown[]) => {
       this.emit('state-change', ...args);

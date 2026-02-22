@@ -12,7 +12,7 @@ on:
 jobs:
   build:
 
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
@@ -27,8 +27,9 @@ jobs:
 
     - name: Guard pro-free fork
       run: bash scripts/check-no-pro.sh
-      shell: bash
-      
-    # https://github.com/aza547/wow-recorder/issues/737
-    # - name: Run unit tests 
-    #   run: npm test
+
+    - name: Guard Windows-free fork
+      run: bash scripts/check-no-windows.sh
+
+    - name: Run unit tests
+      run: npm test
