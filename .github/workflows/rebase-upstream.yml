@@ -122,6 +122,13 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const { owner, repo } = context.repo;
+            const repoInfo = await github.rest.repos.get({ owner, repo });
+            if (!repoInfo.data.has_issues) {
+              core.warning('Auto-rebase failed, but GitHub Issues are disabled for this repository.');
+              return;
+            }
+
             const today = new Date().toISOString().slice(0, 10);
             const title = `Auto-rebase failed (${today})`;
             const body = [
@@ -139,7 +146,6 @@ jobs:
               `See the failing workflow run logs for details.`,
             ].join('\n');
 
-            const { owner, repo } = context.repo;
             const existing = await github.paginate(github.rest.issues.listForRepo, {
               owner,
               repo,
