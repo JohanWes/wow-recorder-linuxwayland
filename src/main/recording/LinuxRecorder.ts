@@ -1,14 +1,13 @@
-import { ChildProcessWithoutNullStreams, spawn, spawnSync } from 'child_process';
+import {
+  ChildProcessWithoutNullStreams,
+  spawn,
+  spawnSync,
+} from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import path from 'path';
 import ffmpeg from 'fluent-ffmpeg';
-import type {
-  BaseConfig,
-  ObsAudioConfig,
-  ObsOverlayConfig,
-  ObsVideoConfig,
-} from '../types';
+import type { BaseConfig } from '../types';
 import { MicStatus } from '../types';
 import { ERecordingState } from '../obsEnums';
 import ConfigService from '../../config/ConfigService';
@@ -138,6 +137,8 @@ export default class LinuxRecorder extends EventEmitter {
   private baseConfig: BaseConfig | null = null;
   private pendingReplay: Promise<GsrEvent | null> | null = null;
   private pendingReplayOffsetSec = 0;
+  private activityRecordingActive = false;
+  private protectedIntermediateFiles = new Set<string>();
   private sigRtMin: number | null = null;
 
   private constructor() {
@@ -174,9 +175,9 @@ export default class LinuxRecorder extends EventEmitter {
     }
   }
 
-  public configureVideoSources(_config: ObsVideoConfig) {}
-  public configureAudioSources(_config: ObsAudioConfig) {}
-  public configureOverlayImageSource(_config: ObsOverlayConfig) {}
+  public configureVideoSources() {}
+  public configureAudioSources() {}
+  public configureOverlayImageSource() {}
   public attachCaptureSource() {}
   public clearFindWindowInterval() {}
   public removeAudioSources() {}
@@ -207,10 +208,18 @@ export default class LinuxRecorder extends EventEmitter {
     }
 
     const now = Date.now();
+    this.activityRecordingActive = true;
     this.pendingReplayOffsetSec = offset;
     this.pendingReplay =
       this.eventLog
         ?.waitFor('replay', now, 20_000)
+        .then((event) => {
+          if (event?.path) {
+            this.protectedIntermediateFiles.add(event.path);
+          }
+
+          return event;
+        })
         .catch((error) => {
           console.warn(
             '[LinuxRecorder] Failed to observe replay save event',
@@ -219,9 +228,14 @@ export default class LinuxRecorder extends EventEmitter {
           return null;
         }) ?? null;
 
-    // Save replay pre-roll, then start regular recording.
-    process.kill(this.process.pid, 'SIGUSR1');
-    this.sendSigRtMin();
+    try {
+      // Save replay pre-roll, then start regular recording.
+      process.kill(this.process.pid, 'SIGUSR1');
+      this.sendSigRtMin();
+    } catch (error) {
+      this.activityRecordingActive = false;
+      throw error;
+    }
   }
 
   public async stop() {
@@ -231,15 +245,13 @@ export default class LinuxRecorder extends EventEmitter {
 
     const now = Date.now();
     const regularPromise =
-      this.eventLog
-        ?.waitFor('regular', now, 30_000)
-        .catch((error) => {
-          console.warn(
-            '[LinuxRecorder] Failed to observe regular recording save event',
-            String(error),
-          );
-          return null;
-        }) ?? null;
+      this.eventLog?.waitFor('regular', now, 30_000).catch((error) => {
+        console.warn(
+          '[LinuxRecorder] Failed to observe regular recording save event',
+          String(error),
+        );
+        return null;
+      }) ?? null;
 
     // Stop regular recording (replay continues).
     this.sendSigRtMin();
@@ -251,25 +263,36 @@ export default class LinuxRecorder extends EventEmitter {
     this.pendingReplayOffsetSec = 0;
 
     if (!regular?.path) {
+      this.activityRecordingActive = false;
       throw new Error('[LinuxRecorder] No regular recording produced');
     }
 
-    const combined = await this.buildCombinedActivityFile(
-      replay?.path ?? null,
-      regular.path,
-    );
+    this.protectedIntermediateFiles.add(regular.path);
 
-    this.lastFile = combined;
+    try {
+      const combined = await this.buildCombinedActivityFile(
+        replay?.path ?? null,
+        regular.path,
+      );
 
-    // Clean up intermediate GSR outputs. The combined file will be cleaned by
-    // the normal buffer cleanup after it is processed by VideoProcessQueue.
-    await Promise.all([
-      tryUnlink(regular.path),
-      replay?.path ? tryUnlink(replay.path) : Promise.resolve(),
-    ]);
+      this.lastFile = combined;
+
+      // Clean up intermediate GSR outputs. The combined file will be cleaned by
+      // the normal buffer cleanup after it is processed by VideoProcessQueue.
+      await Promise.all([
+        tryUnlink(regular.path),
+        replay?.path ? tryUnlink(replay.path) : Promise.resolve(),
+      ]);
+    } finally {
+      this.activityRecordingActive = false;
+      this.protectedIntermediateFiles.delete(regular.path);
+      if (replay?.path) {
+        this.protectedIntermediateFiles.delete(replay.path);
+      }
+    }
   }
 
-  public async forceStop(_timeout: boolean) {
+  public async forceStop() {
     // For Linux MVP, treat "force stop" as "stop capture session". This matches
     // how the app uses forceStop for reconfiguration and suspend/resume.
     this.shutdownOBS();
@@ -291,25 +314,32 @@ export default class LinuxRecorder extends EventEmitter {
     this.process = null;
     this.eventLog?.stop();
     this.eventLog = null;
+    this.activityRecordingActive = false;
+    this.protectedIntermediateFiles.clear();
     this.obsState = ERecordingState.None;
     this.emit('state-change');
   }
 
   public async cleanup(obsPath: string) {
-    const cleanDir = async (dir: string) => {
+    const cleanDir = async (dir: string, skipDuringActivity = false) => {
+      if (skipDuringActivity && this.activityRecordingActive) return;
       if (!(await exists(dir))) return;
       const videos = await getSortedFiles(
         dir,
         '.*\\.(mp4|mkv)',
         FileSortDirection.NewestFirst,
       );
-      await Promise.all(videos.map((f) => tryUnlink(f.name)));
+      await Promise.all(
+        videos
+          .filter((f) => !this.protectedIntermediateFiles.has(f.name))
+          .map((f) => tryUnlink(f.name)),
+      );
     };
 
     await Promise.all([
       cleanDir(obsPath),
-      cleanDir(path.join(obsPath, 'replay')),
-      cleanDir(path.join(obsPath, 'regular')),
+      cleanDir(path.join(obsPath, 'replay'), true),
+      cleanDir(path.join(obsPath, 'regular'), true),
       cleanDir(path.join(obsPath, 'staging')),
     ]);
   }
@@ -326,7 +356,9 @@ export default class LinuxRecorder extends EventEmitter {
 
   public async saveReplayNow() {
     if (!this.process?.pid) {
-      throw new Error('[LinuxRecorder] Capture not started. Start Capture first.');
+      throw new Error(
+        '[LinuxRecorder] Capture not started. Start Capture first.',
+      );
     }
 
     const now = Date.now();
@@ -368,7 +400,8 @@ export default class LinuxRecorder extends EventEmitter {
   }
 
   private async spawnGsrReplay() {
-    if (!this.baseConfig) throw new Error('[LinuxRecorder] Base config not set');
+    if (!this.baseConfig)
+      throw new Error('[LinuxRecorder] Base config not set');
     const { obsPath, obsFPS } = this.baseConfig;
     const captureCursor = this.cfg.get<boolean>('captureCursor');
 
@@ -388,7 +421,8 @@ export default class LinuxRecorder extends EventEmitter {
     const bufferSeconds = this.cfg.get<number>('linuxGsrBufferSeconds') ?? 180;
     const codec = this.cfg.get<string>('linuxGsrCodec') ?? 'h264';
     const bitrateKbps = this.cfg.get<number>('linuxGsrBitrateKbps') ?? 20000;
-    const replayStorage = this.cfg.get<string>('linuxGsrReplayStorage') ?? 'ram';
+    const replayStorage =
+      this.cfg.get<string>('linuxGsrReplayStorage') ?? 'ram';
 
     const args = [
       '-w',
@@ -488,7 +522,10 @@ export default class LinuxRecorder extends EventEmitter {
     if (!this.baseConfig) return;
 
     this.restartAttempts += 1;
-    const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(this.restartAttempts, 4));
+    const delayMs = Math.min(
+      30_000,
+      1000 * 2 ** Math.min(this.restartAttempts, 4),
+    );
 
     console.warn('[LinuxRecorder] Scheduling gsr restart', {
       attempt: this.restartAttempts,
@@ -522,10 +559,10 @@ export default class LinuxRecorder extends EventEmitter {
   private async writeHookScript(hookPath: string, eventsFile: string) {
     const script = `#!/usr/bin/env bash
 set -euo pipefail
-filepath=\"$1\"
-kind=\"$2\"
+filepath="$1"
+kind="$2"
 ts=$(date +%s%3N)
-printf '%s\\t%s\\t%s\\n' \"$ts\" \"$kind\" \"$filepath\" >> \"${eventsFile}\"
+printf '%s\\t%s\\t%s\\n' "$ts" "$kind" "$filepath" >> "${eventsFile}"
 `;
 
     await fs.promises.writeFile(hookPath, script, { encoding: 'utf-8' });
@@ -569,7 +606,8 @@ printf '%s\\t%s\\t%s\\n' \"$ts\" \"$kind\" \"$filepath\" >> \"${eventsFile}\"
     replayFile: string | null,
     regularFile: string,
   ) {
-    if (!this.baseConfig) throw new Error('[LinuxRecorder] Base config not set');
+    if (!this.baseConfig)
+      throw new Error('[LinuxRecorder] Base config not set');
     const staging = path.join(this.baseConfig.obsPath, 'staging');
     const combined = path.join(
       this.baseConfig.obsPath,
@@ -577,6 +615,15 @@ printf '%s\\t%s\\t%s\\n' \"$ts\" \"$kind\" \"$filepath\" >> \"${eventsFile}\"
     );
 
     if (!replayFile) {
+      await fs.promises.copyFile(regularFile, combined);
+      return combined;
+    }
+
+    if (!(await exists(replayFile))) {
+      console.warn(
+        '[LinuxRecorder] Replay file missing while combining activity, using regular recording only',
+        replayFile,
+      );
       await fs.promises.copyFile(regularFile, combined);
       return combined;
     }
@@ -598,29 +645,43 @@ printf '%s\\t%s\\t%s\\n' \"$ts\" \"$kind\" \"$filepath\" >> \"${eventsFile}\"
       .outputOption('-avoid_negative_ts make_zero')
       .output(trimmedReplay);
 
-    await this.ffmpegRun(trimCmd, 'Trim replay');
+    let listFile: string | null = null;
 
-    const listFile = path.join(
-      staging,
-      `concat-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`,
-    );
+    try {
+      await this.ffmpegRun(trimCmd, 'Trim replay');
 
-    const listContent = `file '${trimmedReplay.replace(/'/g, "'\\''")}'\nfile '${regularFile.replace(/'/g, "'\\''")}'\n`;
-    await fs.promises.writeFile(listFile, listContent, { encoding: 'utf-8' });
+      listFile = path.join(
+        staging,
+        `concat-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`,
+      );
 
-    const concatCmd = ffmpeg()
-      .input(listFile)
-      .inputOptions(['-f concat', '-safe 0'])
-      .withVideoCodec('copy')
-      .withAudioCodec('copy')
-      .outputOption('-avoid_negative_ts make_zero')
-      .output(combined);
+      const listContent = `file '${trimmedReplay.replace(/'/g, "'\\''")}'\nfile '${regularFile.replace(/'/g, "'\\''")}'\n`;
+      await fs.promises.writeFile(listFile, listContent, { encoding: 'utf-8' });
 
-    await this.ffmpegRun(concatCmd, 'Concat replay+regular');
+      const concatCmd = ffmpeg()
+        .input(listFile)
+        .inputOptions(['-f concat', '-safe 0'])
+        .withVideoCodec('copy')
+        .withAudioCodec('copy')
+        .outputOption('-avoid_negative_ts make_zero')
+        .output(combined);
 
-    await Promise.all([tryUnlink(listFile), tryUnlink(trimmedReplay)]);
+      await this.ffmpegRun(concatCmd, 'Concat replay+regular');
 
-    return combined;
+      return combined;
+    } catch (error) {
+      console.warn(
+        '[LinuxRecorder] Failed to combine replay with regular recording, using regular recording only',
+        String(error),
+      );
+      await fs.promises.copyFile(regularFile, combined);
+      return combined;
+    } finally {
+      await Promise.all([
+        listFile ? tryUnlink(listFile) : Promise.resolve(),
+        tryUnlink(trimmedReplay),
+      ]);
+    }
   }
 
   private async ffmpegRun(cmd: ffmpeg.FfmpegCommand, descr: string) {
