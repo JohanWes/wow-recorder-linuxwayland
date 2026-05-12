@@ -161,3 +161,9 @@ jobs:
               title,
               body,
             });
+
+      - name: Fail if rebase failed
+        if: steps.rebase.outputs.rebase_failed == 'true'
+        run: |
+          echo "Auto-rebase failed; see the conflict list above."
+          exit 1

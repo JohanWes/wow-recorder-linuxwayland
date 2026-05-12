@@ -49,6 +49,12 @@ jobs:
           node-version: '22.12.0'
           cache: 'npm'
 
+      - name: Cache electron-builder binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/electron-builder
+          key: electron-builder-${{ runner.os }}-${{ runner.arch }}
+
       - name: Install system deps
         shell: bash
         run: |
@@ -60,7 +66,19 @@ jobs:
         run: npm ci
 
       - name: Build AppImage
-        run: npm run package:linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if npm run package:linux; then
+              exit 0
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              exit 1
+            fi
+            echo "AppImage build failed; retrying (${attempt}/3)."
+            sleep 10
+          done
 
       - name: Prepare AppImage
         id: appimage
