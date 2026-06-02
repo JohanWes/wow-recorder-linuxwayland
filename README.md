@@ -21,20 +21,9 @@ chmod +x WarcraftRecorder.AppImage
 ./WarcraftRecorder.AppImage
 ```
 
-Optional checksum verification:
-
-```bash
-curl -L https://github.com/JohanWes/wow-recorder-linuxwayland/releases/latest/download/WarcraftRecorder.AppImage.sha256 -o WarcraftRecorder.AppImage.sha256
-sha256sum -c WarcraftRecorder.AppImage.sha256
-```
-
 Updates:
 
 - Download the newest AppImage from the latest GitHub Release.
-
-### Troubleshooting
-
-- If sandboxing causes issues on your system: `WARCRAFTRECORDER_NO_SANDBOX=1 ./WarcraftRecorder.AppImage`
 
 ## Dependencies / Prerequisites (Wayland)
 
