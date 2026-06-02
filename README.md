@@ -2,60 +2,41 @@
 
 Warcraft Recorder (Linux/Wayland fork) watches the World of Warcraft combat log and automatically records videos for “interesting” activities (arenas, raids, dungeons, etc).
 
-## Install (CachyOS / Arch via pacman repo)
+## Install
 
-This fork publishes a pacman repository via GitHub Releases so you can install/update like any other package.
+This fork publishes Linux AppImages via GitHub Releases. Every push to `main` that passes CI creates a new release.
 
-### Manual (recommended)
+### AppImage
 
-1. Add the repo to `/etc/pacman.conf` (one-time):
-
-```ini
-[warcraft-recorder-linux]
-SigLevel = Optional TrustAll
-Server = https://github.com/JohanWes/wow-recorder-linuxwayland/releases/download/pacman
-```
-
-2. Sync + install:
+Download the latest AppImage:
 
 ```bash
-sudo pacman -Sy warcraft-recorder-linux
+curl -L https://github.com/JohanWes/wow-recorder-linuxwayland/releases/latest/download/WarcraftRecorder.AppImage -o WarcraftRecorder.AppImage
 ```
 
-3. Launch:
+Make it executable and launch:
 
 ```bash
-warcraft-recorder-linux
+chmod +x WarcraftRecorder.AppImage
+./WarcraftRecorder.AppImage
+```
+
+Optional checksum verification:
+
+```bash
+curl -L https://github.com/JohanWes/wow-recorder-linuxwayland/releases/latest/download/WarcraftRecorder.AppImage.sha256 -o WarcraftRecorder.AppImage.sha256
+sha256sum -c WarcraftRecorder.AppImage.sha256
 ```
 
 Updates:
 
-- `sudo pacman -Syu`
-
-### One-command install (bootstrap)
-
-If you prefer, this script will append the repo to `/etc/pacman.conf` (with a timestamped backup) and install the package:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/scripts/install-pacman-repo.sh | sudo bash
-```
-
-If you see `database already registered`, you have the repo configured more than once (remove duplicates in pacman config and re-run).
-
-If you don’t like piping to `bash`, do:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/scripts/install-pacman-repo.sh -o /tmp/install-warcraft-recorder-linux.sh
-sudo bash /tmp/install-warcraft-recorder-linux.sh
-```
+- Download the newest AppImage from the latest GitHub Release.
 
 ### Troubleshooting
 
-- If sandboxing causes issues on your system: `WARCRAFTRECORDER_NO_SANDBOX=1 warcraft-recorder-linux`
+- If sandboxing causes issues on your system: `WARCRAFTRECORDER_NO_SANDBOX=1 ./WarcraftRecorder.AppImage`
 
 ## Dependencies / Prerequisites (Wayland)
-
-When installing via pacman, these are installed automatically as dependencies:
 
 - `gpu-screen-recorder`
 - `pipewire`
