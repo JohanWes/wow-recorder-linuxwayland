@@ -11,6 +11,7 @@ import {
   DiskStatus,
   StorageFilter,
   ActivityStatus,
+  AdvancedLoggingStatus,
 } from 'main/types';
 import Box from '@mui/material/Box';
 import { getLocalePhrase, Language } from 'localisation/translations';
@@ -46,6 +47,15 @@ const WarcraftRecorder = () => {
   const [activityStatus, setActivityStatus] = useState<ActivityStatus | null>(
     null,
   );
+  const [, setPreviewEnabled] = useState(true);
+  const [advancedLoggingStatus, setAdvancedLoggingStatus] =
+    useState<AdvancedLoggingStatus>({
+      retail: true,
+      classic: true,
+      era: true,
+      retailPtr: true,
+      classicPtr: true,
+    });
 
   const [savingStatus, setSavingStatus] = useState<SaveStatus>(
     SaveStatus.NotSaving,
@@ -160,6 +170,10 @@ const WarcraftRecorder = () => {
     });
   };
 
+  const updateAdvancedLoggingStatus = (status: unknown) => {
+    setAdvancedLoggingStatus(status as AdvancedLoggingStatus);
+  };
+
   const setDiskVideos = (videos: unknown) => {
     setVideoState(videos as RendererVideo[]);
     setAppState((prevState) => {
@@ -179,6 +193,7 @@ const WarcraftRecorder = () => {
     ipc.on('updateMicStatus', updateMicStatus);
     ipc.on('updateErrorReport', updateErrorReports);
     ipc.on('updateDiskStatus', updateDiskStatus);
+    ipc.on('updateAdvancedLoggingStatus', updateAdvancedLoggingStatus);
     ipc.on('playAudio', playAudio);
     ipc.on('setDiskVideos', setDiskVideos);
 
@@ -189,6 +204,7 @@ const WarcraftRecorder = () => {
       ipc.removeAllListeners('updateMicStatus');
       ipc.removeAllListeners('updateErrorReport');
       ipc.removeAllListeners('updateDiskStatus');
+      ipc.removeAllListeners('updateAdvancedLoggingStatus');
       ipc.removeAllListeners('playAudio');
       ipc.removeAllListeners('setDiskVideos');
     };
@@ -224,6 +240,8 @@ const WarcraftRecorder = () => {
                 config={config}
                 recorderCategory={activityStatus?.category}
                 activityStatus={activityStatus}
+                advancedLoggingStatus={advancedLoggingStatus}
+                setPreviewEnabled={setPreviewEnabled}
               />
               <Layout
                 recorderStatus={recorderStatus}
@@ -235,6 +253,7 @@ const WarcraftRecorder = () => {
                 playerHeight={playerHeight}
                 config={config}
                 setConfig={setConfig}
+                advancedLoggingStatus={advancedLoggingStatus}
               />
             </div>
           </TooltipProvider>

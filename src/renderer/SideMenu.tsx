@@ -187,10 +187,6 @@ const SideMenu = (props: IProps) => {
         advancedLoggingStatus={advancedLoggingStatus}
         setPreviewEnabled={setPreviewEnabled}
       />
-      <CloudStatusCard
-        appState={appState}
-        setPreviewEnabled={setPreviewEnabled}
-      />
       <Separator className="mb-4" />
       <ScrollArea
         className="w-full h-[calc(100%-80px)]"

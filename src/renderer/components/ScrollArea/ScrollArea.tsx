@@ -27,7 +27,7 @@ const ScrollBar = React.forwardRef<
 ScrollBar.displayName = ScrollAreaPrimitive.ScrollAreaScrollbar.displayName;
 
 type ScrollIndicatorProps = {
-  viewport: HTMLDivElement | undefined;
+  viewport: HTMLDivElement | null;
   scrollabilityIndicatorClasses: string;
 };
 
@@ -141,8 +141,10 @@ const ScrollArea = React.forwardRef<
     },
     ref,
   ) => {
-    const viewportRef = React.useRef<HTMLDivElement>();
-    const [viewport, setViewport] = React.useState<HTMLDivElement>();
+    const viewportRef = React.useRef<HTMLDivElement>(null);
+    const [viewport, setViewport] = React.useState<HTMLDivElement | null>(
+      null,
+    );
 
     React.useLayoutEffect(() => {
       if (viewportRef.current) {

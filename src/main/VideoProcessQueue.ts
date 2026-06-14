@@ -17,6 +17,7 @@ import {
   tryUnlink,
   buildKillVideoMetadata,
   getOBSFormattedDate,
+  rendererVideoToMetadata,
 } from './util';
 import { send } from './main';
 import ffmpeg from 'fluent-ffmpeg';

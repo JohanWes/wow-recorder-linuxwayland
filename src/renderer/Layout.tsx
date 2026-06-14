@@ -1,5 +1,11 @@
 import * as React from 'react';
-import { Pages, RecStatus, AppState, RendererVideo } from 'main/types';
+import {
+  Pages,
+  RecStatus,
+  AppState,
+  RendererVideo,
+  AdvancedLoggingStatus,
+} from 'main/types';
 import { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import { ConfigurationSchema } from 'config/configSchema';
 import SettingsPage from './SettingsPage';
@@ -15,6 +21,7 @@ interface IProps {
   playerHeight: MutableRefObject<number>;
   config: ConfigurationSchema;
   setConfig: Dispatch<SetStateAction<ConfigurationSchema>>;
+  advancedLoggingStatus: AdvancedLoggingStatus;
 }
 
 /**
@@ -31,6 +38,7 @@ const Layout = (props: IProps) => {
     playerHeight,
     config,
     setConfig,
+    advancedLoggingStatus,
   } = props;
   const { page, category } = appState;
 
@@ -56,6 +64,7 @@ const Layout = (props: IProps) => {
         setConfig={setConfig}
         appState={appState}
         setAppState={setAppState}
+        advancedLoggingStatus={advancedLoggingStatus}
       />
     );
   };

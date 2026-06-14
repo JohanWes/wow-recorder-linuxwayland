@@ -1,4 +1,5 @@
 import fs, { FSWatcher } from 'fs';
+import path from 'path';
 import { app, ipcMain, powerMonitor } from 'electron';
 import { uIOhook, UiohookKeyboardEvent } from 'uiohook-napi';
 import EraLogHandler from '../parsing/EraLogHandler';
@@ -695,8 +696,7 @@ export default class Manager {
       if (args[0] === 'linuxRestartCapture') {
         console.info('[Manager] Linux Restart Capture requested');
         try {
-          this.recorder.shutdownOBS();
-          await this.recorder.startBuffer();
+          await this.recorder.restartCapture(true);
         } catch (error) {
           console.error('[Manager] Failed to restart Linux capture', error);
           emitErrorReport(error);
@@ -737,6 +737,7 @@ export default class Manager {
           };
 
           const clipQueueItem: VideoQueueItem = {
+            name: path.basename(source, path.extname(source)),
             source,
             suffix: `Replay ${getOBSFormattedDate(now)}`,
             offset: 0,

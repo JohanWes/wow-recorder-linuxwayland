@@ -298,6 +298,28 @@ export default class LinuxRecorder extends EventEmitter {
     this.shutdownOBS();
   }
 
+  public async restartCapture(forcePortalSelection = false) {
+    const child = this.process;
+
+    this.shutdownOBS();
+
+    if (child && child.exitCode === null) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 2000);
+        child.once('exit', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+
+    if (forcePortalSelection) {
+      await this.clearPortalSessionToken();
+    }
+
+    await this.startBuffer();
+  }
+
   public shutdownOBS() {
     this.desiredRunning = false;
     if (this.restartTimer) {
@@ -406,7 +428,7 @@ export default class LinuxRecorder extends EventEmitter {
     const captureCursor = this.cfg.get<boolean>('captureCursor');
 
     const userData = (await import('electron')).app.getPath('userData');
-    const tokenFile = path.join(userData, 'gsr-portal.token');
+    const tokenFile = await this.getPortalSessionTokenFile();
     const eventsFile = path.join(userData, 'gsr-events.tsv');
     const hookPath = path.join(userData, 'gsr-hook.sh');
 
@@ -534,7 +556,7 @@ export default class LinuxRecorder extends EventEmitter {
 
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
-      void this.restartCapture().catch((e) => {
+      void this.restartCaptureAfterCrash().catch((e) => {
         const msg = `[LinuxRecorder] Failed to restart capture: ${String(e)}`;
         console.error(msg);
         emitErrorReport(msg);
@@ -545,7 +567,7 @@ export default class LinuxRecorder extends EventEmitter {
     }, delayMs);
   }
 
-  private async restartCapture() {
+  private async restartCaptureAfterCrash() {
     if (!this.desiredRunning) return;
     if (!this.baseConfig) return;
     if (this.obsState === ERecordingState.Recording) return;
@@ -554,6 +576,26 @@ export default class LinuxRecorder extends EventEmitter {
     await this.spawnGsrReplay();
     this.obsState = ERecordingState.Recording;
     this.emit('state-change');
+  }
+
+  private async getPortalSessionTokenFile() {
+    const userData = (await import('electron')).app.getPath('userData');
+    return path.join(userData, 'gsr-portal.token');
+  }
+
+  private async clearPortalSessionToken() {
+    const tokenFile = await this.getPortalSessionTokenFile();
+
+    try {
+      await fs.promises.unlink(tokenFile);
+      console.info('[LinuxRecorder] Cleared portal session token', tokenFile);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+
+      console.info('[LinuxRecorder] No portal session token to clear');
+    }
   }
 
   private async writeHookScript(hookPath: string, eventsFile: string) {

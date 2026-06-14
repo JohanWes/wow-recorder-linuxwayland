@@ -109,4 +109,11 @@ export default class Recorder extends EventEmitter {
     }
     return this.impl.saveReplayNow();
   }
+
+  public async restartCapture(forcePortalSelection = false) {
+    if (!this.impl.restartCapture) {
+      throw new Error('Capture restart is not supported on this platform.');
+    }
+    return this.impl.restartCapture(forcePortalSelection);
+  }
 }

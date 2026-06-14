@@ -32,4 +32,5 @@ export type RecorderImpl = {
 
   // Linux-only (optional on other platforms).
   saveReplayNow?: () => Promise<string>;
+  restartCapture?: (forcePortalSelection?: boolean) => Promise<void>;
 };

@@ -123,7 +123,7 @@ export const clipActivitySort = (
   if (isRaidUtil(rvA) && rvA.encounterName) {
     activityA = rvA.encounterName;
   } else if (isMythicPlusUtil(rvA) && rvA.mapID) {
-    activityA = getDungeonName(rvA);
+    activityA = getDungeonName(rvA) || getLocalePhrase(language, Phrase.Unknown);
   } else if (rvA.zoneName) {
     activityA = rvA.zoneName;
   }
@@ -134,7 +134,7 @@ export const clipActivitySort = (
   if (isRaidUtil(rvB) && rvB.encounterName) {
     activityB = rvB.encounterName;
   } else if (isMythicPlusUtil(rvB) && rvB.mapID) {
-    activityB = getDungeonName(rvB);
+    activityB = getDungeonName(rvB) || getLocalePhrase(language, Phrase.Unknown);
   } else if (rvB.zoneName) {
     activityB = rvB.zoneName;
   }

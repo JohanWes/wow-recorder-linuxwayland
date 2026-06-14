@@ -32,6 +32,14 @@ type ActivityStatus = {
   start: number;
 };
 
+type AdvancedLoggingStatus = {
+  retail: boolean;
+  classic: boolean;
+  era: boolean;
+  retailPtr: boolean;
+  classicPtr: boolean;
+};
+
 enum MicStatus {
   NONE,
   MUTED,
@@ -62,6 +70,8 @@ type ErrorReport = {
   date: Date;
   reason: string;
 };
+
+type Crashes = ErrorReport[];
 
 /**
  * Unit flags from combat log events
@@ -222,6 +232,7 @@ type Metadata = {
   uniqueHash?: string; // used for cloud video grouping
   bossPercent?: number;
   appVersion?: string;
+  encoder?: string;
 };
 
 /**
@@ -633,6 +644,7 @@ export {
   MarkerColors,
   MicStatus,
   ErrorReport,
+  Crashes,
   SliderMark,
   DiskStatus,
   IBrowserWindow,
@@ -651,6 +663,7 @@ export {
   WowProcessEvent,
   SoundAlerts,
   ActivityStatus,
+  AdvancedLoggingStatus,
   KillVideoQueueItem,
   KillVideoSegment,
   KillVideoStatus,

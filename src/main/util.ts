@@ -404,6 +404,39 @@ const getWowFlavour = (pathSpec: string): string => {
   return content.length > 1 ? content[1] : 'unknown';
 };
 
+/**
+ * Return the Config.wtf path adjacent to a configured WoW Logs directory.
+ */
+const getConfigWtfPath = (logPath: string): string => {
+  return path.normalize(path.join(logPath, '../WTF/Config.wtf'));
+};
+
+/**
+ * Check if advanced combat logging is enabled in Config.wtf.
+ */
+const checkAdvancedCombatLogging = async (
+  logPath: string,
+): Promise<boolean> => {
+  const configWtfFile = getConfigWtfPath(logPath);
+  console.info('[Util] Checking advanced combat logging:', configWtfFile);
+
+  if (!(await exists(configWtfFile))) {
+    console.warn('[Util] Config.wtf not found at', configWtfFile);
+    return false;
+  }
+
+  const content = (await fs.promises.readFile(configWtfFile)).toString();
+  const match = content.match(/^SET advancedCombatLogging\s+"(\d+)"/m);
+
+  if (match && match[1] === '1') {
+    console.info('[Util] Advanced combat logging is enabled', configWtfFile);
+    return true;
+  }
+
+  console.info('[Util] Advanced combat logging is disabled', configWtfFile);
+  return false;
+};
+
 const isPushToTalkHotkey = (
   config: ObsAudioConfig,
   event: PTTKeyPressEvent,
@@ -579,6 +612,18 @@ const buildClipMetadata = (initial: Metadata, duration: number, date: Date) => {
   final.protected = true;
   final.clippedAt = date.getTime();
   return final;
+};
+
+const rendererVideoToMetadata = (video: RendererVideo): Metadata => {
+  const metadata = { ...video } as Partial<RendererVideo>;
+  delete metadata.videoName;
+  delete metadata.mtime;
+  delete metadata.videoSource;
+  delete metadata.isProtected;
+  delete metadata.cloud;
+  delete metadata.multiPov;
+  delete metadata.uniqueId;
+  return metadata as Metadata;
 };
 
 const buildKillVideoMetadata = (
@@ -1040,12 +1085,15 @@ export {
   deferredPromiseHelper,
   getAssetPath,
   getWowFlavour,
+  getConfigWtfPath,
+  checkAdvancedCombatLogging,
   isPushToTalkHotkey,
   nextKeyPressPromise,
   nextMousePressPromise,
   convertUioHookEvent,
   getPromiseBomb,
   buildClipMetadata,
+  rendererVideoToMetadata,
   buildKillVideoMetadata,
   getOBSFormattedDate,
   checkDisk,

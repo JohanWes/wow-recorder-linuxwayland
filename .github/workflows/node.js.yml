@@ -34,6 +34,9 @@ jobs:
     - name: Guard Windows-free fork
       run: bash scripts/check-no-windows.sh
 
+    - name: Typecheck
+      run: npm run typecheck
+
     - name: Run unit tests
       run: npm test
 
@@ -119,6 +122,7 @@ jobs:
         Validation completed before packaging:
         - pro-free fork guard
         - Windows-free fork guard
+        - TypeScript typecheck
         - unit tests
         - production bundle build
         EOF
