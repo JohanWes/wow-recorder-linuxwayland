@@ -6,24 +6,71 @@ Warcraft Recorder (Linux/Wayland fork) watches the World of Warcraft combat log 
 
 This fork publishes Linux AppImages via GitHub Releases. Every push to `main` that passes CI creates a new release.
 
-### AppImage
+### Option 1: Installer script (recommended)
 
-Download the latest AppImage:
+Run the installer. It downloads the latest AppImage, verifies the SHA256 checksum, and installs it:
 
 ```bash
-curl -L https://github.com/JohanWes/wow-recorder-linuxwayland/releases/latest/download/WarcraftRecorder.AppImage -o WarcraftRecorder.AppImage
+curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/install.sh | bash
 ```
 
-Make it executable and launch:
+By default it installs per-user into:
+
+- `~/.local/bin/warcraftrecorder`
+- `~/.local/share/applications/warcraftrecorder.desktop`
+- `~/.local/share/icons/hicolor/256x256/apps/warcraftrecorder.png`
+
+Run it from the terminal or launch **Warcraft Recorder** from your application menu:
 
 ```bash
+warcraftrecorder
+```
+
+If `~/.local/bin` is not on your `PATH`, the installer will tell you how to add it.
+
+#### Updating
+
+Re-run the same command. The installer overwrites any existing install with the latest release.
+
+#### Uninstall
+
+```bash
+rm ~/.local/bin/warcraftrecorder \
+   ~/.local/share/applications/warcraftrecorder.desktop \
+   ~/.local/share/icons/hicolor/256x256/apps/warcraftrecorder.png
+```
+
+#### Installer flags
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/install.sh | bash -s -- --prefix /opt/warcraftrecorder --no-desktop
+```
+
+Available flags:
+
+- `--prefix <dir>` — install under a custom prefix (`bin`, `share/applications`, and `share/icons` are created there).
+- `--no-desktop` — skip creating the application menu entry.
+- `--no-verify` — skip SHA256 checksum verification.
+- `--tag <tag>` — install a specific release tag instead of `latest`.
+- `--repo <owner/repo>` — install from a different fork or mirror.
+
+### Option 2: Manual AppImage install
+
+If you prefer not to run a remote script, download the AppImage directly from the [latest release](https://github.com/JohanWes/wow-recorder-linuxwayland/releases/latest):
+
+```bash
+curl -LO https://github.com/JohanWes/wow-recorder-linuxwayland/releases/latest/download/WarcraftRecorder.AppImage
 chmod +x WarcraftRecorder.AppImage
 ./WarcraftRecorder.AppImage
 ```
 
-Updates:
+Put it anywhere in your `PATH` and rename it if you want a quick command:
 
-- Download the newest AppImage from the latest GitHub Release.
+```bash
+mv WarcraftRecorder.AppImage ~/.local/bin/warcraftrecorder
+```
+
+Updates are manual: download the newest AppImage and replace your existing file.
 
 ## Dependencies / Prerequisites (Wayland)
 
