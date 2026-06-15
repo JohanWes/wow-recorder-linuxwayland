@@ -15,12 +15,16 @@ DESKTOP_NAME="warcraftrecorder.desktop"
 PREFIX="${HOME}/.local"
 NO_DESKTOP=0
 NO_VERIFY=0
+USE_SUDO=0
 RELEASE_TAG="latest"
 
 bin_dir=""
 share_dir=""
 desktop_dir=""
 icon_dir=""
+metadata_dir=""
+SUDO=()
+INSTALLED_RELEASE_TAG=""
 
 usage() {
   cat <<EOF
@@ -34,6 +38,7 @@ Options:
   --prefix <dir>   Install prefix (default: ${PREFIX})
   --no-desktop     Skip creating the application menu entry
   --no-verify      Skip SHA256 checksum verification
+  --use-sudo       Use sudo for install steps when the prefix is not writable
   --repo <o/r>     Use a different GitHub repository (default: ${REPO})
   --tag <tag>      Install a specific release tag (default: latest)
   -h, --help       Show this help message
@@ -47,6 +52,14 @@ log() { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARNING: %s\n' "$*" >&2; }
 error() { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 
+run_privileged() {
+  if [ "${#SUDO[@]}" -gt 0 ]; then
+    "${SUDO[@]}" "$@"
+  else
+    "$@"
+  fi
+}
+
 parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -57,6 +70,7 @@ parse_args() {
         ;;
       --no-desktop) NO_DESKTOP=1; shift ;;
       --no-verify) NO_VERIFY=1; shift ;;
+      --use-sudo) USE_SUDO=1; shift ;;
       --repo)
         [ -n "${2:-}" ] || error "--repo requires an argument"
         REPO="$2"
@@ -117,11 +131,91 @@ resolve_release_urls() {
   ICON_URL="https://raw.githubusercontent.com/${REPO}/main/assets/icon.png"
 }
 
+resolve_latest_release_tag() {
+  local location
+
+  [ "$RELEASE_TAG" = "latest" ] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+
+  location=$(curl -fsSI "$APPIMAGE_URL" | awk 'BEGIN { IGNORECASE=1 } /^location:/ { sub(/\r$/, "", $2); print $2; exit }') || return 0
+  INSTALLED_RELEASE_TAG=$(release_tag_from_url "$location")
+  if [ -n "$INSTALLED_RELEASE_TAG" ]; then
+    log "Resolved latest release: ${INSTALLED_RELEASE_TAG}"
+  fi
+}
+
 compute_dirs() {
   bin_dir="${PREFIX}/bin"
   share_dir="${PREFIX}/share"
   desktop_dir="${share_dir}/applications"
   icon_dir="${share_dir}/icons/hicolor/256x256/apps"
+  metadata_dir="${share_dir}/${APP_NAME}"
+}
+
+nearest_existing_parent() {
+  local path
+  path="$1"
+
+  while [ ! -e "$path" ]; do
+    path=$(dirname "$path")
+  done
+
+  printf '%s\n' "$path"
+}
+
+prefix_is_writable() {
+  local parent
+
+  if [ -d "$PREFIX" ]; then
+    [ -w "$PREFIX" ]
+    return
+  fi
+
+  parent=$(nearest_existing_parent "$PREFIX")
+  [ -d "$parent" ] && [ -w "$parent" ]
+}
+
+setup_privilege() {
+  if [ "$(id -u)" -eq 0 ] || prefix_is_writable; then
+    SUDO=()
+    return
+  fi
+
+  if [ "$USE_SUDO" -eq 0 ]; then
+    error "prefix ${PREFIX} is not writable by the current user. Use the default user install, choose a writable --prefix, or pass --use-sudo for a system install."
+  fi
+
+  if ! command -v sudo >/dev/null 2>&1; then
+    error "prefix ${PREFIX} is not writable and sudo is not available. Choose a user-writable --prefix."
+  fi
+
+  log "Prefix ${PREFIX} is not writable by the current user; using sudo for install steps."
+  sudo -v || error "sudo authentication failed"
+  SUDO=(sudo)
+}
+
+release_tag_from_url() {
+  local url tag
+  url="$1"
+
+  case "$url" in
+    */releases/download/*/*)
+      tag="${url#*/releases/download/}"
+      tag="${tag%%/*}"
+      printf '%s\n' "$tag"
+      ;;
+  esac
+}
+
+release_tag_to_install() {
+  if [ -n "$INSTALLED_RELEASE_TAG" ]; then
+    printf '%s\n' "$INSTALLED_RELEASE_TAG"
+    return
+  fi
+
+  if [ "$RELEASE_TAG" != "latest" ]; then
+    printf '%s\n' "$RELEASE_TAG"
+  fi
 }
 
 main() {
@@ -129,6 +223,7 @@ main() {
   resolve_release_urls
   compute_dirs
   check_dependencies
+  setup_privilege
 
   local tmp_dir
   tmp_dir=$(mktemp -d)
@@ -136,8 +231,12 @@ main() {
   trap "rm -rf '${tmp_dir}'" EXIT
 
   log "Installing ${DISPLAY_NAME} from ${REPO} release ${RELEASE_TAG}..."
+  resolve_latest_release_tag
 
-  mkdir -p "$bin_dir" "$desktop_dir" "$icon_dir"
+  run_privileged mkdir -p "$bin_dir" "$metadata_dir"
+  if [ "$NO_DESKTOP" -eq 0 ]; then
+    run_privileged mkdir -p "$desktop_dir" "$icon_dir"
+  fi
 
   log "Downloading ${APPIMAGE_NAME}..."
   download "$APPIMAGE_URL" "${tmp_dir}/${APPIMAGE_NAME}"
@@ -158,25 +257,35 @@ main() {
     warn "skipping SHA256 verification"
   fi
 
-  log "Downloading icon..."
-  download "$ICON_URL" "${tmp_dir}/${ICON_NAME}" || warn "icon download failed; desktop entry may lack an icon"
-
   local dest_appimage dest_desktop dest_icon
   dest_appimage="${bin_dir}/${APP_NAME}"
   dest_desktop="${desktop_dir}/${DESKTOP_NAME}"
   dest_icon="${icon_dir}/${ICON_NAME}"
 
   # Remove any previous install so the overwrite is clean.
-  rm -f "$dest_appimage"
+  run_privileged rm -f "$dest_appimage"
 
-  install -m 755 "${tmp_dir}/${APPIMAGE_NAME}" "$dest_appimage"
+  run_privileged install -m 755 "${tmp_dir}/${APPIMAGE_NAME}" "$dest_appimage"
   log "Installed binary: ${dest_appimage}"
 
-  install -m 644 "${tmp_dir}/${ICON_NAME}" "$dest_icon" 2>/dev/null || true
-  log "Installed icon: ${dest_icon}"
+  local installed_tag
+  installed_tag=$(release_tag_to_install)
+  if [ -n "$installed_tag" ]; then
+    printf '%s\n' "$installed_tag" > "${tmp_dir}/release-tag"
+    run_privileged install -m 644 "${tmp_dir}/release-tag" "${metadata_dir}/release-tag"
+    log "Installed release metadata: ${metadata_dir}/release-tag"
+  fi
 
   if [ "$NO_DESKTOP" -eq 0 ]; then
-    cat > "$dest_desktop" <<EOF
+    log "Downloading icon..."
+    download "$ICON_URL" "${tmp_dir}/${ICON_NAME}" || warn "icon download failed; desktop entry may lack an icon"
+
+    run_privileged install -m 644 "${tmp_dir}/${ICON_NAME}" "$dest_icon" 2>/dev/null || true
+    log "Installed icon: ${dest_icon}"
+
+    local tmp_desktop
+    tmp_desktop="${tmp_dir}/${DESKTOP_NAME}"
+    cat > "$tmp_desktop" <<EOF
 [Desktop Entry]
 Name=${DISPLAY_NAME}
 Comment=World of Warcraft combat log recorder
@@ -188,7 +297,7 @@ StartupNotify=true
 Categories=AudioVideo;Video;Recorder;
 TryExec=${dest_appimage}
 EOF
-    chmod 644 "$dest_desktop"
+    run_privileged install -m 644 "$tmp_desktop" "$dest_desktop"
     log "Installed desktop entry: ${dest_desktop}"
   fi
 

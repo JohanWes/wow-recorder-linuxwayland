@@ -15,6 +15,8 @@ import { Phrase } from '../../../localisation/phrases';
 export interface UpdateDialogInfo {
   currentVersion: string;
   latestVersion: string;
+  latestReleaseTag: string;
+  currentReleaseTag: string;
   releaseUrl: string;
 }
 
@@ -47,7 +49,7 @@ const UpdateDialog = ({
   };
 
   const handleDismiss = () => {
-    onDismiss(updateInfo.latestVersion);
+    onDismiss(updateInfo.latestReleaseTag);
     onClose();
   };
 
@@ -84,6 +86,11 @@ const UpdateDialog = ({
               <span className="font-mono text-sm font-semibold text-green-400">
                 v{updateInfo.latestVersion}
               </span>
+              {updateInfo.latestReleaseTag && (
+                <span className="font-mono text-xs text-foreground/50">
+                  {updateInfo.latestReleaseTag}
+                </span>
+              )}
             </div>
           </div>
 

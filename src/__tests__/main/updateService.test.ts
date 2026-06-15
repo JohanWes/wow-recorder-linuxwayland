@@ -5,11 +5,23 @@ jest.mock('electron', () => ({
   },
 }));
 
+import fs from 'fs';
+import type ConfigService from '../../config/ConfigService';
 import {
+  checkForUpdates,
   compareVersions,
   extractVersionFromTag,
   GITHUB_RELEASES_API,
 } from '../../main/updateService';
+
+const mockApp = jest.requireMock('electron').app;
+
+const mockConfig = (dismissedUpdateVersion = '') =>
+  ({
+    get: jest.fn((key: string) =>
+      key === 'dismissedUpdateVersion' ? dismissedUpdateVersion : undefined,
+    ),
+  }) as unknown as ConfigService;
 
 describe('compareVersions', () => {
   it('returns 1 when v1 > v2', () => {
@@ -119,5 +131,75 @@ describe('checkForUpdates - config integration', () => {
     expect(GITHUB_RELEASES_API).toBe(
       'https://api.github.com/repos/JohanWes/wow-recorder-linuxwayland/releases/latest',
     );
+  });
+});
+
+describe('checkForUpdates - release tag comparison', () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    mockApp.isPackaged = true;
+    mockApp.getVersion.mockReturnValue('7.7.1');
+    jest
+      .spyOn(fs, 'existsSync')
+      .mockImplementation((candidate) =>
+        String(candidate).endsWith('/release-tag'),
+      );
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    jest.restoreAllMocks();
+  });
+
+  it('returns null when the installed release tag already matches latest', async () => {
+    jest.spyOn(fs, 'readFileSync').mockReturnValue('linux-7.7.1-639b6f5\n');
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        tag_name: 'linux-7.7.1-639b6f5',
+        html_url:
+          'https://github.com/JohanWes/wow-recorder-linuxwayland/releases/tag/linux-7.7.1-639b6f5',
+      }),
+    } as Response);
+
+    await expect(checkForUpdates(mockConfig())).resolves.toBeNull();
+  });
+
+  it('prompts when the version is the same but the release sha changed', async () => {
+    jest.spyOn(fs, 'readFileSync').mockReturnValue('linux-7.7.1-48a40a0\n');
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        tag_name: 'linux-7.7.1-639b6f5',
+        html_url:
+          'https://github.com/JohanWes/wow-recorder-linuxwayland/releases/tag/linux-7.7.1-639b6f5',
+      }),
+    } as Response);
+
+    const result = await checkForUpdates(mockConfig());
+
+    expect(result).toMatchObject({
+      currentVersion: '7.7.1',
+      latestVersion: '7.7.1',
+      currentReleaseTag: 'linux-7.7.1-48a40a0',
+      latestReleaseTag: 'linux-7.7.1-639b6f5',
+    });
+  });
+
+  it('suppresses only the dismissed release tag', async () => {
+    jest.spyOn(fs, 'readFileSync').mockReturnValue('linux-7.7.1-48a40a0\n');
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        tag_name: 'linux-7.7.1-639b6f5',
+        html_url:
+          'https://github.com/JohanWes/wow-recorder-linuxwayland/releases/tag/linux-7.7.1-639b6f5',
+      }),
+    } as Response);
+
+    await expect(
+      checkForUpdates(mockConfig('linux-7.7.1-639b6f5')),
+    ).resolves.toBeNull();
   });
 });

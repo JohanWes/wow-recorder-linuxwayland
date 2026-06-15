@@ -1,10 +1,15 @@
 import { app } from 'electron';
 import { spawn } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import ConfigService from '../config/ConfigService';
 
 export interface UpdateInfo {
   currentVersion: string;
   latestVersion: string;
+  latestReleaseTag: string;
+  currentReleaseTag: string;
   releaseUrl: string;
 }
 
@@ -33,6 +38,62 @@ export function extractVersionFromTag(tag: string): string {
   return tag.replace(/^(linux-|v)/, '').replace(/-[0-9a-f]{7,}$/, '');
 }
 
+export function readInstalledReleaseTag(): string {
+  const candidates = new Set<string>();
+  const executablePath = process.execPath;
+
+  if (executablePath) {
+    const executableDir = path.dirname(executablePath);
+    candidates.add(
+      path.join(
+        executableDir,
+        '..',
+        'share',
+        'warcraftrecorder',
+        'release-tag',
+      ),
+    );
+  }
+
+  candidates.add(
+    path.join(
+      os.homedir(),
+      '.local',
+      'share',
+      'warcraftrecorder',
+      'release-tag',
+    ),
+  );
+
+  for (const candidate of candidates) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+      return fs.readFileSync(candidate, 'utf8').trim();
+    } catch (e) {
+      console.warn(
+        `[UpdateService] Failed to read installed release tag from ${candidate}:`,
+        String(e),
+      );
+    }
+  }
+
+  return '';
+}
+
+export function getInstallPrefix(): string | null {
+  const executableDir = path.dirname(process.execPath);
+
+  if (path.basename(executableDir) !== 'bin') {
+    return null;
+  }
+
+  return path.dirname(executableDir);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 export async function checkForUpdates(
   cfg: ConfigService,
 ): Promise<UpdateInfo | null> {
@@ -43,6 +104,8 @@ export async function checkForUpdates(
     return {
       currentVersion,
       latestVersion: `v${currentVersion}.999 (dry run)`,
+      latestReleaseTag: `dry-run-${currentVersion}.999`,
+      currentReleaseTag: readInstalledReleaseTag(),
       releaseUrl:
         'https://github.com/JohanWes/wow-recorder-linuxwayland/releases/latest',
     };
@@ -77,20 +140,27 @@ export async function checkForUpdates(
 
     const latestTag = release.tag_name;
     const latestVersion = extractVersionFromTag(latestTag);
+    const currentReleaseTag = readInstalledReleaseTag();
+    const versionComparison = compareVersions(latestVersion, currentVersion);
 
     console.info(
-      `[UpdateService] Current: ${currentVersion}, Latest: ${latestVersion}`,
+      `[UpdateService] Current: ${currentVersion} (${currentReleaseTag || 'unknown release tag'}), Latest: ${latestVersion} (${latestTag})`,
     );
 
-    if (compareVersions(latestVersion, currentVersion) <= 0) {
+    if (versionComparison < 0) {
       console.info('[UpdateService] Already up to date');
       return null;
     }
 
-    const dismissedVersion = cfg.get<string>('dismissedUpdateVersion');
-    if (dismissedVersion === latestVersion) {
+    if (versionComparison === 0 && currentReleaseTag === latestTag) {
+      console.info('[UpdateService] Already on latest release tag');
+      return null;
+    }
+
+    const dismissedReleaseTag = cfg.get<string>('dismissedUpdateVersion');
+    if (dismissedReleaseTag === latestTag) {
       console.info(
-        `[UpdateService] Version ${latestVersion} was dismissed, skipping`,
+        `[UpdateService] Release ${latestTag} was dismissed, skipping`,
       );
       return null;
     }
@@ -99,6 +169,8 @@ export async function checkForUpdates(
     return {
       currentVersion,
       latestVersion,
+      latestReleaseTag: latestTag,
+      currentReleaseTag,
       releaseUrl: release.html_url,
     };
   } catch (e) {
@@ -111,9 +183,14 @@ export function performUpdate(): Promise<void> {
   return new Promise((resolve, reject) => {
     console.info('[UpdateService] Running install script...');
 
+    const installPrefix = getInstallPrefix();
+    const installArgs = installPrefix
+      ? ` -s -- --prefix ${shellQuote(installPrefix)}`
+      : '';
+
     const child = spawn(
       'bash',
-      ['-c', `curl -fsSL '${INSTALL_SCRIPT_URL}' | bash`],
+      ['-c', `curl -fsSL '${INSTALL_SCRIPT_URL}' | bash${installArgs}`],
       {
         stdio: 'pipe',
       },
