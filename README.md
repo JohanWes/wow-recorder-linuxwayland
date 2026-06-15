@@ -40,27 +40,6 @@ rm ~/.local/bin/warcraftrecorder \
    ~/.local/share/icons/hicolor/256x256/apps/warcraftrecorder.png
 ```
 
-#### Installer flags
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/install.sh | bash -s -- --no-desktop
-```
-
-Available flags:
-
-- `--prefix <dir>` — install under a custom writable prefix (`bin`, `share/applications`, and `share/icons` are created there).
-- `--no-desktop` — skip creating the application menu entry.
-- `--no-verify` — skip SHA256 checksum verification.
-- `--use-sudo` — use `sudo` for install steps when `--prefix` points to a system location such as `/opt/warcraftrecorder`.
-- `--tag <tag>` — install a specific release tag instead of `latest`.
-- `--repo <owner/repo>` — install from a different fork or mirror.
-
-System-wide installs need write permission for the target prefix. For example:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/install.sh | bash -s -- --prefix /opt/warcraftrecorder --no-desktop --use-sudo
-```
-
 ### Option 2: Manual AppImage install
 
 If you prefer not to run a remote script, download the AppImage directly from the [latest release](https://github.com/JohanWes/wow-recorder-linuxwayland/releases/latest):
