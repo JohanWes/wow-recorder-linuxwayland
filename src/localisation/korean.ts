@@ -100,7 +100,6 @@ const KOREAN: Translations = {
   [Phrase.VideoCategoryBattlegroundsLabel]: '전장',
   [Phrase.VideoCategoryClipsLabel]: '클립',
   [Phrase.LogsButtonLabel]: 'Folder',
-  [Phrase.DiscordButtonLabel]: 'Setup',
   [Phrase.TestButtonUnable]: '지금은 테스트를 실행할 수 없습니다. 테스트를 실행하려면 게임이 실행 중이어야 하고, 설정이 유효해야 하며 현재 활동 중이 아니어야 합니다.',
   [Phrase.GeneralSettingsLabel]: '일반 설정',
   [Phrase.DiskStorageFolderLabel]: '디스크 저장 폴더',

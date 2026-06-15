@@ -409,7 +409,7 @@ const CategoryPage = (props: IProps) => {
 
   const openSetupInstructions = () => {
     window.electron.ipcRenderer.sendMessage('openURL', [
-      'https://www.warcraftrecorder.com/about',
+      'https://github.com/JohanWes/wow-recorder-linuxwayland',
     ]);
   };
 

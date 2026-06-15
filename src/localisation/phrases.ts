@@ -101,7 +101,6 @@ enum Phrase {
   VideoCategoryManualLabel,
   VideoCategoryClipsLabel,
   LogsButtonLabel,
-  DiscordButtonLabel,
   TestButtonUnable,
   GeneralSettingsLabel,
   DiskStorageFolderLabel,

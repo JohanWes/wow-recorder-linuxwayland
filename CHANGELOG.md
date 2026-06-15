@@ -177,7 +177,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Split out cloud config from regular config and add an appropriate status card. Cloud settings can be reconfigured while recording.
 - Add the ability to force the video sources to SDR.
 - Volume can now be configured on a per-source basis.
-- [Issue 632](https://github.com/aza547/wow-recorder/issues/632) - Add AV1 support for AMD: there has been no testing of this, please share your experience in Discord!
+- [Issue 632](https://github.com/aza547/wow-recorder/issues/632) - Add AV1 support for AMD: there has been no testing of this, please share your experience on the [Linux fork GitHub issues](https://github.com/JohanWes/wow-recorder-linuxwayland/issues)!
 - Add support for QSV (H264 and AV1) encoding.
 - Add a button to refresh the list of guilds on demand.
 - On first time setup, automatically set the default the encoder to a sensible default (i.e. pick a hardware encoder).

@@ -8,19 +8,18 @@
     "screen",
     "recorder"
   ],
-  "homepage": "https://www.warcraftrecorder.com/",
+  "homepage": "https://github.com/JohanWes/wow-recorder-linuxwayland",
   "bugs": {
-    "url": "https://github.com/aza547/wow-recorder/issues"
+    "url": "https://github.com/JohanWes/wow-recorder-linuxwayland/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/aza547/wow-recorder.git"
+    "url": "git+https://github.com/JohanWes/wow-recorder-linuxwayland.git"
   },
   "license": "Creative Commons Attribution-NonCommercial",
   "author": {
-    "name": "Alex K",
-    "email": "warcraftrecorder@gmail.com",
-    "url": "https://www.warcraftrecorder.com/"
+    "name": "JohanWes",
+    "url": "https://github.com/JohanWes/wow-recorder-linuxwayland"
   },
   "main": "./.erb/dll/main.bundle.dev.js",
   "scripts": {
@@ -106,8 +105,8 @@
     ],
     "publish": {
       "provider": "github",
-      "owner": "aza547",
-      "repo": "wow-recorder"
+      "owner": "JohanWes",
+      "repo": "wow-recorder-linuxwayland"
     }
   },
   "jest": {

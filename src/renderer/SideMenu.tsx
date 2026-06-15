@@ -42,7 +42,6 @@ import Menu from './components/Menu';
 import Separator from './components/Separator/Separator';
 import LogsButton from './LogButton';
 import TestButton from './TestButton';
-import DiscordButton from './DiscordButton';
 import ApplicationStatusCard from './containers/ApplicationStatusCard/ApplicationStatusCard';
 import { ScrollArea } from './components/ScrollArea/ScrollArea';
 import { Phrase } from 'localisation/phrases';
@@ -232,7 +231,6 @@ const SideMenu = (props: IProps) => {
         <div className="flex items-center justify-center gap-x-4">
           <LogsButton appState={appState} />
           <TestButton recorderStatus={recorderStatus} appState={appState} />
-          <DiscordButton appState={appState} />
         </div>
         {!!appVersion && (
           <div className="w-full mt-1 text-foreground font-sans text-[11px] font-bold text-center opacity-75">

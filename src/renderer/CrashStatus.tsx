@@ -30,7 +30,16 @@ export default function CrashStatus(props: IProps) {
       <Typography sx={{ color: 'white', fontSize: '0.75rem', m: 1 }}>
         An OBS crash has occured and has been recovered from. This should not
         happen in normal operation. You may wish to seek help by sharing your
-        WCR and OBS logs in discord.
+        WCR and OBS logs on the{' '}
+        <a
+          href="https://github.com/JohanWes/wow-recorder-linuxwayland/issues"
+          style={{ color: '#60a5fa' }}
+          target="_blank"
+          rel="noreferrer"
+        >
+          GitHub issues page
+        </a>
+        .
       </Typography>
     );
   };
