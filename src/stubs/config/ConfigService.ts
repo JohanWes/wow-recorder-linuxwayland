@@ -27,6 +27,9 @@ export default class ConfigService extends EventEmitter implements IConfigServic
   }
 
   get<T>(key: keyof ConfigurationSchema): T {
+    if (Object.prototype.hasOwnProperty.call(this.values, key)) {
+      return this.values[key] as unknown as T;
+    }
     if (key === 'language') return 'English' as unknown as T;
     throw new Error(`Test ConfigService missing key: ${String(key)}`);
   }

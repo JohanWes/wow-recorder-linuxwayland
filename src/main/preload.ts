@@ -54,7 +54,9 @@ export type Channels =
   | 'reconfigureAudio'
   | 'reconfigureOverlay'
   | 'getSensibleEncoderDefault'
-  | 'getLinuxGsrAudioDevices';
+  | 'getLinuxGsrAudioDevices'
+  | 'performUpdate'
+  | 'dismissUpdate';
 
 contextBridge.exposeInMainWorld('electron', {
   platform: process.platform,

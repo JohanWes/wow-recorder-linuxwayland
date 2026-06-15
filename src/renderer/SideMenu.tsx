@@ -8,6 +8,7 @@ import {
   HardHat,
   Sword,
   Swords,
+  Download,
 } from 'lucide-react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faDungeon, faDragon } from '@fortawesome/free-solid-svg-icons';
@@ -45,6 +46,7 @@ import DiscordButton from './DiscordButton';
 import ApplicationStatusCard from './containers/ApplicationStatusCard/ApplicationStatusCard';
 import { ScrollArea } from './components/ScrollArea/ScrollArea';
 import { Phrase } from 'localisation/phrases';
+import { UpdateDialogInfo } from './components/UpdateDialog/UpdateDialog';
 
 interface IProps {
   recorderStatus: RecStatus;
@@ -61,6 +63,8 @@ interface IProps {
   activityStatus: ActivityStatus | null;
   advancedLoggingStatus: AdvancedLoggingStatus;
   setPreviewEnabled: Dispatch<SetStateAction<boolean>>;
+  updateInfo: UpdateDialogInfo | null;
+  onUpdateClick: () => void;
 }
 
 const SideMenu = (props: IProps) => {
@@ -79,6 +83,8 @@ const SideMenu = (props: IProps) => {
     activityStatus,
     advancedLoggingStatus,
     setPreviewEnabled,
+    updateInfo,
+    onUpdateClick,
   } = props;
 
   const [appVersion, setAppVersion] = useState<string>();
@@ -232,6 +238,16 @@ const SideMenu = (props: IProps) => {
           <div className="w-full mt-1 text-foreground font-sans text-[11px] font-bold text-center opacity-75">
             {getLocalePhrase(language, Phrase.Version)} {appVersion}
           </div>
+        )}
+        {updateInfo && (
+          <button
+            onClick={onUpdateClick}
+            className="w-full mt-1 flex items-center justify-center gap-1 text-green-400 hover:text-green-300 font-sans text-[11px] font-bold text-center transition-colors"
+            title={getLocalePhrase(language, Phrase.UpdateAvailableTooltip)}
+          >
+            <Download className="h-3 w-3" />
+            {getLocalePhrase(language, Phrase.UpdateAvailableTitle)}
+          </button>
         )}
       </div>
     </div>

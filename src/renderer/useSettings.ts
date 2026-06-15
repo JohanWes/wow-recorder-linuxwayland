@@ -104,6 +104,7 @@ export const getSettings = (): ConfigurationSchema => {
     firstTimeSetup: getConfigValue<boolean>('firstTimeSetup'),
     chatUserNameAgreed: getConfigValue<string>('chatUserNameAgreed'),
     validateLogPaths: getConfigValue<boolean>('validateLogPaths'),
+    dismissedUpdateVersion: getConfigValue<string>('dismissedUpdateVersion'),
     /* eslint-enable prettier/prettier */
   };
 

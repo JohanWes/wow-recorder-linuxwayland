@@ -78,6 +78,7 @@ export type ConfigurationSchema = {
   firstTimeSetup: boolean;
   chatUserNameAgreed: string;
   validateLogPaths: boolean;
+  dismissedUpdateVersion: string;
 
   // Linux (gpu-screen-recorder) settings.
   linuxGsrBufferSeconds: number;
@@ -548,5 +549,10 @@ export const configSchema = {
     description: Phrase.ValidateLogPathsDescription,
     type: 'boolean',
     default: true,
+  },
+  dismissedUpdateVersion: {
+    description: Phrase.Unknown,
+    type: 'string',
+    default: '',
   },
 };

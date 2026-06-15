@@ -88,6 +88,9 @@ declare global {
         ): void;
 
         clipVideo(video: RendererVideo, offset: number, duration: number): void;
+
+        performUpdate(): Promise<void>;
+        dismissUpdate(version: string): void;
       };
     };
   }

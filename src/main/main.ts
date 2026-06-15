@@ -35,6 +35,7 @@ import DiskClient from 'storage/DiskClient';
 import Poller from 'utils/Poller';
 import Recorder from './recording/Recorder';
 import AsyncQueue from 'utils/AsyncQueue';
+import { checkForUpdates, performUpdate } from './updateService';
 
 const logDir = setupApplicationLogging();
 const appVersion = app.getVersion();
@@ -268,7 +269,6 @@ const createWindow = async () => {
   });
 
   uIOhook.start();
-
 };
 
 /**
@@ -592,6 +592,28 @@ ipcMain.on('videoPlayerSettings', (event, args) => {
 });
 
 /**
+ * Perform application update via install script, then relaunch.
+ */
+ipcMain.handle('performUpdate', async () => {
+  try {
+    await performUpdate();
+    app.relaunch();
+    app.quit();
+  } catch (e) {
+    console.error('[Main] Update failed:', String(e));
+    throw e;
+  }
+});
+
+/**
+ * Dismiss an update notification so it won't show again for this version.
+ */
+ipcMain.handle('dismissUpdate', (_event, version: string) => {
+  console.info('[Main] Dismissing update for version', version);
+  cfg.set('dismissedUpdateVersion', version);
+});
+
+/**
  * Shutdown the app if all windows closed.
  */
 app.on('window-all-closed', async () => {
@@ -644,7 +666,13 @@ app
     // Required by the video player to safely play files from disk.
     protocol.handle('vod', handleSafeVodRequest);
 
-    createWindow();
+    createWindow().then(() => {
+      checkForUpdates(cfg).then((updateInfo) => {
+        if (updateInfo && window && !window.isDestroyed()) {
+          window.webContents.send('updateAvailable', updateInfo);
+        }
+      });
+    });
   })
   .catch(console.error);
 
