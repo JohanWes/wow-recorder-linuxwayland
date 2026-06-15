@@ -5,7 +5,11 @@ jest.mock('electron', () => ({
   },
 }));
 
-import { compareVersions, GITHUB_RELEASES_API } from '../../main/updateService';
+import {
+  compareVersions,
+  extractVersionFromTag,
+  GITHUB_RELEASES_API,
+} from '../../main/updateService';
 
 describe('compareVersions', () => {
   it('returns 1 when v1 > v2', () => {
@@ -42,6 +46,33 @@ describe('compareVersions', () => {
     expect(compareVersions('3.14.0', '3.13.2')).toBe(1);
     expect(compareVersions('3.14.0', '3.14.1')).toBe(-1);
     expect(compareVersions('3.14.1', '3.14.0')).toBe(1);
+  });
+});
+
+describe('extractVersionFromTag', () => {
+  it('strips linux- prefix and trailing sha suffix', () => {
+    expect(extractVersionFromTag('linux-7.7.1-48a40a0')).toBe('7.7.1');
+    expect(extractVersionFromTag('linux-7.7.1-48a40a087021b8cd')).toBe('7.7.1');
+  });
+
+  it('strips v prefix', () => {
+    expect(extractVersionFromTag('v7.7.1')).toBe('7.7.1');
+  });
+
+  it('returns plain semver unchanged', () => {
+    expect(extractVersionFromTag('7.7.1')).toBe('7.7.1');
+  });
+
+  it('compares linux-tag version against plain semver correctly', () => {
+    expect(
+      compareVersions(extractVersionFromTag('linux-7.7.1-48a40a0'), '7.4.0'),
+    ).toBe(1);
+    expect(
+      compareVersions(extractVersionFromTag('linux-7.7.1-48a40a0'), '7.7.1'),
+    ).toBe(0);
+    expect(
+      compareVersions(extractVersionFromTag('linux-7.4.0-48a40a0'), '7.7.1'),
+    ).toBe(-1);
   });
 });
 

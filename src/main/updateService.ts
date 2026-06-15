@@ -29,6 +29,10 @@ export function compareVersions(v1: string, v2: string): number {
   return 0;
 }
 
+export function extractVersionFromTag(tag: string): string {
+  return tag.replace(/^(linux-|v)/, '').replace(/-[0-9a-f]{7,}$/, '');
+}
+
 export async function checkForUpdates(
   cfg: ConfigService,
 ): Promise<UpdateInfo | null> {
@@ -72,7 +76,7 @@ export async function checkForUpdates(
     };
 
     const latestTag = release.tag_name;
-    const latestVersion = latestTag.replace(/^v/, '');
+    const latestVersion = extractVersionFromTag(latestTag);
 
     console.info(
       `[UpdateService] Current: ${currentVersion}, Latest: ${latestVersion}`,
