@@ -2,6 +2,9 @@ import React, { Dispatch, SetStateAction } from 'react';
 import { AdvancedLoggingStatus, AppState, RecStatus } from 'main/types';
 import { ConfigurationSchema } from 'config/configSchema';
 import { getLocalePhrase } from 'localisation/translations';
+import { TriangleAlert } from 'lucide-react';
+import { Tooltip } from './components/Tooltip/Tooltip';
+import { getSettingsWarnings } from './settingsWarnings';
 import GeneralSettings from './GeneralSettings';
 import FlavourSettings from './FlavourSettings';
 import PVESettings from './PVESettings';
@@ -41,6 +44,8 @@ const SettingsPage: React.FC<IProps> = (props: IProps) => {
     advancedLoggingStatus,
   } = props;
 
+  const warnings = getSettingsWarnings(config);
+
   return (
     <div className="w-full h-full bg-background-higher pt-[32px] px-4">
       <Tabs defaultValue="application" className="w-full">
@@ -67,11 +72,28 @@ const SettingsPage: React.FC<IProps> = (props: IProps) => {
                     appState.language,
                     Phrase.GeneralSettingsLabel,
                   )}
+                  {warnings.storagePathMissing && (
+                    <Tooltip
+                      content={getLocalePhrase(
+                        appState.language,
+                        Phrase.SettingsMissingStoragePath,
+                      )}
+                      side="right"
+                    >
+                      <TriangleAlert
+                        size={14}
+                        fill="#facc15"
+                        className="text-yellow-900 ml-1.5 inline align-middle -mt-0.5"
+                      />
+                    </Tooltip>
+                  )}
                 </CategoryHeading>
                 <Separator className="mt-2 mb-4" />
                 <GeneralSettings
                   recorderStatus={recorderStatus}
                   appState={appState}
+                  config={config}
+                  setConfig={setConfig}
                 />
               </div>
               <div>
@@ -106,6 +128,28 @@ const SettingsPage: React.FC<IProps> = (props: IProps) => {
               <div>
                 <CategoryHeading>
                   {getLocalePhrase(appState.language, Phrase.GameSettingsLabel)}
+                  {warnings.logPathMissing && (
+                    <Tooltip
+                      content={
+                        warnings.noFlavourEnabled
+                          ? getLocalePhrase(
+                              appState.language,
+                              Phrase.SettingsNoFlavourEnabled,
+                            )
+                          : getLocalePhrase(
+                              appState.language,
+                              Phrase.SettingsMissingLogPath,
+                            )
+                      }
+                      side="right"
+                    >
+                      <TriangleAlert
+                        size={14}
+                        fill="#facc15"
+                        className="text-yellow-900 ml-1.5 inline align-middle -mt-0.5"
+                      />
+                    </Tooltip>
+                  )}
                 </CategoryHeading>
                 <Separator className="mt-2 mb-4" />
                 <FlavourSettings

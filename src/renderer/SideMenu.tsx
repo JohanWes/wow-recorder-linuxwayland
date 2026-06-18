@@ -8,6 +8,7 @@ import {
   HardHat,
   Sword,
   Swords,
+  TriangleAlert,
 } from 'lucide-react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faDungeon, faDragon } from '@fortawesome/free-solid-svg-icons';
@@ -36,6 +37,7 @@ import {
 import { VideoCategory } from '../types/VideoCategory';
 import { setConfigValue } from './useSettings';
 import { getCategoryIndex } from './rendererutils';
+import { getSettingsWarnings } from './settingsWarnings';
 import Menu from './components/Menu';
 import Separator from './components/Separator/Separator';
 import LogsButton from './LogButton';
@@ -43,6 +45,7 @@ import TestButton from './TestButton';
 import CheckForUpdatesButton from './CheckForUpdatesButton';
 import ApplicationStatusCard from './containers/ApplicationStatusCard/ApplicationStatusCard';
 import { ScrollArea } from './components/ScrollArea/ScrollArea';
+import { Tooltip } from './components/Tooltip/Tooltip';
 import { Phrase } from 'localisation/phrases';
 import { UpdateDialogInfo } from './components/UpdateDialog/UpdateDialog';
 
@@ -88,6 +91,7 @@ const SideMenu = (props: IProps) => {
 
   const [appVersion, setAppVersion] = useState<string>();
   const { category, language } = appState;
+  const warnings = getSettingsWarnings(config);
 
   useEffect(() => {
     window.electron.ipcRenderer.on('updateVersionDisplay', (t: unknown) => {
@@ -144,6 +148,44 @@ const SideMenu = (props: IProps) => {
           <Cog />
         </Menu.Item.Icon>
         {getLocalePhrase(language, Phrase.GeneralButtonText)}
+        {warnings.needsAttention && (
+          <Tooltip
+            side="right"
+            content={
+              <div className="flex flex-col gap-1">
+                <span>
+                  {getLocalePhrase(language, Phrase.SettingsNeedsAttention)}
+                </span>
+                {warnings.storagePathMissing && (
+                  <span>
+                    •{' '}
+                    {getLocalePhrase(
+                      language,
+                      Phrase.SettingsMissingStoragePath,
+                    )}
+                  </span>
+                )}
+                {warnings.noFlavourEnabled && (
+                  <span>
+                    •{' '}
+                    {getLocalePhrase(language, Phrase.SettingsNoFlavourEnabled)}
+                  </span>
+                )}
+                {warnings.enabledFlavourMissingLogPath && (
+                  <span>
+                    • {getLocalePhrase(language, Phrase.SettingsMissingLogPath)}
+                  </span>
+                )}
+              </div>
+            }
+          >
+            <TriangleAlert
+              size={16}
+              fill="#facc15"
+              className="text-yellow-900 ml-1.5 inline align-middle -mt-0.5"
+            />
+          </Tooltip>
+        )}
       </Menu.Item>
     );
   };

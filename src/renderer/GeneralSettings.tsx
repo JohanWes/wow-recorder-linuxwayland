@@ -1,10 +1,10 @@
 import * as React from 'react';
-import { configSchema } from 'config/configSchema';
+import { ConfigurationSchema, configSchema } from 'config/configSchema';
 import { AppState, RecStatus } from 'main/types';
-import { useEffect, useRef } from 'react';
+import { Dispatch, SetStateAction, useEffect, useRef } from 'react';
 import { HardDrive, Info } from 'lucide-react';
 import { getLocalePhrase } from 'localisation/translations';
-import { setConfigValues, useSettings } from './useSettings';
+import { setConfigValues } from './useSettings';
 import { pathSelect } from './rendererutils';
 import { Input } from './components/Input/Input';
 import Label from './components/Label/Label';
@@ -17,15 +17,16 @@ import { Phrase } from 'localisation/phrases';
 interface IProps {
   recorderStatus: RecStatus;
   appState: AppState;
+  config: ConfigurationSchema;
+  setConfig: Dispatch<SetStateAction<ConfigurationSchema>>;
 }
 
 const ipc = window.electron.ipcRenderer;
 let debounceTimeout: NodeJS.Timeout | null;
 
 const GeneralSettings: React.FC<IProps> = (props: IProps) => {
-  const { recorderStatus, appState } = props;
+  const { recorderStatus, appState, config, setConfig } = props;
   const { language } = appState;
-  const [config, setConfig] = useSettings();
   const initialRenderVideoConfig = useRef(true);
 
   useEffect(() => {

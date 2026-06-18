@@ -535,6 +535,10 @@ const KOREAN: Translations = {
   [Phrase.LinuxGsrAudioDescription]: 'Linux에서 gpu-screen-recorder 오디오 입력(예: default_output, default_input, app:<name>).',
   [Phrase.LinuxGsrReplayStorageDescription]: 'Linux에서 gpu-screen-recorder 리플레이 버퍼 저장 방식(ram 또는 disk).',
   [Phrase.LinuxGsrLeadInSecondsDescription]: 'Linux에서 리플레이 프리롤을 트리밍할 때 활동 시작 전 추가로 포함할 초.',
+  [Phrase.SettingsNeedsAttention]: '필수 설정이 구성되지 않았습니다',
+  [Phrase.SettingsMissingStoragePath]: '디스크 저장 폴더가 설정되지 않았습니다',
+  [Phrase.SettingsNoFlavourEnabled]: '녹화를 위해 활성화된 WoW 버전이 없습니다',
+  [Phrase.SettingsMissingLogPath]: '활성화된 WoW 버전의 로그 경로가 설정되지 않았습니다',
 };
 
 export default KOREAN;

@@ -535,6 +535,10 @@ const GERMAN: Translations = {
   [Phrase.LinuxGsrAudioDescription]: 'Audio-Eingabespezifikation für gpu-screen-recorder unter Linux (z.B. default_output, default_input, app:<name>).',
   [Phrase.LinuxGsrReplayStorageDescription]: 'Replay-Puffer-Speichermodus für gpu-screen-recorder unter Linux (ram oder disk).',
   [Phrase.LinuxGsrLeadInSecondsDescription]: 'Zusätzliche Sekunden vor dem erkannten Aktivitätsstart beim Trimmen des Replay-Vorlaufs unter Linux.',
+  [Phrase.SettingsNeedsAttention]: 'Erforderliche Einstellungen sind nicht konfiguriert',
+  [Phrase.SettingsMissingStoragePath]: 'Speicherordner ist nicht festgelegt',
+  [Phrase.SettingsNoFlavourEnabled]: 'Es ist keine WoW-Variante zur Aufnahme aktiviert',
+  [Phrase.SettingsMissingLogPath]: 'Für eine aktivierte WoW-Variante ist kein Log-Pfad festgelegt',
 };
 
 export default GERMAN;

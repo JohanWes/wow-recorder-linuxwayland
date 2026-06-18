@@ -535,6 +535,10 @@ const CHINESE_SIMPLIFIED: Translations = {
   [Phrase.LinuxGsrAudioDescription]: 'Linux 上 gpu-screen-recorder 的音频输入（例如 default_output、default_input、app:<name>）。',
   [Phrase.LinuxGsrReplayStorageDescription]: 'Linux 上 gpu-screen-recorder 的回放缓冲区存储方式（ram 或 disk）。',
   [Phrase.LinuxGsrLeadInSecondsDescription]: 'Linux 上裁剪回放预滚时，在活动开始前额外包含的秒数。',
+  [Phrase.SettingsNeedsAttention]: '必需的设置尚未配置',
+  [Phrase.SettingsMissingStoragePath]: '未设置磁盘存储文件夹',
+  [Phrase.SettingsNoFlavourEnabled]: '未启用任何 WoW 版本进行录制',
+  [Phrase.SettingsMissingLogPath]: '已启用的 WoW 版本未设置日志路径',
 };
 
 export default CHINESE_SIMPLIFIED;

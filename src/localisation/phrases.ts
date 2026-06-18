@@ -532,6 +532,10 @@ enum Phrase {
   LinuxGsrAudioDescription,
   LinuxGsrReplayStorageDescription,
   LinuxGsrLeadInSecondsDescription,
+  SettingsNeedsAttention,
+  SettingsMissingStoragePath,
+  SettingsNoFlavourEnabled,
+  SettingsMissingLogPath,
 }
 
 enum Language {
