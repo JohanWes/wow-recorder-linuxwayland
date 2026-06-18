@@ -606,6 +606,13 @@ ipcMain.handle('performUpdate', async () => {
 });
 
 /**
+ * Check for updates on demand from the renderer.
+ */
+ipcMain.handle('checkForUpdates', async () => {
+  return checkForUpdates(cfg);
+});
+
+/**
  * Dismiss an update notification so it won't show again for this version.
  */
 ipcMain.handle('dismissUpdate', (_event, version: string) => {

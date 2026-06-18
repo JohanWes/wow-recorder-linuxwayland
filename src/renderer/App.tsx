@@ -204,7 +204,6 @@ const WarcraftRecorder = () => {
     ipc.on('setDiskVideos', setDiskVideos);
     ipc.on('updateAvailable', (info: unknown) => {
       setUpdateInfo(info as UpdateDialogInfo);
-      setShowUpdateDialog(true);
     });
 
     return () => {
@@ -220,6 +219,14 @@ const WarcraftRecorder = () => {
       ipc.removeAllListeners('updateAvailable');
     };
   }, []);
+
+  const handleCheckForUpdates = async () => {
+    const result = await window.electron.ipcRenderer.invoke(
+      'checkForUpdates',
+      [],
+    );
+    setUpdateInfo(result as UpdateDialogInfo | null);
+  };
 
   const handleUpdateDismiss = (version: string) => {
     window.electron.ipcRenderer.invoke('dismissUpdate', [version]);
@@ -273,6 +280,7 @@ const WarcraftRecorder = () => {
                 onUpdateClick={() => {
                   setShowUpdateDialog(true);
                 }}
+                onCheckForUpdates={handleCheckForUpdates}
               />
               <Layout
                 recorderStatus={recorderStatus}

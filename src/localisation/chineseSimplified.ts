@@ -361,6 +361,8 @@ const CHINESE_SIMPLIFIED: Translations = {
   [Phrase.UpdateAvailableText]: '有一个可用更新并可供安装。',
   [Phrase.UpdateAvailableInstallButtonText]: '立即安装',
   [Phrase.UpdateAvailableRemindButtonText]: '稍后提醒我',
+  [Phrase.CheckForUpdatesTooltip]: '检查更新',
+  [Phrase.CheckingForUpdates]: '正在检查更新…',
   [Phrase.Saving]: '保存',
   [Phrase.StartTyping]: '开始打字',
   [Phrase.ToggleDrawingMode]: '切换绘图模式',

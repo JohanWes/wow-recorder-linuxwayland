@@ -368,6 +368,8 @@ enum Phrase {
   UpdateAvailableText,
   UpdateAvailableInstallButtonText,
   UpdateAvailableRemindButtonText,
+  CheckForUpdatesTooltip,
+  CheckingForUpdates,
   Saving,
   StartTyping,
   ToggleDrawingMode,

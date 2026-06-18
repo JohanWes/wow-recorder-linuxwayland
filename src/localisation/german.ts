@@ -361,6 +361,8 @@ const GERMAN: Translations = {
   [Phrase.UpdateAvailableText]: 'Es ist ein Update verfügbar und kann installiert werden.',
   [Phrase.UpdateAvailableInstallButtonText]: 'Jetzt installieren',
   [Phrase.UpdateAvailableRemindButtonText]: 'Erinnere mich später',
+  [Phrase.CheckForUpdatesTooltip]: 'Nach Updates suchen',
+  [Phrase.CheckingForUpdates]: 'Suche nach Updates…',
   [Phrase.Saving]: 'Sparen...',
   [Phrase.StartTyping]: 'Beginnen Sie mit der Eingabe...',
   [Phrase.ToggleDrawingMode]: 'Zeichenmodus umschalten',

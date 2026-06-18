@@ -56,7 +56,8 @@ export type Channels =
   | 'getSensibleEncoderDefault'
   | 'getLinuxGsrAudioDevices'
   | 'performUpdate'
-  | 'dismissUpdate';
+  | 'dismissUpdate'
+  | 'checkForUpdates';
 
 contextBridge.exposeInMainWorld('electron', {
   platform: process.platform,

@@ -91,6 +91,10 @@ declare global {
 
         performUpdate(): Promise<void>;
         dismissUpdate(version: string): void;
+        checkForUpdates(): Promise<
+          | import('./components/UpdateDialog/UpdateDialog').UpdateDialogInfo
+          | null
+        >;
       };
     };
   }

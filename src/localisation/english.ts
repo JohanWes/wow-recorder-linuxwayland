@@ -368,6 +368,8 @@ const ENGLISH: Translations = {
   [Phrase.UpdateAvailableText]: 'There is an update available and ready to install.',
   [Phrase.UpdateAvailableInstallButtonText]: 'Install Now',
   [Phrase.UpdateAvailableRemindButtonText]: 'Remind Me Later',
+  [Phrase.CheckForUpdatesTooltip]: 'Check for updates',
+  [Phrase.CheckingForUpdates]: 'Checking for updates…',
   [Phrase.Saving]: 'Saving...',
   [Phrase.StartTyping]: 'Start typing...',
   [Phrase.ToggleDrawingMode]: 'Toggle drawing mode',

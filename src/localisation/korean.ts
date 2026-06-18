@@ -361,6 +361,8 @@ const KOREAN: Translations = {
   [Phrase.UpdateAvailableText]: '사용 가능한 업데이트가 있으며 설치할 준비가 되었습니다.',
   [Phrase.UpdateAvailableInstallButtonText]: '지금 설치',
   [Phrase.UpdateAvailableRemindButtonText]: '나중에 알림',
+  [Phrase.CheckForUpdatesTooltip]: '업데이트 확인',
+  [Phrase.CheckingForUpdates]: '업데이트 확인 중…',
   [Phrase.Saving]: '저장...',
   [Phrase.StartTyping]: '검색...',
   [Phrase.ToggleDrawingMode]: '그리기 모드',

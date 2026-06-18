@@ -8,7 +8,6 @@ import {
   HardHat,
   Sword,
   Swords,
-  Download,
 } from 'lucide-react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faDungeon, faDragon } from '@fortawesome/free-solid-svg-icons';
@@ -42,6 +41,7 @@ import Menu from './components/Menu';
 import Separator from './components/Separator/Separator';
 import LogsButton from './LogButton';
 import TestButton from './TestButton';
+import CheckForUpdatesButton from './CheckForUpdatesButton';
 import ApplicationStatusCard from './containers/ApplicationStatusCard/ApplicationStatusCard';
 import { ScrollArea } from './components/ScrollArea/ScrollArea';
 import { Phrase } from 'localisation/phrases';
@@ -64,6 +64,7 @@ interface IProps {
   setPreviewEnabled: Dispatch<SetStateAction<boolean>>;
   updateInfo: UpdateDialogInfo | null;
   onUpdateClick: () => void;
+  onCheckForUpdates: () => Promise<void>;
 }
 
 const SideMenu = (props: IProps) => {
@@ -84,6 +85,7 @@ const SideMenu = (props: IProps) => {
     setPreviewEnabled,
     updateInfo,
     onUpdateClick,
+    onCheckForUpdates,
   } = props;
 
   const [appVersion, setAppVersion] = useState<string>();
@@ -231,21 +233,17 @@ const SideMenu = (props: IProps) => {
         <div className="flex items-center justify-center gap-x-4">
           <LogsButton appState={appState} />
           <TestButton recorderStatus={recorderStatus} appState={appState} />
+          <CheckForUpdatesButton
+            language={language}
+            updateInfo={updateInfo}
+            onCheckForUpdates={onCheckForUpdates}
+            onUpdateClick={onUpdateClick}
+          />
         </div>
         {!!appVersion && (
           <div className="w-full mt-1 text-foreground font-sans text-[11px] font-bold text-center opacity-75">
             {getLocalePhrase(language, Phrase.Version)} {appVersion}
           </div>
-        )}
-        {updateInfo && (
-          <button
-            onClick={onUpdateClick}
-            className="w-full mt-1 flex items-center justify-center gap-1 text-green-400 hover:text-green-300 font-sans text-[11px] font-bold text-center transition-colors"
-            title={getLocalePhrase(language, Phrase.UpdateAvailableTooltip)}
-          >
-            <Download className="h-3 w-3" />
-            {getLocalePhrase(language, Phrase.UpdateAvailableTitle)}
-          </button>
         )}
       </div>
     </div>
