@@ -1,7 +1,6 @@
 enum Phrase {
   NoVideosSaved,
-  FirstTimeHere,
-  SetupInstructions,
+  NoVideosHint,
   ClipsDisplayedHere,
   NoClipsSaved,
   StoragePathDescription,

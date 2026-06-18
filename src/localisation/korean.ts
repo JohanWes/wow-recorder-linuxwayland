@@ -3,8 +3,7 @@ import { Translations, Phrase } from './phrases';
 /* eslint-disable prettier/prettier */
 const KOREAN: Translations = {
   [Phrase.NoVideosSaved]: '이 카테고리에 저장된 동영상이 없습니다.',
-  [Phrase.FirstTimeHere]: '처음 사용하는 경우 아래 링크에서 설정 방법을 확인할 수 있습니다.',
-  [Phrase.SetupInstructions]: 'Setup',
+  [Phrase.NoVideosHint]: '여기에 동영상이 표시될 것으로 예상되는 경우, "General" 설정이 올바르게 되어 있고 왼쪽 상단의 레코더가 "Ready"라고 표시되는지 확인하세요.',
   [Phrase.ClipsDisplayedHere]: '클립한 동영상은 여기에 표시됩니다.',
   [Phrase.NoClipsSaved]: '저장된 클립이 없습니다.',
   [Phrase.StoragePathDescription]: '기록을 저장할 위치. 프로그램이 폴더의 소유권을 가지며, 초기 설정 시 비어 있어야 하며 그 자리에서 내용을 수정해서는 안 됩니다.(영문 폴더명 권장)',

@@ -3,8 +3,7 @@ import { Translations, Phrase } from './phrases';
 /* eslint-disable prettier/prettier */
 const CHINESE_SIMPLIFIED: Translations = {
   [Phrase.NoVideosSaved]: '你还没有为此分类保存任何视频',
-  [Phrase.FirstTimeHere]: '如果这是你第一次使用，下面的链接中可以找到设置说明。如果你遇到问题，请在 Discord 的 #help 频道寻求支持。',
-  [Phrase.SetupInstructions]: '设置说明',
+  [Phrase.NoVideosHint]: '如果你希望在这里看到视频，请检查"常规"设置是否正确，并确保左上角的录制器显示"就绪"。',
   [Phrase.ClipsDisplayedHere]: '你剪辑的视频将显示在这里。',
   [Phrase.NoClipsSaved]: '你还没有保存任何剪辑',
   [Phrase.StoragePathDescription]: '用于存储录制文件的位置。Warcraft Recorder 将对该目录进行管理，初始设置时应为空，请勿在其中直接修改内容。',

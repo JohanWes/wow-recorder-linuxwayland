@@ -20,6 +20,7 @@ import {
   povDiskFirstNameSort,
 } from './rendererutils';
 import Separator from './components/Separator/Separator';
+import StatusLight from './components/StatusLight/StatusLight';
 import { Button } from './components/Button/Button';
 import VideoSelectionTable from './components/Tables/VideoSelectionTable';
 import DeleteDialog from './DeleteDialog';
@@ -402,12 +403,6 @@ const CategoryPage = (props: IProps) => {
     );
   };
 
-  const openSetupInstructions = () => {
-    window.electron.ipcRenderer.sendMessage('openURL', [
-      'https://github.com/JohanWes/wow-recorder-linuxwayland',
-    ]);
-  };
-
   const renderFirstTimeUserPrompt = () => {
     return (
       <div className="flex items-center justify-center flex-col w-1/2 h-1/2 text-center font-sans text-foreground gap-y-6">
@@ -415,12 +410,26 @@ const CategoryPage = (props: IProps) => {
           {getLocalePhrase(language, Phrase.NoVideosSaved)}
         </h1>
         <Separator className="my-2" />
-        <h2 className="text-foreground font-sans text-lg">
-          {getLocalePhrase(language, Phrase.FirstTimeHere)}
+        <h2 className="text-foreground font-sans text-lg max-w-md">
+          {getLocalePhrase(language, Phrase.NoVideosHint)}
         </h2>
-        <Button onClick={openSetupInstructions}>
-          {getLocalePhrase(language, Phrase.SetupInstructions)}
-        </Button>
+        <div className="flex items-center justify-center gap-x-2 mt-4">
+          <div className="w-full h-10 flex relative rounded-md border-t border-[rgba(255,255,255,10%)] bg-background-dark-gradient-to/30">
+            <StatusLight
+              wrapperClasses="w-1.5 h-full rounded-l-md rounded-r-none"
+              foregroundClasses="border-none w-1.5 h-full rounded-l-md rounded-r-none"
+              variant="ready"
+            />
+            <div className="ml-4 py-1 font-sans flex flex-col justify-around">
+              <span className="text-foreground-lighter font-bold text-xs drop-shadow-sm opacity-60">
+                {getLocalePhrase(language, Phrase.StatusTitleRec)}
+              </span>
+              <div className="flex items-center text-popover-foreground font-semibold text-sm">
+                {getLocalePhrase(language, Phrase.StatusTitleReady)}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     );
   };

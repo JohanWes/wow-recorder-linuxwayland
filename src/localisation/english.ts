@@ -3,8 +3,7 @@ import { Translations, Phrase } from './phrases';
 /* eslint-disable prettier/prettier */
 const ENGLISH: Translations = {
   [Phrase.NoVideosSaved]: 'You have no videos saved for this category',
-  [Phrase.FirstTimeHere]: 'If it is your first time here, setup instructions can be found at the link below. If you have problems, please use the Discord #help channel to get support.',
-  [Phrase.SetupInstructions]: 'Setup Instructions',
+  [Phrase.NoVideosHint]: 'If you expected to see videos here, check that your settings in "General" are set correctly, and that the recorder says "Ready" in the top left.',
   [Phrase.ClipsDisplayedHere]: 'Videos you clip will be displayed here.',
   [Phrase.NoClipsSaved]: 'You have no clips saved',
   [Phrase.StoragePathDescription]: 'Location to store the recordings. Warcraft Recorder takes ownership of this directory, it should be empty on initial setup and you should not modify the contents in-place.',
