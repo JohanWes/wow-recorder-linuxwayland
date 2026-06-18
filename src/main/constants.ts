@@ -255,6 +255,13 @@ const encountersAberrus: NumberKeyToStringValueMapType = {
 };
 
 /**
+ * Midnight - Sporefall
+ */
+const encountersSporefall: NumberKeyToStringValueMapType = {
+  3159: 'Rotmire',
+};
+
+/**
  * WOTLK Classic Naxxrammas
  */
 const encountersClassicNaxxramas: NumberKeyToStringValueMapType = {
@@ -333,6 +340,7 @@ const raidEncountersById: NumberKeyToStringValueMapType = {
   ...encountersSepulcher,
   ...encountersVOI,
   ...encountersAberrus,
+  ...encountersSporefall,
   ...encountersClassicNaxxramas,
   ...encountersClassicEye,
   ...encountersClassicObsidian,
@@ -364,6 +372,9 @@ const currentRetailEncounters = [
 
   // Midnight - The Dreamrift
   3306, // Chimaerus the Undreamt God
+
+  // Midnight - Sporefall
+  3159, // Rotmire
 
   // Test Encounter
   9999, // Saves having to update the test button data.
@@ -405,6 +416,12 @@ const raidInstances: RaidInstanceType[] = [
     name: 'Aberrus, the Shadowed Crucible',
     shortName: 'Aberrus',
     encounters: encountersAberrus,
+  },
+  {
+    zoneId: 16279,
+    name: 'Sporefall',
+    shortName: 'Sporefall',
+    encounters: encountersSporefall,
   },
   {
     zoneId: 3456,
@@ -1113,6 +1130,7 @@ const dungeonAffixesById: NumberKeyToStringValueMapType = {
   159: 'Oblivion',
   160: 'Devour',
   162: 'Pulsar',
+  165: "Lindormi's Guidance",
 };
 
 /**
@@ -1318,6 +1336,12 @@ const instanceDifficulty: InstanceDifficultyObjectType = {
     difficulty: 'N',
     partyType: 'raid',
     phrase: Phrase.Normal,
+  },
+  233: {
+    difficultyID: 'mythic', // Mythic flex (Rotmire)
+    difficulty: 'M',
+    partyType: 'raid',
+    phrase: Phrase.Mythic,
   },
 };
 
