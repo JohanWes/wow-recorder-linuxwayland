@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Download, Loader2 } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Download, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -20,12 +20,29 @@ export interface UpdateDialogInfo {
   releaseUrl: string;
 }
 
+interface UpdateProgress {
+  stage: string;
+  message: string;
+}
+
 interface UpdateDialogProps {
   updateInfo: UpdateDialogInfo;
   language: Language;
   onDismiss: (version: string) => void;
   onClose: () => void;
 }
+
+interface StageDefinition {
+  key: string;
+  phraseKey: Phrase;
+}
+
+const UPDATE_STAGES: StageDefinition[] = [
+  { key: 'downloading', phraseKey: Phrase.UpdateStageDownloading },
+  { key: 'verifying', phraseKey: Phrase.UpdateStageVerifying },
+  { key: 'installing', phraseKey: Phrase.UpdateStageInstalling },
+  { key: 'done', phraseKey: Phrase.UpdateStageRelaunching },
+];
 
 const UpdateDialog = ({
   updateInfo,
@@ -35,16 +52,39 @@ const UpdateDialog = ({
 }: UpdateDialogProps) => {
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<UpdateProgress | null>(null);
+  const errorFromProgress = useRef(false);
+
+  useEffect(() => {
+    const cleanup = window.electron.ipcRenderer.on(
+      'updateProgress',
+      (evt: unknown) => {
+        const p = evt as UpdateProgress;
+        setProgress(p);
+
+        if (p.stage === 'error') {
+          errorFromProgress.current = true;
+          setError(p.message);
+          setInstalling(false);
+        }
+      },
+    );
+    return cleanup as () => void;
+  }, []);
 
   const handleInstall = async () => {
     setInstalling(true);
     setError(null);
+    setProgress(null);
+    errorFromProgress.current = false;
 
     try {
       await window.electron.ipcRenderer.invoke('performUpdate', []);
     } catch (e) {
-      setError(String(e));
-      setInstalling(false);
+      if (!errorFromProgress.current) {
+        setError(String(e));
+        setInstalling(false);
+      }
     }
   };
 
@@ -53,15 +93,25 @@ const UpdateDialog = ({
     onClose();
   };
 
+  const isRelaunching =
+    progress !== null && progress.stage === 'done' && !error;
+  const isActive = installing || isRelaunching;
+  const currentStageIdx = progress
+    ? UPDATE_STAGES.findIndex((s) => s.key === progress.stage)
+    : -1;
+
   return (
-    <Dialog open onOpenChange={(open) => !open && !installing && onClose()}>
+    <Dialog open onOpenChange={(open) => !open && !isActive && onClose()}>
       <DialogContent
         className="sm:max-w-md"
-        onPointerDownOutside={(e) => installing && e.preventDefault()}
+        onPointerDownOutside={(e) => isActive && e.preventDefault()}
+        onEscapeKeyDown={(e) => isActive && e.preventDefault()}
       >
         <DialogHeader>
           <DialogTitle>
-            {getLocalePhrase(language, Phrase.UpdateAvailableTitle)}
+            {isRelaunching
+              ? getLocalePhrase(language, Phrase.UpdateInstalledRelaunching)
+              : getLocalePhrase(language, Phrase.UpdateAvailableTitle)}
           </DialogTitle>
           <DialogDescription>
             {getLocalePhrase(language, Phrase.UpdateAvailableText)}
@@ -94,37 +144,89 @@ const UpdateDialog = ({
             </div>
           </div>
 
+          {installing && progress && (
+            <div className="flex flex-col gap-2">
+              {UPDATE_STAGES.map((stage, idx) => {
+                const isComplete = currentStageIdx > idx;
+                const isCurrent = currentStageIdx === idx;
+
+                return (
+                  <div
+                    key={stage.key}
+                    className={`flex items-center gap-3 rounded-md px-3 py-2 ${isCurrent ? 'bg-primary/10 border border-primary/30' : ''} ${isComplete ? 'bg-muted/30' : ''}`}
+                  >
+                    {isComplete ? (
+                      <CheckCircle className="h-5 w-5 text-green-400 flex-shrink-0" />
+                    ) : isCurrent ? (
+                      <Loader2 className="h-5 w-5 text-primary animate-spin flex-shrink-0" />
+                    ) : (
+                      <div className="h-5 w-5 rounded-full border-2 border-foreground/30 flex-shrink-0" />
+                    )}
+                    <span
+                      className={`text-sm ${
+                        isComplete
+                          ? 'text-foreground/60'
+                          : isCurrent
+                            ? 'text-foreground font-medium'
+                            : 'text-foreground/40'
+                      }`}
+                    >
+                      {getLocalePhrase(language, stage.phraseKey)}
+                    </span>
+                  </div>
+                );
+              })}
+              {progress.message && (
+                <p className="text-xs text-foreground/50 font-mono truncate">
+                  {progress.message}
+                </p>
+              )}
+            </div>
+          )}
+
           {error && (
-            <div className="rounded-md bg-destructive/10 border border-destructive/30 px-3 py-2 text-sm text-destructive">
-              {error}
+            <div className="rounded-md bg-destructive/10 border border-destructive/30 px-3 py-2 text-sm text-destructive flex items-start gap-2">
+              <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+              <span>{error}</span>
             </div>
           )}
         </div>
 
         <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={handleDismiss}
-            disabled={installing}
-          >
-            {getLocalePhrase(language, Phrase.UpdateAvailableRemindButtonText)}
-          </Button>
-          <Button onClick={handleInstall} disabled={installing}>
-            {installing ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                {getLocalePhrase(language, Phrase.Preparing)}
-              </>
-            ) : (
-              <>
-                <Download className="mr-2 h-4 w-4" />
+          {isRelaunching ? (
+            <p className="text-sm text-foreground/60 mr-auto">
+              {getLocalePhrase(language, Phrase.UpdateInstalledRelaunching)}
+            </p>
+          ) : (
+            <>
+              <Button
+                variant="outline"
+                onClick={handleDismiss}
+                disabled={installing}
+              >
                 {getLocalePhrase(
                   language,
-                  Phrase.UpdateAvailableInstallButtonText,
+                  Phrase.UpdateAvailableRemindButtonText,
                 )}
-              </>
-            )}
-          </Button>
+              </Button>
+              <Button onClick={handleInstall} disabled={installing}>
+                {installing ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    {getLocalePhrase(language, Phrase.Preparing)}
+                  </>
+                ) : (
+                  <>
+                    <Download className="mr-2 h-4 w-4" />
+                    {getLocalePhrase(
+                      language,
+                      Phrase.UpdateAvailableInstallButtonText,
+                    )}
+                  </>
+                )}
+              </Button>
+            </>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

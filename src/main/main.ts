@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 import {
   app,
@@ -596,8 +597,39 @@ ipcMain.on('videoPlayerSettings', (event, args) => {
  */
 ipcMain.handle('performUpdate', async () => {
   try {
-    await performUpdate();
-    app.relaunch();
+    await performUpdate((progress) => {
+      if (window && !window.isDestroyed()) {
+        window.webContents.send('updateProgress', progress);
+      }
+    });
+
+    if (process.env.WR_UPDATE_INSTALL_DRY_RUN === 'true') {
+      if (window && !window.isDestroyed()) {
+        window.webContents.send('updateProgress', {
+          stage: 'done',
+          message: 'Dry run complete — relaunch skipped.',
+        });
+      }
+      return;
+    }
+
+    const execPath = process.execPath;
+    if (!fs.existsSync(execPath)) {
+      throw new Error(`Executable not found after install: ${execPath}`);
+    }
+
+    console.info('[Main] Update installed, spawning detached relauncher');
+    const quoted = execPath.replace(/'/g, "'\\''");
+    const relauncher = spawn(
+      'bash',
+      [
+        '-c',
+        `for i in $(seq 150); do if ! kill -0 ${process.pid} 2>/dev/null; then exec '${quoted}'; fi; sleep 0.2; done`,
+      ],
+      { detached: true, stdio: 'ignore' },
+    );
+    relauncher.unref();
+
     app.quit();
   } catch (e) {
     console.error('[Main] Update failed:', String(e));

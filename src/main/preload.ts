@@ -57,7 +57,8 @@ export type Channels =
   | 'getLinuxGsrAudioDevices'
   | 'performUpdate'
   | 'dismissUpdate'
-  | 'checkForUpdates';
+  | 'checkForUpdates'
+  | 'updateProgress';
 
 contextBridge.exposeInMainWorld('electron', {
   platform: process.platform,

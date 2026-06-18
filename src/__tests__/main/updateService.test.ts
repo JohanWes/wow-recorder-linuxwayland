@@ -5,16 +5,41 @@ jest.mock('electron', () => ({
   },
 }));
 
+jest.mock('child_process', () => {
+  const { EventEmitter } = jest.requireActual('events');
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let lastProc: any = null;
+  const spawnMock = jest.fn(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const proc = new EventEmitter() as any;
+    proc.stdout = new EventEmitter();
+    proc.stderr = new EventEmitter();
+    lastProc = proc;
+    return proc;
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (spawnMock as any).getLastProc = () => lastProc;
+  return { spawn: spawnMock };
+});
+
+import { spawn } from 'child_process';
+
 import fs from 'fs';
+import { EventEmitter } from 'events';
 import type ConfigService from '../../config/ConfigService';
 import {
   checkForUpdates,
   compareVersions,
   extractVersionFromTag,
+  performUpdate,
+  UpdateStage,
   GITHUB_RELEASES_API,
 } from '../../main/updateService';
 
 const mockApp = jest.requireMock('electron').app;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockSpawn = spawn as jest.Mock & { getLastProc(): any };
 
 const mockConfig = (dismissedUpdateVersion = '') =>
   ({
@@ -201,5 +226,205 @@ describe('checkForUpdates - release tag comparison', () => {
     await expect(
       checkForUpdates(mockConfig('linux-7.7.1-639b6f5')),
     ).resolves.toBeNull();
+  });
+});
+
+describe('performUpdate', () => {
+  const getLastProc = () => mockSpawn.getLastProc();
+
+  beforeEach(() => {
+    mockSpawn.mockClear();
+  });
+
+  it('emits downloading stage when stdout contains AppImage download line', async () => {
+    const onProgress = jest.fn();
+
+    const promise = performUpdate(onProgress);
+    const proc = getLastProc();
+    proc.stdout.emit(
+      'data',
+      Buffer.from('[install] Downloading WarcraftRecorder.AppImage...\n'),
+    );
+    proc.emit('close', 0);
+    await promise;
+
+    expect(onProgress).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: UpdateStage.Downloading,
+        message: expect.stringContaining('Downloading'),
+      }),
+    );
+  });
+
+  it('emits stages in order for a complete install', async () => {
+    const onProgress = jest.fn();
+
+    const promise = performUpdate(onProgress);
+    const proc = getLastProc();
+
+    proc.stdout.emit(
+      'data',
+      Buffer.from('[install] Downloading WarcraftRecorder.AppImage...\n'),
+    );
+    proc.stdout.emit(
+      'data',
+      Buffer.from('[install] Checksum verified (abc123).\n'),
+    );
+    proc.stdout.emit(
+      'data',
+      Buffer.from(
+        '[install] Installed binary: ~/.local/bin/warcraftrecorder\n',
+      ),
+    );
+    proc.stdout.emit(
+      'data',
+      Buffer.from("[install] Done. Run 'warcraftrecorder' to start.\n"),
+    );
+    proc.emit('close', 0);
+    await promise;
+
+    const stages = onProgress.mock.calls.map((call) => call[0].stage);
+    expect(stages).toEqual([
+      UpdateStage.Downloading,
+      UpdateStage.Verifying,
+      UpdateStage.Installing,
+      UpdateStage.Done,
+    ]);
+  });
+
+  it('handles partial lines across data chunks', async () => {
+    const onProgress = jest.fn();
+
+    const promise = performUpdate(onProgress);
+    const proc = getLastProc();
+
+    proc.stdout.emit(
+      'data',
+      Buffer.from('[install] Downloading WarcraftRecorder'),
+    );
+    proc.stdout.emit(
+      'data',
+      Buffer.from('.AppImage...\n[install] Checksum verified\n'),
+    );
+    proc.emit('close', 0);
+    await promise;
+
+    const stages = onProgress.mock.calls.map((call) => call[0].stage);
+    expect(stages).toContain(UpdateStage.Downloading);
+    expect(stages).toContain(UpdateStage.Verifying);
+  });
+
+  it('emits error stage when script exits non-zero', async () => {
+    const onProgress = jest.fn();
+
+    const promise = performUpdate(onProgress);
+    const proc = getLastProc();
+
+    proc.stderr.emit('data', Buffer.from('install error\n'));
+    proc.emit('close', 1);
+
+    await expect(promise).rejects.toThrow('install error');
+
+    expect(onProgress).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: UpdateStage.Error,
+      }),
+    );
+  });
+
+  it('emits error stage when spawn itself fails', async () => {
+    const onProgress = jest.fn();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let failProc: any;
+
+    mockSpawn.mockImplementationOnce(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      failProc = new EventEmitter() as any;
+      failProc.stdout = new EventEmitter();
+      failProc.stderr = new EventEmitter();
+      setImmediate(() => failProc.emit('error', new Error('spawn failed')));
+      return failProc;
+    });
+
+    const promise = performUpdate(onProgress);
+
+    await expect(promise).rejects.toThrow('spawn failed');
+
+    expect(onProgress).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: UpdateStage.Error,
+      }),
+    );
+  });
+
+  it('does not throw when onProgress is not provided', async () => {
+    const promise = performUpdate();
+    const proc = getLastProc();
+    proc.stdout.emit(
+      'data',
+      Buffer.from('[install] Downloading WarcraftRecorder.AppImage...\n'),
+    );
+    proc.emit('close', 0);
+
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  describe('dry run mode', () => {
+    const originalEnv = process.env;
+
+    beforeEach(() => {
+      process.env = { ...originalEnv };
+    });
+
+    afterEach(() => {
+      process.env = originalEnv;
+    });
+
+    it('simulates install stages in dry run mode', async () => {
+      process.env.WR_UPDATE_INSTALL_DRY_RUN = 'true';
+
+      const onProgress = jest.fn();
+
+      jest.useFakeTimers();
+      const promise = performUpdate(onProgress);
+
+      expect(onProgress).toHaveBeenCalledTimes(0);
+
+      await jest.advanceTimersByTimeAsync(800);
+      expect(onProgress).toHaveBeenCalledWith(
+        expect.objectContaining({ stage: UpdateStage.Downloading }),
+      );
+
+      await jest.advanceTimersByTimeAsync(800);
+      expect(onProgress).toHaveBeenCalledWith(
+        expect.objectContaining({ stage: UpdateStage.Verifying }),
+      );
+
+      await jest.advanceTimersByTimeAsync(800);
+      expect(onProgress).toHaveBeenCalledWith(
+        expect.objectContaining({ stage: UpdateStage.Installing }),
+      );
+
+      await jest.advanceTimersByTimeAsync(800);
+      expect(onProgress).toHaveBeenCalledWith(
+        expect.objectContaining({ stage: UpdateStage.Done }),
+      );
+
+      await jest.advanceTimersByTimeAsync(800);
+      await promise;
+      jest.useRealTimers();
+    });
+
+    it('does not activate dry run when env is not set', async () => {
+      delete process.env.WR_UPDATE_INSTALL_DRY_RUN;
+
+      const onProgress = jest.fn();
+      const promise = performUpdate(onProgress);
+      const proc = getLastProc();
+      proc.emit('close', 0);
+      await promise;
+
+      expect(onProgress).not.toHaveBeenCalled();
+    });
   });
 });

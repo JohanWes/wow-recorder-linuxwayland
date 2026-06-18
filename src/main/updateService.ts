@@ -19,6 +19,19 @@ export const GITHUB_RELEASES_API =
 export const INSTALL_SCRIPT_URL =
   'https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/install.sh';
 
+export enum UpdateStage {
+  Downloading = 'downloading',
+  Verifying = 'verifying',
+  Installing = 'installing',
+  Done = 'done',
+  Error = 'error',
+}
+
+export interface UpdateProgress {
+  stage: UpdateStage;
+  message: string;
+}
+
 export function compareVersions(v1: string, v2: string): number {
   const clean = (v: string) => v.replace(/^v/, '').split('.').map(Number);
   const a = clean(v1);
@@ -179,8 +192,45 @@ export async function checkForUpdates(
   }
 }
 
-export function performUpdate(): Promise<void> {
+export function performUpdate(
+  onProgress?: (progress: UpdateProgress) => void,
+): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (process.env.WR_UPDATE_INSTALL_DRY_RUN === 'true') {
+      console.info(
+        '[UpdateService] Dry run mode - simulating install progress',
+      );
+      const stages: UpdateProgress[] = [
+        {
+          stage: UpdateStage.Downloading,
+          message: '[install] Downloading WarcraftRecorder.AppImage...',
+        },
+        {
+          stage: UpdateStage.Verifying,
+          message: '[install] Checksum verified (abcdef12).',
+        },
+        {
+          stage: UpdateStage.Installing,
+          message: '[install] Installed binary: ~/.local/bin/warcraftrecorder',
+        },
+        {
+          stage: UpdateStage.Done,
+          message: "[install] Done. Run 'warcraftrecorder' to start.",
+        },
+      ];
+      let i = 0;
+      const timer = setInterval(() => {
+        if (i < stages.length) {
+          onProgress?.(stages[i]);
+          i++;
+        } else {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 800);
+      return;
+    }
+
     console.info('[UpdateService] Running install script...');
 
     const installPrefix = getInstallPrefix();
@@ -198,9 +248,37 @@ export function performUpdate(): Promise<void> {
 
     let stdout = '';
     let stderr = '';
+    let lineBuf = '';
+
+    const emitLine = (line: string) => {
+      if (!onProgress) return;
+      const trimmed = line.trim();
+      if (!trimmed) return;
+
+      if (trimmed.includes('[install] Done')) {
+        onProgress({ stage: UpdateStage.Done, message: trimmed });
+      } else if (
+        trimmed.includes('[install] Downloading') &&
+        trimmed.includes('AppImage') &&
+        !trimmed.includes('sha256')
+      ) {
+        onProgress({ stage: UpdateStage.Downloading, message: trimmed });
+      } else if (trimmed.includes('[install] Checksum verified')) {
+        onProgress({ stage: UpdateStage.Verifying, message: trimmed });
+      } else if (trimmed.includes('[install] Installed binary')) {
+        onProgress({ stage: UpdateStage.Installing, message: trimmed });
+      }
+    };
 
     child.stdout?.on('data', (data: Buffer) => {
-      stdout += data.toString();
+      const text = data.toString();
+      stdout += text;
+      lineBuf += text;
+      const lines = lineBuf.split('\n');
+      lineBuf = lines.pop() || '';
+      for (const line of lines) {
+        emitLine(line);
+      }
     });
 
     child.stderr?.on('data', (data: Buffer) => {
@@ -208,18 +286,32 @@ export function performUpdate(): Promise<void> {
     });
 
     child.on('close', (code) => {
+      if (lineBuf) emitLine(lineBuf);
+
       if (code === 0) {
         console.info('[UpdateService] Install script completed successfully');
         resolve();
       } else {
         const msg = stderr || stdout || `exit code ${code}`;
         console.error('[UpdateService] Install script failed:', msg);
+        if (onProgress) {
+          onProgress({
+            stage: UpdateStage.Error,
+            message: msg.trim(),
+          });
+        }
         reject(new Error(msg.trim()));
       }
     });
 
     child.on('error', (err) => {
       console.error('[UpdateService] Failed to spawn install script:', err);
+      if (onProgress) {
+        onProgress({
+          stage: UpdateStage.Error,
+          message: err.message,
+        });
+      }
       reject(err);
     });
   });
