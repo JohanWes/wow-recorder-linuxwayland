@@ -7,7 +7,6 @@ import {
   buildClipMetadata,
   checkAdvancedCombatLogging,
   getConfigWtfPath,
-  getMetadataForVideo,
   getOBSFormattedDate,
   isManualRecordHotKey,
   nextKeyPressPromise,
@@ -42,7 +41,7 @@ import {
   getBaseConfig,
   validateBaseConfig,
 } from '../utils/configUtils';
-import { ERecordingState, QualityPresets } from './obsEnums';
+import { ERecordingState } from './obsEnums';
 import {
   runClassicRecordingTest,
   runRetailRecordingTest,

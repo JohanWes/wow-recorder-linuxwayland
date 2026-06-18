@@ -26,7 +26,6 @@ import {
   MutableRefObject,
   SetStateAction,
   useEffect,
-  useRef,
   useState,
 } from 'react';
 import { ConfigurationSchema } from 'config/configSchema';
@@ -70,7 +69,6 @@ interface IProps {
 const SideMenu = (props: IProps) => {
   const {
     recorderStatus,
-    recorderCategory,
     videoCounters,
     appState,
     setAppState,

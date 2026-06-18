@@ -17,4 +17,3 @@ export const emitErrorReport = (data: unknown) => {
     w.webContents.send('updateErrorReport', report);
   });
 };
-

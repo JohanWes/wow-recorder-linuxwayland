@@ -8,12 +8,7 @@ import {
   useMemo,
   useRef,
 } from 'react';
-import {
-  GripHorizontal,
-  LockKeyhole,
-  Trash,
-  LockOpen,
-} from 'lucide-react';
+import { GripHorizontal, LockKeyhole, Trash, LockOpen } from 'lucide-react';
 import { getLocalePhrase } from 'localisation/translations';
 import { VideoCategory } from '../types/VideoCategory';
 import SearchBar from './SearchBar';

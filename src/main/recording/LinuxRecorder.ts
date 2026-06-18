@@ -150,7 +150,6 @@ export default class LinuxRecorder extends EventEmitter {
     // Intentionally lazy: we only check deps when starting capture.
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   public async configureBase(config: BaseConfig, _startup: boolean) {
     this.baseConfig = config;
     await fs.promises.mkdir(config.obsPath, { recursive: true });

@@ -1,12 +1,17 @@
 declare module 'noobs' {
-  export type ObsProperty = any;
-  export type SceneItemPosition = any;
-  export type SourceDimensions = any;
-  export type ObsData = any;
-  export type Signal = any;
-  export type ObsListItem = any;
+  export type ObsProperty = {
+    name: string;
+    type: string;
+    items?: unknown[];
+    currentValue?: unknown;
+    value?: unknown;
+  };
+  export type SceneItemPosition = unknown;
+  export type SourceDimensions = unknown;
+  export type ObsData = unknown;
+  export type Signal = unknown;
+  export type ObsListItem = unknown;
 
-  const noobs: any;
+  const noobs: Record<string, (...args: unknown[]) => void>;
   export default noobs;
 }
-

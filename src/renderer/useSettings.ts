@@ -9,11 +9,11 @@ export const getConfigValue = <T>(configKey: string): T => {
   ]) as T;
 };
 
-export const setConfigValue = (configKey: string, value: any): void => {
+export const setConfigValue = (configKey: string, value: unknown): void => {
   window.electron.ipcRenderer.sendMessage('config', ['set', configKey, value]);
 };
 
-export const setConfigValues = (dict: { [key: string]: any }): void => {
+export const setConfigValues = (dict: { [key: string]: unknown }): void => {
   window.electron.ipcRenderer.sendMessage('config', ['set_values', dict]);
 };
 

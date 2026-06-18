@@ -1,4 +1,10 @@
-import type { BaseConfig, MicStatus, ObsAudioConfig, ObsOverlayConfig, ObsVideoConfig } from '../types';
+import type {
+  BaseConfig,
+  MicStatus,
+  ObsAudioConfig,
+  ObsOverlayConfig,
+  ObsVideoConfig,
+} from '../types';
 import type { ERecordingState } from '../obsEnums';
 
 export type RecorderImpl = {
@@ -7,7 +13,10 @@ export type RecorderImpl = {
   lastFile: string | null;
 
   // Optional EventEmitter compatibility for the wrapper.
-  on?: (eventName: string | symbol, listener: (...args: any[]) => void) => any;
+  on?: (
+    eventName: string | symbol,
+    listener: (...args: unknown[]) => void,
+  ) => void;
 
   initializeObs(): void;
   shutdownOBS(): void;

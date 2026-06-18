@@ -75,9 +75,7 @@ const SettingsPage: React.FC<IProps> = (props: IProps) => {
                 />
               </div>
               <div>
-                <CategoryHeading>
-                  Linux Capture
-                </CategoryHeading>
+                <CategoryHeading>Linux Capture</CategoryHeading>
                 <Separator className="mt-2 mb-4" />
                 <LinuxCaptureSettings
                   recorderStatus={recorderStatus}

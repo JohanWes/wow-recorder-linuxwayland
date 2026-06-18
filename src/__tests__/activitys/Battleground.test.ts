@@ -1,7 +1,6 @@
 import { Flavour, PlayerDeathType } from '../../main/types';
 import Battleground from '../../activitys/Battleground';
 import { VideoCategory } from '../../types/VideoCategory';
-import TestConfigService from '../../utils/TestConfigService';
 
 const getPlayerDeath = () => {
   const playerDeath: PlayerDeathType = {

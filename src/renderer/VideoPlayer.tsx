@@ -95,13 +95,7 @@ export interface VideoPlayerRef {
 }
 
 export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
-  const {
-    videos,
-    persistentProgress,
-    config,
-    appState,
-    setAppState,
-  } = props;
+  const { videos, persistentProgress, config, appState, setAppState } = props;
 
   const { playing, multiPlayerMode, language } = appState;
 

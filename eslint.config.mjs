@@ -16,6 +16,14 @@ export default [
     rules: {
       'react/react-in-jsx-scope': 'off',
       '@typescript-eslint/no-require-imports': 'off',
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_' },
+      ],
+      'react/no-unknown-property': [
+        'error',
+        { ignore: ['cmdk-input-wrapper'] },
+      ],
     },
     settings: { react: { version: 'detect' } },
     ignores: [
@@ -38,5 +46,11 @@ export default [
       '*.scss.d.ts',
       '!.erb',
     ],
+  },
+  {
+    files: ['src/parsing/LogLine.ts'],
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
+    },
   },
 ];

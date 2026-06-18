@@ -7,6 +7,7 @@ import { Language } from 'localisation/phrases';
 
 interface DrawingOverlayProps {
   isDrawingEnabled: boolean;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   onDrawingChange: (elements: readonly any[]) => void;
   appState: AppState;
 }

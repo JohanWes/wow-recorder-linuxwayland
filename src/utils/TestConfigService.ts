@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
-
 import EventEmitter from 'events';
 import { ConfigurationSchema } from 'config/configSchema';
 import { IConfigService } from '../config/ConfigService';
@@ -22,7 +20,7 @@ export default class ConfigService
     throw new Error('Method not implemented.');
   }
 
-  set(_key: keyof ConfigurationSchema, _value: any): void {
+  set(_key: keyof ConfigurationSchema, _value: unknown): void {
     throw new Error('Method not implemented.');
   }
 

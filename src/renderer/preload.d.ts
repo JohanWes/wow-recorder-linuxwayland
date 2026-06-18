@@ -1,6 +1,11 @@
 import ElectronStore from 'electron-store';
 import { Channels } from 'main/preload';
-import { AudioSourceType, KillVideoSegment, RendererVideo, SceneItem } from 'main/types';
+import {
+  AudioSourceType,
+  KillVideoSegment,
+  RendererVideo,
+  SceneItem,
+} from 'main/types';
 import { ObsProperty, SceneItemPosition, SourceDimensions } from 'noobs';
 
 declare global {
@@ -10,8 +15,8 @@ declare global {
       store: ElectronStore;
       ipcRenderer: {
         sendMessage(channel: Channels, args: unknown[]): void;
-        sendSync(channel: Channels, args: unknown[]): any;
-        invoke(channel: Channels, args: unknown[]): Promise<any>;
+        sendSync(channel: Channels, args: unknown[]): unknown;
+        invoke(channel: Channels, args: unknown[]): Promise<unknown>;
         on(
           channel: string,
           func: (...args: unknown[]) => void,

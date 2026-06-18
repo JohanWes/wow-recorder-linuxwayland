@@ -4,7 +4,6 @@ import { RawChallengeModeTimelineSegment } from './keystone';
 import { VideoCategory } from '../types/VideoCategory';
 import { Tag } from 'react-tag-autocomplete';
 import { DateValueType } from 'react-tailwindcss-datepicker';
-import { QualityPresets } from './obsEnums';
 
 /**
  * Application recording status.

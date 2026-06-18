@@ -32,4 +32,3 @@ class UiohookStub extends EventEmitter {
 
 // Match the real module's export name.
 export const uIOhook = new UiohookStub();
-

@@ -31,4 +31,3 @@ declare module 'uiohook-napi' {
     stop: () => void;
   };
 }
-

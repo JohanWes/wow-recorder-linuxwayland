@@ -150,7 +150,7 @@ const getMetadataFileNameForVideo = (video: string) => {
  * purely to bridge the gap, and in theory could be removed in the future.
  */
 const convertKoreanVideoCategory = (metadata: Metadata) => {
-  const raw = metadata as any;
+  const raw = metadata as unknown as Record<string, unknown>;
 
   if (raw.category === '연습전투') {
     raw.category = VideoCategory.Skirmish;
@@ -367,7 +367,7 @@ const getAvailableDisplays = (): OurDisplayType[] => {
 
 const deferredPromiseHelper = <T>() => {
   let resolveHelper!: (value: T | PromiseLike<T>) => void;
-  let rejectHelper!: (reason?: any) => void;
+  let rejectHelper!: (reason?: unknown) => void;
 
   const promise = new Promise<T>((resolve, reject) => {
     resolveHelper = resolve;

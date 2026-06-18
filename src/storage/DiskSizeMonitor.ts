@@ -11,7 +11,10 @@ import DiskClient from './DiskClient';
 // valid as it just returns a truthy promise. See issue 323. To get around
 // this we do some creative stuff from here:
 // https://advancedweb.hu/how-to-use-async-functions-with-array-filter-in-javascript/
-const asyncFilter = async (fileStream: FileInfo[], filter: any) => {
+const asyncFilter = async (
+  fileStream: FileInfo[],
+  filter: (fileInfo: FileInfo) => Promise<boolean>,
+) => {
   const results = await Promise.all(fileStream.map(filter));
   return fileStream.filter((_, index) => results[index]);
 };

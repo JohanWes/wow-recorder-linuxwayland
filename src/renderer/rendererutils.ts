@@ -143,13 +143,13 @@ const getAllDeathMarkers = (video: RendererVideo, language: Language) => {
   );
 
   const singleDeaths = Object.entries(groupedDeathsByTimestamp)
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
     .map(([_, arr]) => arr)
     .filter((arr) => arr.length === 1)
     .map((arr) => arr[0]);
 
   const simultaenousDeaths = Object.entries(groupedDeathsByTimestamp)
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
     .map(([_, arr]) => arr)
     .filter((arr) => arr.length !== 1)
     .map((arr) => arr[0]);
@@ -731,19 +731,19 @@ const mapStringToEncoder = (enc: string): Encoder => {
 
 const pathSelect = async (): Promise<string> => {
   const ipc = window.electron.ipcRenderer;
-  const path = await ipc.invoke('selectPath', []);
+  const path = (await ipc.invoke('selectPath', [])) as string;
   return path;
 };
 
 const fileSelect = async (): Promise<string> => {
   const ipc = window.electron.ipcRenderer;
-  const path = await ipc.invoke('selectFile', []);
+  const path = (await ipc.invoke('selectFile', [])) as string;
   return path;
 };
 
 const imageSelect = async (): Promise<string> => {
   const ipc = window.electron.ipcRenderer;
-  const path = await ipc.invoke('selectImage', []);
+  const path = (await ipc.invoke('selectImage', [])) as string;
   return path;
 };
 
@@ -802,7 +802,7 @@ const getManualRecordHotKeyFromConfig = (
   };
 };
 
-const getKeyByValue = (object: any, value: any) => {
+const getKeyByValue = (object: Record<string, unknown>, value: unknown) => {
   return Object.keys(object).find((key) => object[key] === value);
 };
 
@@ -827,7 +827,7 @@ const getKeyModifiersString = (keyevent: PTTKeyPressEvent) => {
 
 const getNextKeyOrMouseEvent = async (): Promise<PTTKeyPressEvent> => {
   const ipc = window.electron.ipcRenderer;
-  return ipc.invoke('getNextKeyPress', []);
+  return ipc.invoke('getNextKeyPress', []) as Promise<PTTKeyPressEvent>;
 };
 
 const secToMmSs = (s: number) => {

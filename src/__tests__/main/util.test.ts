@@ -1,10 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import {
-  checkAdvancedCombatLogging,
-  getConfigWtfPath,
-} from '../../main/util';
+import { checkAdvancedCombatLogging, getConfigWtfPath } from '../../main/util';
 
 describe('Config.wtf helpers', () => {
   let tempDir: string;

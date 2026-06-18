@@ -1,9 +1,15 @@
-type ObsProperty = any;
-type SceneItemPosition = any;
-type SourceDimensions = any;
-type ObsData = any;
-type Signal = any;
-type ObsListItem = any;
+type ObsProperty = {
+  name: string;
+  type: string;
+  items?: unknown[];
+  currentValue?: unknown;
+  value?: unknown;
+};
+type SceneItemPosition = unknown;
+type SourceDimensions = unknown;
+type ObsData = unknown;
+type Signal = unknown;
+type ObsListItem = unknown;
 
 const fail = (fn: string) => {
   throw new Error(`noobs is not available on this platform (called ${fn})`);
@@ -41,4 +47,3 @@ export {
   Signal,
   ObsListItem,
 };
-

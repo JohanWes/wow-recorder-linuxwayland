@@ -26,7 +26,7 @@ export interface IConfigService extends EventEmitter {
    * @param key - The configuration key to set.
    * @param value - The value to set for the key.
    */
-  set(key: keyof ConfigurationSchema, value: any): void;
+  set(key: keyof ConfigurationSchema, value: unknown): void;
 
   /**
    * Get the value of a configuration key as a number.
@@ -82,7 +82,7 @@ export default class ConfigService
 
     console.info('[Config Service] Using configuration', loggable);
 
-    this._store.onDidAnyChange((newValue: any, oldValue: any) => {
+    this._store.onDidAnyChange((newValue: unknown, oldValue: unknown) => {
       this.emit('configChanged', oldValue, newValue);
     });
 
@@ -113,7 +113,7 @@ export default class ConfigService
         case 'set_values': {
           const configObject = args[1];
           const configKeys = Object.keys(configObject);
-          const newConfigValues: { [key: string]: any } = {};
+          const newConfigValues: { [key: string]: unknown } = {};
 
           configKeys.forEach((key: string) => {
             if (!this.configValueChanged(key, configObject[key])) {
@@ -123,10 +123,10 @@ export default class ConfigService
             newConfigValues[key] = configObject[key];
           });
 
-          Object.keys(newConfigValues).forEach((key: any) => {
+          Object.keys(newConfigValues).forEach((key: string) => {
             const value = newConfigValues[key];
 
-            this.set(key, value);
+            this.set(key as keyof ConfigurationSchema, value);
             this.emit('change', key, value);
           });
 
@@ -166,7 +166,7 @@ export default class ConfigService
     return value as T;
   }
 
-  set(key: keyof ConfigurationSchema, value: any): void {
+  set(key: keyof ConfigurationSchema, value: unknown): void {
     if (!configSchema[key]) {
       throw Error(
         `[Config Service] Attempted to set invalid configuration key '${key}'`,
@@ -265,7 +265,7 @@ export default class ConfigService
   /**
    * Determine whether a configuration value has changed.
    */
-  private configValueChanged(key: string, value: any): boolean {
+  private configValueChanged(key: string, value: unknown): boolean {
     // We're checking for null here because we don't allow storing
     // null values and as such if we get one, it's because it's empty/shouldn't
     // be saved.
@@ -276,7 +276,7 @@ export default class ConfigService
     return !_.isEqual(this._store.get(key), value);
   }
 
-  private static logConfigChanged(newConfig: { [key: string]: any }): void {
+  private static logConfigChanged(newConfig: { [key: string]: unknown }): void {
     console.info('[Config Service] Configuration changed:', newConfig);
   }
 }

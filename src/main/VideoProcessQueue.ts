@@ -25,6 +25,15 @@ import DiskClient from 'storage/DiskClient';
 import Recorder from './recording/Recorder';
 
 const atomicQueue = require('atomic-queue');
+
+interface AtomicQueue {
+  write(item: unknown): void;
+  on(event: string, handler: (...args: unknown[]) => void): AtomicQueue;
+  pool: {
+    on(event: string, handler: (...args: unknown[]) => void): void;
+  };
+}
+
 const devMode = process.env.NODE_ENV === 'development';
 const isDebug = devMode || process.env.DEBUG_PROD === 'true';
 
@@ -52,25 +61,25 @@ export default class VideoProcessQueue {
   /**
    * Atomic queue object for queueing cutting of videos.
    */
-  private videoQueue: any;
+  private videoQueue: AtomicQueue;
 
   /**
    * Atomic queue object for queuing upload of videos, seperated from the
    * video queue as this can take a long time and we don't want to block further
    * video cuts behind uploads.
    */
-  private uploadQueue: any;
+  private uploadQueue: AtomicQueue;
 
   /**
    * Atomic queue object for queuing download of videos.
    */
-  private downloadQueue: any;
+  private downloadQueue: AtomicQueue;
 
   /**
    * The kill video queue re-encoder a video from multiple perspectives into a
    * single video file. This is naturally computationally expensive.
    */
-  private killVideoQueue: any;
+  private killVideoQueue: AtomicQueue;
 
   /**
    * Config service handle.
@@ -441,7 +450,7 @@ export default class VideoProcessQueue {
   /**
    * Actions on starting the processing of a kill video.
    */
-  private startedProcessingKillVideo(item: KillVideoQueueItem) {
+  private startedProcessingKillVideo(_item: KillVideoQueueItem) {
     console.info('[VideoProcessQueue] Now processing kill video');
 
     const status: KillVideoStatus = {

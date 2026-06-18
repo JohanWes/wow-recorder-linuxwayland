@@ -4,13 +4,16 @@ import { ConfigurationSchema } from 'config/configSchema';
 export interface IConfigService extends EventEmitter {
   has(key: keyof ConfigurationSchema): boolean;
   get<T>(key: keyof ConfigurationSchema): T;
-  set(key: keyof ConfigurationSchema, value: any): void;
+  set(key: keyof ConfigurationSchema, value: unknown): void;
   getNumber(key: keyof ConfigurationSchema): number;
   getString(key: keyof ConfigurationSchema): string;
   getPath(key: keyof ConfigurationSchema): string;
 }
 
-export default class ConfigService extends EventEmitter implements IConfigService {
+export default class ConfigService
+  extends EventEmitter
+  implements IConfigService
+{
   private static instance: ConfigService;
 
   private values: Partial<Record<keyof ConfigurationSchema, unknown>> = {
@@ -34,7 +37,7 @@ export default class ConfigService extends EventEmitter implements IConfigServic
     throw new Error(`Test ConfigService missing key: ${String(key)}`);
   }
 
-  set(key: keyof ConfigurationSchema, value: any): void {
+  set(key: keyof ConfigurationSchema, value: unknown): void {
     this.values[key] = value;
   }
 
@@ -50,4 +53,3 @@ export default class ConfigService extends EventEmitter implements IConfigServic
     throw new Error('Method not implemented.');
   }
 }
-
