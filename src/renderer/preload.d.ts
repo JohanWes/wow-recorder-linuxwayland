@@ -1,105 +1,36 @@
-import ElectronStore from 'electron-store';
-import { Channels } from 'main/preload';
-import {
-  AudioSourceType,
-  KillVideoSegment,
-  RendererVideo,
-  SceneItem,
-} from 'main/types';
-import { ObsProperty, SceneItemPosition, SourceDimensions } from 'noobs';
+import type { RendererVideo } from 'main/types';
+
+export type RendererChannel = string;
 
 declare global {
   interface Window {
     electron: {
       platform: string;
-      store: ElectronStore;
       ipcRenderer: {
-        sendMessage(channel: Channels, args: unknown[]): void;
-        sendSync(channel: Channels, args: unknown[]): unknown;
-        invoke(channel: Channels, args: unknown[]): Promise<unknown>;
-        on(
-          channel: string,
-          func: (...args: unknown[]) => void,
-        ): (() => void) | undefined;
+        sendMessage(channel: RendererChannel, args?: unknown[]): void;
+        sendSync(channel: RendererChannel, args: unknown[]): unknown;
+        invoke(channel: RendererChannel, args?: unknown[]): Promise<unknown>;
+        on(channel: string, func: (...args: unknown[]) => void): (() => void) | undefined;
         once(channel: string, func: (...args: unknown[]) => void): void;
         removeAllListeners(channel: string): void;
-
-        getDisplayInfo(): Promise<{
-          canvasWidth: number;
-          canvasHeight: number;
-          previewWidth: number;
-          previewHeight: number;
-        }>;
-
         getLinuxGsrAudioDevices(): Promise<{
           inputs: Array<{ value: string; label: string }>;
           outputs: Array<{ value: string; label: string }>;
         }>;
-
-        configurePreview(
-          x: number,
-          y: number,
-          width: number,
-          height: number,
-        ): void;
-        showPreview(): void;
-        hidePreview(): void;
-        disablePreview(): void;
-
-        getSourcePosition(
-          src: SceneItem,
-        ): Promise<SceneItemPosition & SourceDimensions>;
-        resetSourcePosition(src: SceneItem): void;
-        setSourcePosition(
-          src: SceneItem,
-          target: {
-            x: number;
-            y: number;
-            width: number;
-            height: number;
-            cropLeft: number;
-            cropRight: number;
-            cropTop: number;
-            cropBottom: number;
-          },
-        ): void;
-
-        audioSettingsOpen(): Promise<void>;
-        audioSettingsClosed(): Promise<void>;
-        createAudioSource(id: string, type: AudioSourceType): Promise<string>;
-        getAudioSourceProperties(id: string): Promise<ObsProperty[]>;
-        deleteAudioSource(id: string): void;
-        setAudioSourceDevice(id: string, device: string): void;
-        setAudioSourceWindow(id: string, window: string): void;
-        setAudioSourceVolume(id: string, volume: number): void;
-        setForceMono(enabled: boolean): void;
-        setAudioSuppression(enabled: boolean): void;
-
-        reconfigureBase(): void;
-        reconfigureVideo(): void;
-        reconfigureAudio(): void;
-        reconfigureOverlay(): void;
-
-        getSensibleEncoderDefault(): Promise<string>;
-        toggleManualRecording(): void;
-        forceStopRecording(): void;
-
+        getAudioSourceProperties(id: string): Promise<
+          Array<{ name: string; type: string; items?: unknown[] }>
+        >;
         createKillVideo(
           width: number,
           height: number,
           fps: number,
-          sources: KillVideoSegment[],
+          sources: unknown[],
           audioTrackIndex: number,
         ): void;
-
+        reconfigureBase(): void;
+        toggleManualRecording(): void;
+        forceStopRecording(): void;
         clipVideo(video: RendererVideo, offset: number, duration: number): void;
-
-        performUpdate(): Promise<void>;
-        dismissUpdate(version: string): void;
-        checkForUpdates(): Promise<
-          | import('./components/UpdateDialog/UpdateDialog').UpdateDialogInfo
-          | null
-        >;
       };
     };
   }

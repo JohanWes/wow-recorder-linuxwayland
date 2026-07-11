@@ -1,7 +1,11 @@
 import { createRoot } from 'react-dom/client';
-import App from './App';
+import { initElectronShim } from './electronShim';
 
-const container = document.getElementById('root')!;
-const root = createRoot(container);
+async function render() {
+  await initElectronShim();
+  const { default: App } = await import('./App');
+  const container = document.getElementById('root')!;
+  createRoot(container).render(<App />);
+}
 
-root.render(<App />);
+void render();

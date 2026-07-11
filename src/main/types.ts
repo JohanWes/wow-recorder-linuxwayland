@@ -1,9 +1,10 @@
-import { Size } from 'electron';
 import { Language } from '../localisation/translations';
 import { RawChallengeModeTimelineSegment } from './keystone';
 import { VideoCategory } from '../types/VideoCategory';
 import { Tag } from 'react-tag-autocomplete';
 import { DateValueType } from 'react-tailwindcss-datepicker';
+
+type Size = { width: number; height: number };
 
 /**
  * Application recording status.

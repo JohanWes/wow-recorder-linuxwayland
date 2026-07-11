@@ -33,7 +33,7 @@ import screenfull from 'screenfull';
 import { ConfigurationSchema } from 'config/configSchema';
 import { getLocalePhrase } from 'localisation/translations';
 import DeathIcon from '../../assets/icon/death.png';
-import { ExcalidrawElement } from '@excalidraw/excalidraw/dist/types/excalidraw/element/types';
+import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types';
 import {
   convertNumToDeathMarkers,
   getAllDeathMarkers,
@@ -51,6 +51,7 @@ import { DrawingOverlay } from './components/DrawingOverlay/DrawingOverlay';
 import { FolderOpen, Pencil } from 'lucide-react';
 import Separator from './components/Separator/Separator';
 import { Phrase } from 'localisation/phrases';
+import { convertFileSrc } from '@tauri-apps/api/core';
 
 interface IProps {
   videos: RendererVideo[];
@@ -682,9 +683,12 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
       throw new Error('No player reference');
     }
 
+    const hashIndex = src.current.indexOf('#');
+    const path = hashIndex === -1 ? src.current : src.current.slice(0, hashIndex);
+    const timestamp = hashIndex === -1 ? '' : src.current.slice(hashIndex);
     const safe = src.current.startsWith('https://')
       ? src.current
-      : `vod://wcr/${src.current}`;
+      : `${convertFileSrc(path)}${timestamp}`;
 
     return (
       <ReactPlayer

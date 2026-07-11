@@ -2,18 +2,25 @@
   "compilerOptions": {
     "incremental": true,
     "target": "es2022",
-    "module": "commonjs",
+    "module": "ESNext",
     "lib": ["dom", "es2022"],
     "jsx": "react-jsx",
     "strict": true,
     "sourceMap": true,
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
     "allowJs": true,
-    "outDir": ".erb/dll",
+    "outDir": "dist",
     "baseUrl": "./src",
+    "paths": {
+      "main/*": ["main/*"], "config/*": ["config/*"],
+      "localisation/*": ["localisation/*"], "types/*": ["types/*"],
+      "renderer/*": ["renderer/*"], "parsing/*": ["parsing/*"]
+    },
   },
-  "exclude": ["test", "release/build", "release/app/dist", ".erb/dll"]
+  "include": ["src/renderer", "src/config", "src/localisation", "src/types", "src/main/types.ts", "src/main/constants.ts", "src/main/keystone.ts", "src/main/obsEnums.ts", "src/parsing/logutils.ts", "vite.config.ts"],
+  "exclude": ["test", "release", ".erb", "src/main/preload.ts", "src-tauri"]
 }
