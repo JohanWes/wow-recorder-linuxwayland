@@ -22,5 +22,5 @@
     },
   },
   "include": ["src/renderer", "src/config", "src/localisation", "src/types", "src/main/types.ts", "src/main/constants.ts", "src/main/keystone.ts", "src/main/obsEnums.ts", "src/parsing/logutils.ts", "vite.config.ts"],
-  "exclude": ["test", "release", ".erb", "src/main/preload.ts", "src-tauri"]
+  "exclude": ["src-tauri"]
 }

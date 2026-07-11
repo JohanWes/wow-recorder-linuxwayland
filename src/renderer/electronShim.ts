@@ -59,7 +59,11 @@ const emit = (channel: string, payload: unknown) => {
   if (!listeners) return;
 
   listeners.forEach((callback) => {
-    if (channel === 'updateRecStatus' && payload && typeof payload === 'object') {
+    if (
+      channel === 'updateRecStatus' &&
+      payload &&
+      typeof payload === 'object'
+    ) {
       const status = payload as { status?: unknown; msg?: unknown };
       callback(status.status, status.msg);
     } else {
@@ -96,10 +100,6 @@ const invokeCommand = async (channel: string, args: unknown[] = []) => {
         inputs: [],
         outputs: [],
       });
-    case 'checkForUpdates':
-    case 'dismissUpdate':
-    case 'performUpdate':
-      return null;
     default:
       warn(`unsupported invoke(${channel})`, args);
       return undefined;

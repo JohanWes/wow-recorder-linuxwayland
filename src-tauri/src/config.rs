@@ -87,8 +87,6 @@ fn defaults() -> Map<String, Value> {
         ("monitorIndex", json!(0)),
         ("selectedCategory", json!(1)),
         ("minEncounterDuration", json!(15)),
-        ("startUp", json!(false)),
-        ("startMinimized", json!(false)),
         ("obsOutputResolution", json!("1920x1080")),
         ("obsFPS", json!(60)),
         ("obsForceMono", json!(true)),

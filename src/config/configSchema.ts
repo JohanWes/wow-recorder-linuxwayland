@@ -15,8 +15,6 @@ export type ConfigurationSchema = {
   selectedCategory: number;
   audioSources: AudioSource[];
   minEncounterDuration: number;
-  startUp: boolean;
-  startMinimized: boolean;
   obsOutputResolution: string;
   obsFPS: number;
   obsForceMono: boolean;
@@ -180,16 +178,6 @@ export const configSchema = {
     type: 'integer',
     default: 15,
     maximum: 10000,
-  },
-  startUp: {
-    description: Phrase.StartUpDescription,
-    type: 'boolean',
-    default: false,
-  },
-  startMinimized: {
-    description: Phrase.StartMinimizedDescription,
-    type: 'boolean',
-    default: false,
   },
   obsOutputResolution: {
     description: Phrase.ObsOutputResolutionDescription,

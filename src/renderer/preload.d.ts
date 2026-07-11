@@ -10,16 +10,19 @@ declare global {
         sendMessage(channel: RendererChannel, args?: unknown[]): void;
         sendSync(channel: RendererChannel, args: unknown[]): unknown;
         invoke(channel: RendererChannel, args?: unknown[]): Promise<unknown>;
-        on(channel: string, func: (...args: unknown[]) => void): (() => void) | undefined;
+        on(
+          channel: string,
+          func: (...args: unknown[]) => void,
+        ): (() => void) | undefined;
         once(channel: string, func: (...args: unknown[]) => void): void;
         removeAllListeners(channel: string): void;
         getLinuxGsrAudioDevices(): Promise<{
           inputs: Array<{ value: string; label: string }>;
           outputs: Array<{ value: string; label: string }>;
         }>;
-        getAudioSourceProperties(id: string): Promise<
-          Array<{ name: string; type: string; items?: unknown[] }>
-        >;
+        getAudioSourceProperties(
+          id: string,
+        ): Promise<Array<{ name: string; type: string; items?: unknown[] }>>;
         createKillVideo(
           width: number,
           height: number,

@@ -1,6 +1,5 @@
 import React from 'react';
 import { Excalidraw } from '@excalidraw/excalidraw';
-import '@excalidraw/excalidraw/index.css';
 import './DrawingOverlay.css';
 import { AppState } from 'main/types';
 import { Language } from 'localisation/phrases';

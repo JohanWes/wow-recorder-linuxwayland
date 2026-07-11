@@ -36,21 +36,11 @@ export default [
       '.eslintcache',
       'node_modules',
       '.DS_Store',
-      'release/app/dist',
-      'release/build',
-      '.erb/dll',
       '.idea',
       'npm-debug.log.*',
       '*.css.d.ts',
       '*.sass.d.ts',
       '*.scss.d.ts',
-      '!.erb',
     ],
-  },
-  {
-    files: ['src/parsing/LogLine.ts'],
-    rules: {
-      '@typescript-eslint/no-explicit-any': 'off',
-    },
   },
 ];

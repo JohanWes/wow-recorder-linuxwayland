@@ -952,6 +952,20 @@ pub mod test_data {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn replay_fixture(contents: &str) -> Vec<ParserEvent> {
+        let (tx, mut rx) = tokio_mpsc::channel(16);
+        let mut parser = Parser::new(ParserSettings::default(), tx);
+        for line in contents.lines() {
+            parser.inject_raw_line(line);
+        }
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
     #[test]
     fn nested_log_line() {
         let mut l =
@@ -1022,6 +1036,36 @@ mod tests {
                 assert!(video_name.contains("Current Season Dungeon +12"));
             }
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn replays_completed_dungeon_fixture() {
+        let events = replay_fixture(include_str!(
+            "../../tests/fixtures/retail_dungeon_complete.log"
+        ));
+        assert!(matches!(events.first(), Some(ParserEvent::ActivityStarted { .. })));
+        match events.last().unwrap() {
+            ParserEvent::ActivityEnded { metadata, .. } => {
+                assert_eq!(metadata.category, "Mythic+");
+                assert_eq!(metadata.zone_name.as_deref(), Some("Current Season Dungeon"));
+                assert!(metadata.result);
+            }
+            _ => panic!("fixture did not end its dungeon"),
+        }
+    }
+
+    #[test]
+    fn replays_raid_wipe_fixture() {
+        let events = replay_fixture(include_str!(
+            "../../tests/fixtures/retail_raid_wipe.log"
+        ));
+        match events.last().unwrap() {
+            ParserEvent::ActivityEnded { metadata, .. } => {
+                assert_eq!(metadata.category, "Raids");
+                assert!(!metadata.result);
+            }
+            _ => panic!("fixture did not end its raid"),
         }
     }
 }

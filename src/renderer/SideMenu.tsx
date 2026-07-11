@@ -42,12 +42,10 @@ import Menu from './components/Menu';
 import Separator from './components/Separator/Separator';
 import LogsButton from './LogButton';
 import TestButton from './TestButton';
-import CheckForUpdatesButton from './CheckForUpdatesButton';
 import ApplicationStatusCard from './containers/ApplicationStatusCard/ApplicationStatusCard';
 import { ScrollArea } from './components/ScrollArea/ScrollArea';
 import { Tooltip } from './components/Tooltip/Tooltip';
 import { Phrase } from 'localisation/phrases';
-import { UpdateDialogInfo } from './components/UpdateDialog/UpdateDialog';
 
 interface IProps {
   recorderStatus: RecStatus;
@@ -64,9 +62,6 @@ interface IProps {
   activityStatus: ActivityStatus | null;
   advancedLoggingStatus: AdvancedLoggingStatus;
   setPreviewEnabled: Dispatch<SetStateAction<boolean>>;
-  updateInfo: UpdateDialogInfo | null;
-  onUpdateClick: () => void;
-  onCheckForUpdates: () => Promise<void>;
 }
 
 const SideMenu = (props: IProps) => {
@@ -84,9 +79,6 @@ const SideMenu = (props: IProps) => {
     activityStatus,
     advancedLoggingStatus,
     setPreviewEnabled,
-    updateInfo,
-    onUpdateClick,
-    onCheckForUpdates,
   } = props;
 
   const [appVersion, setAppVersion] = useState<string>();
@@ -273,12 +265,6 @@ const SideMenu = (props: IProps) => {
         <div className="flex items-center justify-center gap-x-4">
           <LogsButton appState={appState} />
           <TestButton recorderStatus={recorderStatus} appState={appState} />
-          <CheckForUpdatesButton
-            language={language}
-            updateInfo={updateInfo}
-            onCheckForUpdates={onCheckForUpdates}
-            onUpdateClick={onUpdateClick}
-          />
         </div>
         {!!appVersion && (
           <div className="w-full mt-1 text-foreground font-sans text-[11px] font-bold text-center opacity-75">

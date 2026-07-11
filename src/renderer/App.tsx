@@ -30,9 +30,6 @@ import { VideoCategory } from 'types/VideoCategory';
 import { playAudio } from './sounds';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import KillVideoProgress from './KillVideoProgress';
-import UpdateDialog, {
-  UpdateDialogInfo,
-} from './components/UpdateDialog/UpdateDialog';
 
 const ipc = window.electron.ipcRenderer;
 const queryClient = new QueryClient();
@@ -140,9 +137,6 @@ const WarcraftRecorder = () => {
   // Used to remember the player height when switching categories.
   const playerHeight = useRef(500);
 
-  const [updateInfo, setUpdateInfo] = useState<UpdateDialogInfo | null>(null);
-  const [showUpdateDialog, setShowUpdateDialog] = useState(false);
-
   const updateRecStatus = (status: unknown, err: unknown) => {
     setRecorderStatus(status as RecStatus);
 
@@ -202,9 +196,6 @@ const WarcraftRecorder = () => {
     ipc.on('updateAdvancedLoggingStatus', updateAdvancedLoggingStatus);
     ipc.on('playAudio', playAudio);
     ipc.on('setDiskVideos', setDiskVideos);
-    ipc.on('updateAvailable', (info: unknown) => {
-      setUpdateInfo(info as UpdateDialogInfo);
-    });
 
     return () => {
       ipc.removeAllListeners('updateRecStatus');
@@ -216,25 +207,8 @@ const WarcraftRecorder = () => {
       ipc.removeAllListeners('updateAdvancedLoggingStatus');
       ipc.removeAllListeners('playAudio');
       ipc.removeAllListeners('setDiskVideos');
-      ipc.removeAllListeners('updateAvailable');
     };
   }, []);
-
-  const handleCheckForUpdates = async () => {
-    const result = await window.electron.ipcRenderer.invoke(
-      'checkForUpdates',
-      [],
-    );
-    setUpdateInfo(result as UpdateDialogInfo | null);
-  };
-
-  const handleUpdateDismiss = (version: string) => {
-    window.electron.ipcRenderer.invoke('dismissUpdate', [version]);
-  };
-
-  const handleUpdateClose = () => {
-    setShowUpdateDialog(false);
-  };
 
   return (
     <ErrorBoundary fallbackRender={renderErrorPage}>
@@ -248,14 +222,6 @@ const WarcraftRecorder = () => {
         }}
       >
         <Toaster />
-        {updateInfo && showUpdateDialog && (
-          <UpdateDialog
-            updateInfo={updateInfo}
-            language={appState.language}
-            onDismiss={handleUpdateDismiss}
-            onClose={handleUpdateClose}
-          />
-        )}
         <KillVideoProgress language={appState.language} />
         <QueryClientProvider client={queryClient}>
           <TooltipProvider>
@@ -276,11 +242,6 @@ const WarcraftRecorder = () => {
                 activityStatus={activityStatus}
                 advancedLoggingStatus={advancedLoggingStatus}
                 setPreviewEnabled={setPreviewEnabled}
-                updateInfo={updateInfo}
-                onUpdateClick={() => {
-                  setShowUpdateDialog(true);
-                }}
-                onCheckForUpdates={handleCheckForUpdates}
               />
               <Layout
                 recorderStatus={recorderStatus}

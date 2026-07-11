@@ -32,8 +32,6 @@ export const getSettings = (): ConfigurationSchema => {
     minEncounterDuration: getConfigValue<number>('minEncounterDuration'),
     monitorIndex: getConfigValue<number>('monitorIndex'),
     audioSources: getConfigValue<AudioSource[]>('audioSources'),
-    startUp: getConfigValue<boolean>('startUp'),
-    startMinimized: getConfigValue<boolean>('startMinimized'),
     recordRetail: getConfigValue<boolean>('recordRetail'),
     recordClassic: getConfigValue<boolean>('recordClassic'),
     recordClassicPtr: getConfigValue<boolean>('recordClassicPtr'),

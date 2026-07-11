@@ -33,7 +33,7 @@ import screenfull from 'screenfull';
 import { ConfigurationSchema } from 'config/configSchema';
 import { getLocalePhrase } from 'localisation/translations';
 import DeathIcon from '../../assets/icon/death.png';
-import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types';
+import type { ExcalidrawElement } from '@excalidraw/excalidraw/types/element/types';
 import {
   convertNumToDeathMarkers,
   getAllDeathMarkers,
@@ -684,7 +684,8 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     }
 
     const hashIndex = src.current.indexOf('#');
-    const path = hashIndex === -1 ? src.current : src.current.slice(0, hashIndex);
+    const path =
+      hashIndex === -1 ? src.current : src.current.slice(0, hashIndex);
     const timestamp = hashIndex === -1 ? '' : src.current.slice(hashIndex);
     const safe = src.current.startsWith('https://')
       ? src.current

@@ -1,94 +1,31 @@
 # Warcraft Recorder
 
-Warcraft Recorder (Linux/Wayland fork) watches the World of Warcraft combat log and automatically records videos for “interesting” activities (arenas, raids, dungeons, etc).
+Warcraft Recorder is a Linux/Wayland Tauri app that watches the World of Warcraft retail combat log and records gameplay videos for supported activities.
 
-## Install
+## Prerequisites
 
-This fork publishes Linux AppImages via GitHub Releases. Every push to `main` that passes CI creates a new release.
-
-### Option 1: Installer script (recommended)
-
-Run the installer. It downloads the latest AppImage, verifies the SHA256 checksum, and installs it:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/install.sh | bash
-```
-
-By default it installs per-user into:
-
-- `~/.local/bin/warcraftrecorder`
-- `~/.local/share/applications/warcraftrecorder.desktop`
-- `~/.local/share/icons/hicolor/256x256/apps/warcraftrecorder.png`
-
-Run it from the terminal or launch **Warcraft Recorder** from your application menu:
-
-```bash
-warcraftrecorder
-```
-
-If `~/.local/bin` is not on your `PATH`, the installer will tell you how to add it.
-
-#### Updating
-
-Re-run the same command. The installer overwrites any existing install with the latest release.
-
-#### Uninstall
-
-```bash
-rm ~/.local/bin/warcraftrecorder \
-   ~/.local/share/applications/warcraftrecorder.desktop \
-   ~/.local/share/icons/hicolor/256x256/apps/warcraftrecorder.png
-```
-
-### Option 2: Manual AppImage install
-
-If you prefer not to run a remote script, download the AppImage directly from the [latest release](https://github.com/JohanWes/wow-recorder-linuxwayland/releases/latest):
-
-```bash
-curl -LO https://github.com/JohanWes/wow-recorder-linuxwayland/releases/latest/download/WarcraftRecorder.AppImage
-chmod +x WarcraftRecorder.AppImage
-./WarcraftRecorder.AppImage
-```
-
-Put it anywhere in your `PATH` and rename it if you want a quick command:
-
-```bash
-mv WarcraftRecorder.AppImage ~/.local/bin/warcraftrecorder
-```
-
-Updates are manual: download the newest AppImage and replace your existing file.
-
-## Dependencies / Prerequisites (Wayland)
-
+- Node.js 22
+- Rust stable
+- Tauri's Linux system dependencies
 - `gpu-screen-recorder`
-- `pipewire`
-- `xdg-desktop-portal`
-- `fuse2`
+- `ffmpeg`
+- PipeWire and an `xdg-desktop-portal` backend for your desktop environment
 
-You still need one portal backend for your compositor/DE (install one of):
+## Development
 
-- `xdg-desktop-portal-hyprland` (Hyprland)
-- `xdg-desktop-portal-kde` (KDE)
-- `xdg-desktop-portal-gnome` (GNOME)
-- `xdg-desktop-portal-wlr` (wlroots)
+```bash
+npm install
+npm run tauri dev
+```
 
-The app performs best-effort runtime checks and reports missing prerequisites via the in-app error indicator.
+Build the desktop application with:
 
-## Quick Start
+```bash
+npm run tauri build
+```
 
-1. Install a combat logging addon and enable Advanced Combat Logging when prompted:
-   - Retail: SimpleCombatLogger ([CurseForge](https://www.curseforge.com/wow/addons/simplecombatlogger), [Wago](https://addons.wago.io/addons/simplecombatlogger)).
-   - Classic / Classic Era: AutoCombatLogger ([CurseForge](https://www.curseforge.com/wow/addons/autocombatlogger), [Wago](https://addons.wago.io/addons/autocombatlogger)).
-2. In Warcraft Recorder settings:
-   - Choose a Storage Path for videos.
-   - Set the WoW `Logs` folder for the flavour(s) you play.
-3. Use the Test button with WoW running to validate recording end-to-end.
+The build disables `linuxdeploy`'s bundled `strip`, which is incompatible with
+newer RELR-enabled Linux system libraries. Rust still strips the application
+binary in its release profile.
 
-## Building / Packaging (AppImage)
-
-Linux packaging produces an AppImage:
-
-- `npm install`
-- `npm run package:linux`
-
-Use Node 22 LTS (or Node 20 LTS) for packaging.
+Frontend-only checks are available through `npm run typecheck`, `npm run build`, and `npm run lint`. Backend checks run from `src-tauri` with `cargo check` and `cargo test`.
