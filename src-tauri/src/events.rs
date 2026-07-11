@@ -16,7 +16,7 @@ pub fn update_rec_status(app: &AppHandle, status: RecStatus, msg: Option<String>
         serde_json::json!({ "status": status, "msg": msg }),
     );
 }
-pub fn update_activity_status(app: &AppHandle, status: ActivityStatus) {
+pub fn update_activity_status(app: &AppHandle, status: Option<ActivityStatus>) {
     emit(app, "updateActivityStatus", status);
 }
 pub fn set_disk_videos(app: &AppHandle, videos: Vec<RendererVideo>) {

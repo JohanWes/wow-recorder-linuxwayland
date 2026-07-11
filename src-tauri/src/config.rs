@@ -24,6 +24,17 @@ impl ConfigState {
         let path = dir.join("config-v3.json");
         let mut values = defaults();
 
+        if !path.exists() {
+            if let Some(home) = std::env::var_os("HOME") {
+                let legacy = PathBuf::from(home).join(".config/WarcraftRecorder/config-v3.json");
+                if legacy.exists() {
+                    fs::copy(&legacy, &path).map_err(|error| {
+                        format!("could not migrate {}: {error}", legacy.display())
+                    })?;
+                }
+            }
+        }
+
         if path.exists() {
             let content = fs::read_to_string(&path)
                 .map_err(|error| format!("could not read {}: {error}", path.display()))?;

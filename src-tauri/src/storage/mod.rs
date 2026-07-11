@@ -13,7 +13,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
 use crate::types::{DiskStatus, Metadata, RendererVideo, VideoCategory};
 
@@ -74,11 +74,16 @@ pub struct QueueCompletion {
 
 type CompletionCallback = dyn Fn(QueueCompletion) + Send + Sync + 'static;
 
-/// A serial queue.  Call `run` from one manager-owned Tokio task.
+/// Enqueue handle for the serial video processing worker.
 #[derive(Clone)]
 pub struct VideoProcessQueue {
     sender: mpsc::UnboundedSender<VideoQueueItem>,
-    receiver: Arc<Mutex<mpsc::UnboundedReceiver<VideoQueueItem>>>,
+}
+
+/// The receiving half is owned exclusively by the worker so dropping every
+/// queue handle closes the channel and lets the worker exit.
+pub struct VideoProcessWorker {
+    receiver: mpsc::UnboundedReceiver<VideoQueueItem>,
     storage_path: PathBuf,
     max_storage_gb: u64,
     on_complete: Arc<CompletionCallback>,
@@ -89,30 +94,26 @@ impl VideoProcessQueue {
         storage_path: impl Into<PathBuf>,
         max_storage_gb: u64,
         on_complete: impl Fn(QueueCompletion) + Send + Sync + 'static,
-    ) -> Self {
+    ) -> (Self, VideoProcessWorker) {
         let (sender, receiver) = mpsc::unbounded_channel();
-        Self {
-            sender,
-            receiver: Arc::new(Mutex::new(receiver)),
+        let worker = VideoProcessWorker {
+            receiver,
             storage_path: storage_path.into(),
             max_storage_gb,
             on_complete: Arc::new(on_complete),
-        }
+        };
+        (Self { sender }, worker)
     }
 
     pub fn enqueue(&self, item: VideoQueueItem) -> Result<(), VideoQueueItem> {
         self.sender.send(item).map_err(|error| error.0)
     }
+}
 
-    /// Process messages one at a time until every sender has been dropped.
-    pub async fn run(&self) {
-        loop {
-            let item = {
-                let mut receiver = self.receiver.lock().await;
-                receiver.recv().await
-            };
-            let Some(item) = item else { break };
-
+impl VideoProcessWorker {
+    /// Process messages one at a time until every queue handle has been dropped.
+    pub async fn run(mut self) {
+        while let Some(item) = self.receiver.recv().await {
             let completion = match process_video_item(&self.storage_path, item) {
                 Ok(output_path) => {
                     let status = DiskSizeMonitor::new(&self.storage_path, self.max_storage_gb)

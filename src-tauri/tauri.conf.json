@@ -20,7 +20,7 @@
     "security": {
       "assetProtocol": {
         "enable": true,
-        "scope": ["$HOME/**"]
+        "scope": []
       }
     }
   },

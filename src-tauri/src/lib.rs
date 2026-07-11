@@ -21,9 +21,11 @@ pub fn run() {
             }
         }))
         .setup(|app| {
-            // TODO(Agent F): replace this broad bootstrap scope with storagePath at runtime.
             let config = config::ConfigState::load(&app.handle()).map_err(std::io::Error::other)?;
             app.manage(config);
+            let manager = manager::Manager::new(app.handle().clone());
+            manager.start();
+            app.manage(manager);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
