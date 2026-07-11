@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod events;
 mod manager;
+mod media_server;
 mod parser;
 mod recorder;
 mod storage;
@@ -36,6 +37,7 @@ pub fn run() {
             commands::select_path,
             commands::select_file,
             commands::get_videos,
+            commands::get_video_url,
             commands::delete_videos,
             commands::protect_videos,
             commands::tag_videos,

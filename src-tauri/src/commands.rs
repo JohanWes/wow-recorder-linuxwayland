@@ -55,6 +55,13 @@ pub async fn get_videos(manager: State<'_, Arc<Manager>>) -> Result<Vec<Renderer
     manager.videos().await
 }
 #[tauri::command]
+pub async fn get_video_url(
+    manager: State<'_, Arc<Manager>>,
+    path: String,
+) -> Result<String, String> {
+    manager.video_url(path).await
+}
+#[tauri::command]
 pub async fn delete_videos(
     manager: State<'_, Arc<Manager>>,
     video_paths: Vec<String>,

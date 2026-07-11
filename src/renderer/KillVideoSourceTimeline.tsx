@@ -20,7 +20,7 @@ import { specImages } from './images';
 import { Trash2, Volume2, VolumeX } from 'lucide-react';
 import { getLocalePhrase } from 'localisation/translations';
 import { Language, Phrase } from 'localisation/phrases';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { getMediaUrl } from './mediaUrl';
 
 interface SourceTimelineProps {
   segments: KillVideoSegment[];
@@ -72,10 +72,20 @@ const KillVideoSourceTimeline = (props: SourceTimelineProps) => {
     return segments[segments.length - 1];
   }, [segments, playheadTime]);
 
-  const videoSrc = useMemo(() => {
-    const src = activeSegment.video.videoSource;
-    return src.startsWith('https://') ? src : convertFileSrc(src);
-  }, [activeSegment]);
+  const [videoSrc, setVideoSrc] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    setVideoSrc('');
+    getMediaUrl(activeSegment.video.videoSource).then(
+      (url) => {
+        if (!cancelled) setVideoSrc(url);
+      },
+      (error) => console.error('Video preview URL Error', error),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSegment.video.videoSource]);
 
   // Seek the preview video when the playhead is moved manually.
   useEffect(() => {

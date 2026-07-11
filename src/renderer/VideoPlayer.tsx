@@ -33,7 +33,7 @@ import screenfull from 'screenfull';
 import { ConfigurationSchema } from 'config/configSchema';
 import { getLocalePhrase } from 'localisation/translations';
 import DeathIcon from '../../assets/icon/death.png';
-import type { ExcalidrawElement } from '@excalidraw/excalidraw/types/element/types';
+import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types';
 import {
   convertNumToDeathMarkers,
   getAllDeathMarkers,
@@ -51,7 +51,7 @@ import { DrawingOverlay } from './components/DrawingOverlay/DrawingOverlay';
 import { FolderOpen, Pencil } from 'lucide-react';
 import Separator from './components/Separator/Separator';
 import { Phrase } from 'localisation/phrases';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { getMediaUrl } from './mediaUrl';
 
 interface IProps {
   videos: RendererVideo[];
@@ -156,7 +156,7 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
   // persistentProgress prop. The ideas is that when switching between
   // different POVs of the same activity we want to play from the same
   // point.
-  const timestamp = `#t=${persistentProgress.current}`;
+  const timestamp = useRef(`#t=${persistentProgress.current}`).current;
 
   const diskVideo = videos.find((v) => !v.cloud) ?? videos[0];
   const clippable = !multiPlayerMode && diskVideo !== undefined;
@@ -164,7 +164,19 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
   // Deliberatly don't update the source when the timestamp changes. That's
   // just the initial playhead position. We only care to change sources when
   // the videos we are meant to be playing changes.
-  const srcs = videos.map((rv) => useRef<string>(rv.videoSource + timestamp));
+  const [srcs, setSrcs] = useState<string[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(videos.map((video) => getMediaUrl(video.videoSource))).then(
+      (urls) => {
+        if (!cancelled) setSrcs(urls.map((url) => url + timestamp));
+      },
+      (error) => console.error('Video Player URL Error', error),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [videos, timestamp]);
 
   // Read and store the video player state of 'volume' and 'muted' so that we may
   // restore it when selecting a different video. This config gets stored as a
@@ -674,7 +686,7 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
    * Returns the video player itself, passing through all necessary callbacks
    * and props for it to function and be controlled.
    */
-  const renderPlayer = (src: MutableRefObject<string>, index: number) => {
+  const renderPlayer = (src: string, index: number) => {
     const primary = index === 0;
     const player = players[index];
 
@@ -683,22 +695,14 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
       throw new Error('No player reference');
     }
 
-    const hashIndex = src.current.indexOf('#');
-    const path =
-      hashIndex === -1 ? src.current : src.current.slice(0, hashIndex);
-    const timestamp = hashIndex === -1 ? '' : src.current.slice(hashIndex);
-    const safe = src.current.startsWith('https://')
-      ? src.current
-      : `${convertFileSrc(path)}${timestamp}`;
-
     return (
       <ReactPlayer
         id="react-player"
         ref={player}
         height="100%"
         width="100%"
-        key={src.current}
-        url={safe}
+        key={src}
+        url={src}
         style={style}
         playing={playing}
         volume={volume}

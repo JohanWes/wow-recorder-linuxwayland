@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.warcraftrecorder.linuxwayland",
   "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../dist"
   },
@@ -17,12 +19,7 @@
         "decorations": false
       }
     ],
-    "security": {
-      "assetProtocol": {
-        "enable": true,
-        "scope": []
-      }
-    }
+    "security": {}
   },
   "bundle": {
     "active": true,

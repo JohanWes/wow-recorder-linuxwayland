@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, Mutex};
 use crate::{
     config::ConfigState,
     events,
+    media_server::MediaServer,
     parser::{self, Parser, ParserEvent, ParserSettings},
     recorder::{Recorder, RecorderParams, RecorderState},
     storage::{self, DiskSizeMonitor, VideoProcessQueue, VideoQueueItem},
@@ -34,11 +35,13 @@ pub struct Manager {
     recorder: Recorder,
     runtime: Mutex<Runtime>,
     reconfigure_lock: Mutex<()>,
+    media_server: MediaServer,
 }
 
 impl Manager {
     pub fn new(app: AppHandle) -> Arc<Self> {
         let (_tx, rx) = mpsc::channel(32);
+        let media_server = MediaServer::start().expect("could not start local media server");
         Arc::new(Self {
             app,
             recorder: Recorder::new(),
@@ -54,6 +57,7 @@ impl Manager {
                 activity_active: false,
             }),
             reconfigure_lock: Mutex::new(()),
+            media_server,
         })
     }
 
@@ -86,19 +90,14 @@ impl Manager {
             runtime.queue = None;
             std::mem::take(&mut runtime.storage_path)
         };
-        if !old_storage.as_os_str().is_empty() {
-            if let Err(error) = self
-                .app
-                .asset_protocol_scope()
-                .forbid_directory(&old_storage, true)
-            {
-                eprintln!("could not revoke old storagePath: {error}");
-            }
-        }
         self.refresh_status().await;
         self.recorder.shutdown();
 
         let result = self.configure_from_current().await;
+        let new_storage = self.runtime.lock().await.storage_path.clone();
+        if !old_storage.as_os_str().is_empty() && old_storage != new_storage {
+            self.media_server.clear();
+        }
         {
             let mut runtime = self.runtime.lock().await;
             runtime.reconfiguring = false;
@@ -124,10 +123,6 @@ impl Manager {
         let storage_path = required_dir(config, "storagePath")?
             .canonicalize()
             .map_err(|e| e.to_string())?;
-        self.app
-            .asset_protocol_scope()
-            .allow_directory(&storage_path, true)
-            .map_err(|e| format!("could not allow storagePath for video playback: {e}"))?;
         let record_retail = boolean(config, "recordRetail", false);
         let retail_log_path = if record_retail {
             Some(required_dir(config, "retailLogPath")?)
@@ -351,6 +346,12 @@ impl Manager {
             return Err("video path is outside the configured storagePath".into());
         }
         Ok(path)
+    }
+    pub async fn video_url(&self, path: String) -> Result<String, String> {
+        let path = self.validate_video_path(path).await?;
+        self.media_server
+            .register(path)
+            .map_err(|error| format!("could not register video for playback: {error}"))
     }
     pub async fn refresh_status(&self) {
         let runtime = self.runtime.lock().await;
