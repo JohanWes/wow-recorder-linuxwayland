@@ -44,6 +44,8 @@ pub struct RendererVideo {
     pub video_name: String,
     pub mtime: i64,
     pub video_source: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub media_url: Option<String>,
     pub is_protected: bool,
     pub cloud: bool,
     #[serde(default)]

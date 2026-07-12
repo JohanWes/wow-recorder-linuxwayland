@@ -15,7 +15,7 @@ use crate::{
     parser::{self, Parser, ParserEvent, ParserSettings},
     recorder::{Recorder, RecorderParams, RecorderState},
     storage::{self, DiskSizeMonitor, VideoProcessQueue, VideoQueueItem},
-    types::{ActivityStatus, Flavour, Metadata, RecStatus, VideoCategory},
+    types::{ActivityStatus, Flavour, Metadata, RecStatus, RendererVideo, VideoCategory},
 };
 
 struct Runtime {
@@ -188,7 +188,13 @@ impl Manager {
                 }
                 events::update_disk_status(&app, completion.disk_status);
                 match storage::list_videos(&completion_storage) {
-                    Ok(videos) => events::set_disk_videos(&app, videos),
+                    Ok(videos) => {
+                        let manager = app.state::<Arc<Manager>>();
+                        match manager.register_media_urls(videos) {
+                            Ok(videos) => events::set_disk_videos(&app, videos),
+                            Err(error) => eprintln!("failed to register video URLs: {error}"),
+                        }
+                    }
                     Err(error) => eprintln!("failed to refresh videos: {error}"),
                 }
             });
@@ -306,9 +312,38 @@ impl Manager {
             .enqueue(item)
             .map_err(|_| "video queue is closed".to_owned())
     }
-    pub async fn videos(&self) -> Result<Vec<crate::types::RendererVideo>, String> {
+    fn register_media_urls(
+        &self,
+        mut videos: Vec<RendererVideo>,
+    ) -> Result<Vec<RendererVideo>, String> {
+        fn register(server: &MediaServer, videos: &mut [RendererVideo]) -> Result<(), String> {
+            for video in videos {
+                if !video.video_source.starts_with("http://")
+                    && !video.video_source.starts_with("https://")
+                {
+                    video.media_url = Some(
+                        server
+                            .register(PathBuf::from(&video.video_source))
+                            .map_err(|error| {
+                                format!("could not register video for playback: {error}")
+                            })?,
+                    );
+                } else {
+                    video.media_url = None;
+                }
+                register(server, &mut video.multi_pov)?;
+            }
+            Ok(())
+        }
+
+        register(&self.media_server, &mut videos)?;
+        Ok(videos)
+    }
+
+    pub async fn videos(&self) -> Result<Vec<RendererVideo>, String> {
         let path = self.runtime.lock().await.storage_path.clone();
-        storage::list_videos(&path).map_err(|e| e.to_string())
+        let videos = storage::list_videos(&path).map_err(|e| e.to_string())?;
+        self.register_media_urls(videos)
     }
     pub async fn refresh_disk(&self) {
         let runtime = self.runtime.lock().await;
@@ -316,7 +351,10 @@ impl Manager {
             return;
         }
         if let Ok(videos) = storage::list_videos(&runtime.storage_path) {
-            events::set_disk_videos(&self.app, videos);
+            match self.register_media_urls(videos) {
+                Ok(videos) => events::set_disk_videos(&self.app, videos),
+                Err(error) => eprintln!("failed to register video URLs: {error}"),
+            }
         }
         if let Ok(status) =
             DiskSizeMonitor::new(&runtime.storage_path, runtime.max_storage_gb).status()

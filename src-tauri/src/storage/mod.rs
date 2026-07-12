@@ -330,6 +330,7 @@ pub fn list_videos(storage_path: &Path) -> StorageResult<Vec<RendererVideo>> {
             video_name: video_name.clone(),
             mtime: mtime_millis(&file_metadata),
             video_source: path.to_string_lossy().into_owned(),
+            media_url: None,
             cloud: false,
             multi_pov: Vec::new(),
             unique_id: format!("{video_name}-disk"),

@@ -189,19 +189,41 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
   // Deliberatly don't update the source when the timestamp changes. That's
   // just the initial playhead position. We only care to change sources when
   // the videos we are meant to be playing changes.
-  const [srcs, setSrcs] = useState<string[]>([]);
+  const synchronousSrcs = useMemo(
+    () =>
+      videos.map((video) => {
+        const source = /^https?:\/\//.test(video.videoSource)
+          ? video.videoSource
+          : video.mediaUrl;
+        return source ? source + timestamp : '';
+      }),
+    [videos, timestamp],
+  );
+  const fallbackKey = videos.map((video) => video.videoSource).join('\0');
+  const [fallback, setFallback] = useState({ key: '', srcs: [] as string[] });
   useEffect(() => {
+    if (synchronousSrcs.every(Boolean)) return;
     let cancelled = false;
     Promise.all(videos.map((video) => getMediaUrl(video.videoSource))).then(
       (urls) => {
-        if (!cancelled) setSrcs(urls.map((url) => url + timestamp));
+        if (!cancelled) {
+          setFallback({
+            key: fallbackKey,
+            srcs: urls.map((url) => url + timestamp),
+          });
+        }
       },
       (error) => console.error('Video Player URL Error', error),
     );
     return () => {
       cancelled = true;
     };
-  }, [videos, timestamp]);
+  }, [fallbackKey, synchronousSrcs, videos, timestamp]);
+  const srcs = synchronousSrcs.every(Boolean)
+    ? synchronousSrcs
+    : fallback.key === fallbackKey
+      ? fallback.srcs
+      : [];
 
   // Read and store the video player state of 'volume' and 'muted' so that we may
   // restore it when selecting a different video. This config gets stored as a
@@ -469,7 +491,6 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     }
 
     return marks;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [duration, videos, config.deathMarkers, language]);
 
   /**

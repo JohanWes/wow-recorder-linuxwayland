@@ -257,6 +257,7 @@ type RendererVideo = Metadata & {
   videoName: string;
   mtime: number;
   videoSource: string;
+  mediaUrl?: string;
   isProtected: boolean;
   cloud: boolean;
   multiPov: RendererVideo[];
