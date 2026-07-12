@@ -7,6 +7,7 @@ mod parser;
 mod recorder;
 mod storage;
 mod types;
+mod updater;
 
 use tauri::Manager;
 
@@ -27,6 +28,29 @@ pub fn run() {
             let manager = manager::Manager::new(app.handle().clone());
             manager.start();
             app.manage(manager);
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let check_app = app_handle.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    let config = check_app.state::<config::ConfigState>();
+                    updater::check(&check_app, &config)
+                })
+                .await;
+                match result {
+                    Ok(Ok(Some(info))) => {
+                        use tauri::Emitter;
+                        let _ = app_handle.emit("updateAvailable", info);
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => {
+                        eprintln!("[UpdateService] Failed to check for updates: {error}")
+                    }
+                    Err(error) => {
+                        eprintln!("[UpdateService] Update check task failed: {error}")
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -37,6 +61,7 @@ pub fn run() {
             commands::select_path,
             commands::select_file,
             commands::get_videos,
+            commands::get_rec_status,
             commands::get_video_url,
             commands::delete_videos,
             commands::protect_videos,
@@ -53,7 +78,9 @@ pub fn run() {
             commands::test_run,
             commands::write_clipboard,
             commands::open_url,
-            commands::get_app_version
+            commands::get_app_version,
+            updater::check_for_updates,
+            updater::perform_update
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Warcraft Recorder");

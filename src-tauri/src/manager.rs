@@ -76,6 +76,13 @@ impl Manager {
                 manager.poll().await;
             }
         });
+        let manager = Arc::clone(self);
+        let mut recorder_state = self.recorder.subscribe();
+        tauri::async_runtime::spawn(async move {
+            while recorder_state.changed().await.is_ok() {
+                manager.refresh_status().await;
+            }
+        });
     }
 
     pub async fn reconfigure(&self) -> Result<(), String> {
@@ -243,6 +250,8 @@ impl Manager {
                 overrun_seconds,
                 video_name,
             } => {
+                tokio::time::sleep(std::time::Duration::from_secs_f64(overrun_seconds.max(0.0)))
+                    .await;
                 self.recorder.stop().await?;
                 let source = self
                     .recorder
@@ -353,9 +362,9 @@ impl Manager {
             .register(path)
             .map_err(|error| format!("could not register video for playback: {error}"))
     }
-    pub async fn refresh_status(&self) {
+    pub async fn rec_status(&self) -> (RecStatus, Option<String>) {
         let runtime = self.runtime.lock().await;
-        let (status, msg) = if runtime.reconfiguring {
+        if runtime.reconfiguring {
             (RecStatus::Reconfiguring, None)
         } else if !runtime.config_valid {
             (
@@ -368,7 +377,10 @@ impl Manager {
             (RecStatus::ReadyToRecord, None)
         } else {
             (RecStatus::WaitingForWoW, None)
-        };
+        }
+    }
+    pub async fn refresh_status(&self) {
+        let (status, msg) = self.rec_status().await;
         events::update_rec_status(&self.app, status, msg);
     }
     pub fn report_error(&self, error: String) {

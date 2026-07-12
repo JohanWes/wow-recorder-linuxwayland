@@ -3,6 +3,7 @@
 //! `RecorderParams` is deliberately independent of Tauri.  The manager builds it
 //! from persisted configuration and owns the policy for when this recorder runs.
 
+use std::os::unix::process::CommandExt;
 use std::{
     collections::HashSet,
     fs::{self, File},
@@ -510,6 +511,7 @@ impl Recorder {
 
     fn spawn_gsr_replay(&self) -> Result<(), String> {
         let params = self.params()?;
+        sweep_orphaned_gsr(&params.token_file());
         write_hook_script(&params.hook_file(), &params.events_file())?;
         let log = GsrEventLog::new(params.events_file());
         log.start()?;
@@ -565,12 +567,23 @@ impl Recorder {
             args.push("-a".into());
             args.push(audio.join("|"));
         }
-        let mut child = Command::new("gpu-screen-recorder")
+        let mut command = Command::new("gpu-screen-recorder");
+        command
             .args(&args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(io_error)?;
+            .stderr(Stdio::piped());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGINT) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() == 1 && libc::raise(libc::SIGINT) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().map_err(io_error)?;
         if let Some(stdout) = child.stdout.take() {
             forward_gsr_output(stdout, "stdout");
         }
@@ -799,6 +812,55 @@ fn forward_gsr_output<R: Read + Send + 'static>(reader: R, stream: &'static str)
     });
 }
 
+fn gsr_cmdline_matches(cmdline: &[u8], token_path: &str) -> bool {
+    let mut args = cmdline.split(|byte| *byte == 0);
+    args.next() == Some(b"gpu-screen-recorder".as_slice())
+        && args.any(|argument| argument == token_path.as_bytes())
+}
+
+fn sweep_orphaned_gsr(token_file: &Path) {
+    let token_path = token_file.to_string_lossy();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return;
+    };
+    let mut pids = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        // Only reap true orphans (reparented to init). A live sibling app
+        // instance owns its gsr child; killing it makes instances fight.
+        if gsr_cmdline_matches(&cmdline, &token_path)
+            && proc_ppid(&entry.path()) == Some(1)
+            && send_signal(pid, libc::SIGINT).is_ok()
+        {
+            pids.push(pid);
+        }
+    }
+    for _ in 0..20 {
+        pids.retain(|pid| Path::new("/proc").join(pid.to_string()).exists());
+        if pids.is_empty() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Parent PID from /proc/<pid>/stat: field 4, after the parenthesised comm
+/// (which may itself contain spaces and parentheses).
+fn proc_ppid(proc_dir: &Path) -> Option<i32> {
+    let stat = fs::read_to_string(proc_dir.join("stat")).ok()?;
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    after_comm.split_whitespace().nth(1)?.parse().ok()
+}
+
 fn concat_escape(path: &Path) -> String {
     path.display().to_string().replace('\'', "'\\''")
 }
@@ -832,5 +894,22 @@ mod tests {
         let escaped = concat_escape(Path::new("/tmp/it's.mkv"));
         assert_eq!(escaped, "/tmp/it'\\''s.mkv");
         assert!(!escaped.contains("\\\\"));
+    }
+
+    #[test]
+    fn matches_only_gsr_cmdlines_with_the_exact_token_path() {
+        let token = "/tmp/warcraftrecorder/gsr-portal.token";
+        assert!(gsr_cmdline_matches(
+            b"gpu-screen-recorder\0-w\0portal\0-portal-session-token-filepath\0/tmp/warcraftrecorder/gsr-portal.token\0",
+            token
+        ));
+        assert!(!gsr_cmdline_matches(
+            b"gpu-screen-recorder-helper\0/tmp/warcraftrecorder/gsr-portal.token\0",
+            token
+        ));
+        assert!(!gsr_cmdline_matches(
+            b"gpu-screen-recorder\0/tmp/warcraftrecorder/gsr-portal.token.old\0",
+            token
+        ));
     }
 }

@@ -1044,11 +1044,17 @@ mod tests {
         let events = replay_fixture(include_str!(
             "../../tests/fixtures/retail_dungeon_complete.log"
         ));
-        assert!(matches!(events.first(), Some(ParserEvent::ActivityStarted { .. })));
+        assert!(matches!(
+            events.first(),
+            Some(ParserEvent::ActivityStarted { .. })
+        ));
         match events.last().unwrap() {
             ParserEvent::ActivityEnded { metadata, .. } => {
                 assert_eq!(metadata.category, "Mythic+");
-                assert_eq!(metadata.zone_name.as_deref(), Some("Current Season Dungeon"));
+                assert_eq!(
+                    metadata.zone_name.as_deref(),
+                    Some("Current Season Dungeon")
+                );
                 assert!(metadata.result);
             }
             _ => panic!("fixture did not end its dungeon"),
@@ -1057,9 +1063,7 @@ mod tests {
 
     #[test]
     fn replays_raid_wipe_fixture() {
-        let events = replay_fixture(include_str!(
-            "../../tests/fixtures/retail_raid_wipe.log"
-        ));
+        let events = replay_fixture(include_str!("../../tests/fixtures/retail_raid_wipe.log"));
         match events.last().unwrap() {
             ParserEvent::ActivityEnded { metadata, .. } => {
                 assert_eq!(metadata.category, "Raids");

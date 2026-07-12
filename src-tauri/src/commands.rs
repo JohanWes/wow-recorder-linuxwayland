@@ -55,6 +55,11 @@ pub async fn get_videos(manager: State<'_, Arc<Manager>>) -> Result<Vec<Renderer
     manager.videos().await
 }
 #[tauri::command]
+pub async fn get_rec_status(manager: State<'_, Arc<Manager>>) -> Result<Value, String> {
+    let (status, msg) = manager.rec_status().await;
+    Ok(serde_json::json!({ "status": status, "msg": msg }))
+}
+#[tauri::command]
 pub async fn get_video_url(
     manager: State<'_, Arc<Manager>>,
     path: String,
@@ -217,7 +222,9 @@ pub async fn test_run(
     manager
         .with_parser(|p| {
             for line in &lines[..take] {
-                let timestamp = chrono::Local::now().format("%m/%d/%Y %H:%M:%S%.4f");
+                // chrono has no %.4f specifier; formatting with one makes
+                // Display return an error and format! panic.
+                let timestamp = chrono::Local::now().format("%m/%d/%Y %H:%M:%S%.3f");
                 p.inject_raw_line(&format!("{timestamp}  {line}"));
             }
         })

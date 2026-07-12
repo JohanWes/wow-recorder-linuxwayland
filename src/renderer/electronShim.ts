@@ -25,6 +25,8 @@ const eventNames = [
   'pausePlayer',
   'updateAdvancedLoggingStatus',
   'updateErrorReport',
+  'updateAvailable',
+  'updateProgress',
 ] as const;
 
 const warn = (operation: string, error: unknown) =>
@@ -100,6 +102,18 @@ const invokeCommand = async (channel: string, args: unknown[] = []) => {
         inputs: [],
         outputs: [],
       });
+    case 'checkForUpdates':
+      return safeInvoke('check_for_updates', undefined, null);
+    case 'performUpdate':
+      return tauriInvoke('perform_update');
+    case 'dismissUpdate': {
+      const value = String(args[0] ?? '');
+      configCache.dismissedUpdateVersion = value;
+      return safeInvoke('config_set', {
+        key: 'dismissedUpdateVersion',
+        value,
+      });
+    }
     default:
       warn(`unsupported invoke(${channel})`, args);
       return undefined;
@@ -281,6 +295,9 @@ export async function initElectronShim(): Promise<void> {
 
   const videos = await safeInvoke<RendererVideo[]>('get_videos', undefined, []);
   pendingPayloads.set('setDiskVideos', videos);
+
+  const recStatus = await safeInvoke('get_rec_status');
+  if (recStatus) pendingPayloads.set('updateRecStatus', recStatus);
 
   const version = await safeInvoke<string>('get_app_version', undefined, '');
   if (version) {

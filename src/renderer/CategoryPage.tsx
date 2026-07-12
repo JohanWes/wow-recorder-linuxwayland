@@ -137,6 +137,21 @@ const CategoryPage = (props: IProps) => {
     playerHeight.current = height;
   };
 
+  const onVideoAspect = (aspect: number) => {
+    const resizable = resizableRef.current;
+    const element = resizable?.resizable;
+    if (!resizable || !element || aspect <= 0) return;
+
+    const desiredHeight = Math.min(
+      Math.max(Math.round(element.clientWidth / aspect) + 40, 200),
+      window.innerHeight - 96,
+    );
+    if (Math.abs(element.clientHeight - desiredHeight) <= 2) return;
+
+    resizable.updateSize({ height: desiredHeight });
+    playerHeight.current = desiredHeight;
+  };
+
   /**
    * Render the video player. Safe to assume we have videos at this point
    * as we don't call this if haveVideos isn't true.
@@ -184,6 +199,7 @@ const CategoryPage = (props: IProps) => {
           config={config}
           appState={appState}
           setAppState={setAppState}
+          onVideoAspect={onVideoAspect}
         />
       </Resizable>
     );

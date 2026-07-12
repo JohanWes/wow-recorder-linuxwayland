@@ -59,6 +59,7 @@ interface IProps {
   config: ConfigurationSchema;
   appState: AppState;
   setAppState: React.Dispatch<React.SetStateAction<AppState>>;
+  onVideoAspect?: (aspect: number) => void;
 }
 
 const ipc = window.electron.ipcRenderer;
@@ -96,7 +97,14 @@ export interface VideoPlayerRef {
 }
 
 export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
-  const { videos, persistentProgress, config, appState, setAppState } = props;
+  const {
+    videos,
+    persistentProgress,
+    config,
+    appState,
+    setAppState,
+    onVideoAspect,
+  } = props;
 
   const { playing, multiPlayerMode, language } = appState;
 
@@ -112,12 +120,24 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
   const players: MutableRefObject<ReactPlayer | null>[] = videos.map(() =>
     useRef(null),
   );
+  const seekPlayersTo = (seconds: number, fast: boolean) => {
+    players.forEach((player) => {
+      const internal = player.current?.getInternalPlayer() as
+        | (HTMLVideoElement & { fastSeek?: (time: number) => void })
+        | undefined;
+      if (fast && internal && typeof internal.fastSeek === 'function') {
+        internal.fastSeek(Math.max(0, seconds));
+      } else {
+        player.current?.seekTo(seconds, 'seconds');
+      }
+    });
+  };
 
   // Exposes the seekTo method so that we can seek from outside the component.
   useImperativeHandle(ref, () => ({
     seekAllPlayersTo(seconds: number) {
       // Seek all players
-      players.forEach((player) => player.current?.seekTo(seconds, 'seconds'));
+      seekPlayersTo(seconds, true);
       persistentProgress.current = seconds;
     },
   }));
@@ -151,6 +171,16 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
 
   // We show a progress spinner until the video is ready to play.
   const [spinner, setSpinner] = useState<boolean>(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    if (!screenfull.isEnabled) return;
+
+    const handleFullscreenChange = () =>
+      setIsFullscreen(screenfull.isFullscreen);
+    screenfull.on('change', handleFullscreenChange);
+    return () => screenfull.off('change', handleFullscreenChange);
+  }, []);
 
   // On the initial seek we will attempt to resume playback from the
   // persistentProgress prop. The ideas is that when switching between
@@ -557,11 +587,11 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     setIsDragging(false);
 
     if (Array.isArray(value) && typeof value[1] == 'number') {
-      players.forEach((player) => player.current?.seekTo(value[1], 'seconds'));
+      seekPlayersTo(value[1], true);
     }
 
     if (typeof value === 'number') {
-      players.forEach((player) => player.current?.seekTo(value, 'seconds'));
+      seekPlayersTo(value, true);
     }
   };
 
@@ -595,7 +625,15 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
    * Handle the onReady event. This is fired by each player when it is ready
    * to play, shortly after initial mount and also on completion of a seek.
    */
-  const onReady = () => {
+  const onReady = (primary: boolean) => {
+    if (primary) {
+      const video = players[0].current?.getInternalPlayer() as
+        | HTMLVideoElement
+        | undefined;
+      if (video && video.videoWidth > 0 && video.videoHeight > 0) {
+        onVideoAspect?.(video.videoWidth / video.videoHeight);
+      }
+    }
     numReady.current++;
 
     if (numReady.current < videos.length) {
@@ -714,7 +752,7 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
         onDoubleClick={toggleFullscreen}
         onPlay={primary ? () => setPlaying(true) : undefined}
         onPause={primary ? () => setPlaying(false) : undefined}
-        onReady={onReady}
+        onReady={() => onReady(primary)}
         onError={onError}
       />
     );
@@ -968,7 +1006,11 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
    */
   const renderControls = () => {
     return (
-      <div className="w-full h-10 flex flex-row justify-center items-center bg-background-dark-gradient-to border border-background-dark-gradient-to px-1 py-2 rounded-br-sm">
+      <div
+        className={`w-full h-10 flex flex-row justify-center items-center bg-background-dark-gradient-to border border-background-dark-gradient-to px-1 py-2 rounded-br-sm ${
+          isFullscreen ? 'absolute bottom-0 left-0 z-10 bg-black/70' : ''
+        }`}
+      >
         {renderPlayPause()}
         {renderVolumeButton()}
         {renderVolumeSlider()}
@@ -1012,35 +1054,27 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     if (e.key === 'j' || e.key === 'ArrowLeft') {
       const current = primary.current.getCurrentTime();
 
-      players.forEach((player) =>
-        player.current?.seekTo(current - 5, 'seconds'),
-      );
+      seekPlayersTo(current - 5, true);
     }
 
     if (e.key === 'l' || e.key === 'ArrowRight') {
       const current = primary.current.getCurrentTime();
 
-      players.forEach((player) =>
-        player.current?.seekTo(current + 5, 'seconds'),
-      );
+      seekPlayersTo(current + 5, true);
     }
 
     if (e.key === '.') {
       const current = primary.current.getCurrentTime();
       const frame = 1 / 30; // Assume 30fps, not the end of the world if we skip 2 frames.
 
-      players.forEach((player) =>
-        player.current?.seekTo(current + frame, 'seconds'),
-      );
+      seekPlayersTo(current + frame, false);
     }
 
     if (e.key === ',') {
       const current = primary.current.getCurrentTime();
       const frame = 1 / 30; // Assume 30fps, not the end of the world if we skip 2 frames.
 
-      players.forEach((player) =>
-        player.current?.seekTo(current - frame, 'seconds'),
-      );
+      seekPlayersTo(current - frame, false);
     }
   };
 
@@ -1119,8 +1153,8 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
   };
 
   return (
-    <div id="player-and-controls" className="w-full h-full">
-      <div style={{ height: 'calc(100% - 40px)' }}>
+    <div id="player-and-controls" className="relative w-full h-full">
+      <div style={{ height: isFullscreen ? '100%' : 'calc(100% - 40px)' }}>
         <div className="w-full h-full relative">
           <div className={playerDivClass}>{srcs.map(renderPlayer)}</div>
           {isDrawingEnabled && renderDrawingOverlay()}

@@ -11,6 +11,15 @@ Warcraft Recorder is a Linux/Wayland Tauri app that watches the World of Warcraf
 - `ffmpeg`
 - PipeWire and an `xdg-desktop-portal` backend for your desktop environment
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/install.sh | bash
+```
+
+The installer downloads the latest AppImage, verifies its SHA256 checksum, and
+checks that `gpu-screen-recorder` and `ffmpeg` are available.
+
 ## Development
 
 ```bash

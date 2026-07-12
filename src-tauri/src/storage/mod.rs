@@ -187,25 +187,27 @@ pub fn run_ffmpeg_cut(
     source: &Path,
     output: &Path,
     offset: f64,
-    duration: f64,
+    duration: Option<f64>,
+    clip: bool,
 ) -> StorageResult<()> {
     let start = offset.max(0.0).to_string();
-    let duration = duration.to_string();
-    let result = Command::new("ffmpeg")
-        .args(["-y", "-ss", &start, "-i"])
-        .arg(source)
-        .args([
-            "-t",
-            &duration,
-            "-c:v",
-            "copy",
-            "-c:a",
-            "copy",
-            "-avoid_negative_ts",
-            "make_zero",
-            "-movflags",
-            "+faststart",
-        ])
+    let mut command = Command::new("ffmpeg");
+    command.args(["-y", "-ss", &start, "-i"]).arg(source);
+    if let Some(duration) = duration {
+        command.args(["-t", &duration.to_string()]);
+    }
+    // Stream copy snaps to the previous keyframe; only mid-stream clip cuts
+    // need the frame-accurate re-encode (both streams, or copied audio still
+    // leads by the keyframe backoff). Offset-zero cuts are already aligned.
+    if clip && offset > 0.0 {
+        command.args([
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "192k",
+        ]);
+    } else {
+        command.args(["-c:v", "copy", "-c:a", "copy"]);
+    }
+    let result = command
+        .args(["-avoid_negative_ts", "make_zero", "-movflags", "+faststart"])
         .arg(output)
         .status()
         .map_err(StorageError::Io)?;
@@ -220,7 +222,8 @@ pub fn run_ffmpeg_cut(
 pub fn process_video_item(storage_path: &Path, mut item: VideoQueueItem) -> StorageResult<PathBuf> {
     fs::create_dir_all(storage_path)?;
     let output = output_video_path(storage_path, &item);
-    run_ffmpeg_cut(&item.source, &output, item.offset, item.duration)?;
+    let duration = item.clip.then_some(item.duration);
+    run_ffmpeg_cut(&item.source, &output, item.offset, duration, item.clip)?;
     if item.clip {
         // Manager normally supplies this exact shape.  Keeping it here as
         // well makes a direct queue caller unable to create an unclassified

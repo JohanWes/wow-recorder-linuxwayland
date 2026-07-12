@@ -1,6 +1,6 @@
 [package]
 name = "warcraft-recorder"
-version = "0.1.0"
+version = "8.0.0"
 description = "Warcraft Recorder for Linux/Wayland"
 authors = ["Warcraft Recorder contributors"]
 edition = "2021"
