@@ -3,6 +3,7 @@ use std::{
     io::{BufRead, BufReader, Read},
     path::PathBuf,
     process::{Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -270,8 +271,19 @@ fn install(app: AppHandle) -> Result<(), String> {
     }
 }
 
+static UPDATE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
 #[tauri::command]
 pub async fn perform_update(app: AppHandle) -> Result<(), String> {
+    if UPDATE_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        return Err("an update is already in progress".into());
+    }
+    let result = perform_update_inner(app).await;
+    UPDATE_IN_FLIGHT.store(false, Ordering::SeqCst);
+    result
+}
+
+async fn perform_update_inner(app: AppHandle) -> Result<(), String> {
     if std::env::var("WR_UPDATE_INSTALL_DRY_RUN").as_deref() == Ok("true") {
         let stages = [
             (

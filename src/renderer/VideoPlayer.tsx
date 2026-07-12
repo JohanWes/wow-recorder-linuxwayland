@@ -13,6 +13,7 @@ import {
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -251,7 +252,10 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
       let frameHandle: number | undefined;
       let settled = false;
       const timeout = window.setTimeout(() => {
-        finish(new Error('Timed out waiting for a decoded seek frame'));
+        // Give up waiting but still commit the swap: one possibly stale
+        // frame beats snapping playback back to the pre-seek position.
+        console.warn('Timed out waiting for a decoded seek frame');
+        finish();
       }, seekTimeout);
 
       const finish = (error?: Error) => {
@@ -371,11 +375,18 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
       });
   };
 
+  const banksReady = () =>
+    videoBanks.current.every((bank) =>
+      bank.slice(0, videos.length).every((video) => video),
+    );
+
   const drainSeekQueue = async () => {
     if (seekInFlight.current) return;
     seekInFlight.current = true;
     try {
-      while (queuedSeek.current) {
+      // A request that arrives before both banks have mounted stays queued;
+      // the video ref callbacks re-run the drain once the elements exist.
+      while (queuedSeek.current && banksReady()) {
         const request = queuedSeek.current;
         queuedSeek.current = null;
         try {
@@ -433,7 +444,9 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
    * Get the video timeline markers appropriate for the current video and
    * configuration.
    */
-  const getMarks = () => {
+  // Memoized: the progress poll re-renders this component at 10Hz during
+  // playback, and rebuilding the death marker tooltips every tick is waste.
+  const timelineMarks = useMemo(() => {
     const marks: SliderMark[] = [];
 
     if (duration === 0 || isClip(videos[0])) {
@@ -453,7 +466,8 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     }
 
     return marks;
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [duration, videos, config.deathMarkers, language]);
 
   /**
    * Return all the active video markers given the current video and config.
@@ -814,7 +828,7 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
 
     const valueLabelFormat = clipMode ? getClipLabelFormat : secToMmSs;
     const valueLabelDisplay = clipMode ? 'on' : 'off';
-    const marks = clipMode ? undefined : getMarks();
+    const marks = clipMode ? undefined : timelineMarks;
 
     return (
       <Slider
@@ -843,11 +857,15 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
       <video
         ref={(video) => {
           videoBanks.current[bank][index] = video;
+          if (video && queuedSeek.current) void drainSeekQueue();
         }}
         key={`${bank}-${src}`}
         src={src}
         className="h-full w-full bg-black object-contain"
-        preload="auto"
+        // The standby bank only needs metadata up front; the next seek pulls
+        // in the frames it needs. Full preload would download and buffer
+        // every video twice through the media server.
+        preload={bank === activeBank ? 'auto' : 'metadata'}
         playsInline
         muted={bank !== activeBank || index !== 0 || muted}
         onClick={togglePlaying}

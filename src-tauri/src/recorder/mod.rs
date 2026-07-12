@@ -583,32 +583,66 @@ impl Recorder {
                 Ok(())
             });
         }
-        let mut child = command.spawn().map_err(io_error)?;
-        if let Some(stdout) = child.stdout.take() {
-            forward_gsr_output(stdout, "stdout");
-        }
-        if let Some(stderr) = child.stderr.take() {
-            forward_gsr_output(stderr, "stderr");
-        }
-        thread::sleep(Duration::from_millis(500));
-        if let Some(status) = child.try_wait().map_err(io_error)? {
-            return Err(format!(
-                "[LinuxRecorder] gsr exited immediately with {status}"
-            ));
-        }
-        let pid = child.id();
-        *self.inner.child.lock().map_err(lock_error)? = Some(child);
+        // PR_SET_PDEATHSIG fires when the forking *thread* exits, not the
+        // process, so the fork must happen on a thread that outlives the
+        // child. Spawning from a short-lived thread (like the restart path)
+        // would SIGINT the fresh child the moment that thread returned.
+        // This thread forks, reports readiness, then monitors until exit.
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let this = self.clone();
+        thread::spawn(move || {
+            let mut child = match command.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(io_error(error)));
+                    return;
+                }
+            };
+            if let Some(stdout) = child.stdout.take() {
+                forward_gsr_output(stdout, "stdout");
+            }
+            if let Some(stderr) = child.stderr.take() {
+                forward_gsr_output(stderr, "stderr");
+            }
+            thread::sleep(Duration::from_millis(500));
+            match child.try_wait() {
+                Ok(None) => {}
+                Ok(Some(status)) => {
+                    let _ = ready_tx.send(Err(format!(
+                        "[LinuxRecorder] gsr exited immediately with {status}"
+                    )));
+                    return;
+                }
+                Err(error) => {
+                    let _ = ready_tx.send(Err(io_error(error)));
+                    return;
+                }
+            }
+            let pid = child.id();
+            match this.inner.child.lock() {
+                Ok(mut guard) => *guard = Some(child),
+                Err(error) => {
+                    let _ = ready_tx.send(Err(lock_error(error)));
+                    return;
+                }
+            }
+            let _ = ready_tx.send(Ok(()));
+            this.monitor_child(pid);
+        });
+        ready_rx
+            .recv()
+            .map_err(|_| "[LinuxRecorder] gsr spawn thread died".to_owned())??;
         *self.inner.event_log.lock().map_err(lock_error)? = Some(log);
-        self.monitor_child(pid);
         Ok(())
     }
 
+    /// Runs on the thread that forked the child (see `spawn_gsr_replay`) and
+    /// only returns once the child is gone, keeping PDEATHSIG armed.
     fn monitor_child(&self, pid: u32) {
-        let this = self.clone();
-        thread::spawn(move || loop {
+        loop {
             thread::sleep(Duration::from_millis(200));
             let exited = {
-                let Ok(mut guard) = this.inner.child.lock() else {
+                let Ok(mut guard) = self.inner.child.lock() else {
                     return;
                 };
                 match guard.as_mut() {
@@ -617,16 +651,16 @@ impl Recorder {
                 }
             };
             if exited {
-                if let Ok(mut child) = this.inner.child.lock() {
+                if let Ok(mut child) = self.inner.child.lock() {
                     *child = None;
                 }
-                this.set_state(RecorderState::None);
-                if this.inner.desired_running.load(Ordering::SeqCst) {
-                    this.schedule_restart();
+                self.set_state(RecorderState::None);
+                if self.inner.desired_running.load(Ordering::SeqCst) {
+                    self.schedule_restart();
                 }
                 return;
             }
-        });
+        }
     }
     fn schedule_restart(&self) {
         if self.inner.restarting.swap(true, Ordering::SeqCst) {

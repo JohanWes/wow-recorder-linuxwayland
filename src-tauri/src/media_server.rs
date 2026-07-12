@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream},
     path::PathBuf,
     sync::{
@@ -87,6 +87,7 @@ fn handle_request(
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_nodelay(true)?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
@@ -113,32 +114,35 @@ fn handle_request(
         }
     }
 
+    // Large buffer keeps header+body in few big writes; io::copy reuses it
+    // directly, so file data reaches the socket in 256K chunks.
+    let mut writer = BufWriter::with_capacity(256 * 1024, stream);
     if method != "GET" && method != "HEAD" {
-        return write_empty(&mut stream, "405 Method Not Allowed");
+        return write_empty(&mut writer, "405 Method Not Allowed");
     }
     let Some(path) = token.and_then(|token| files.lock().unwrap().get(token).cloned()) else {
-        return write_empty(&mut stream, "404 Not Found");
+        return write_empty(&mut writer, "404 Not Found");
     };
     let mut file = match File::open(path) {
         Ok(file) => file,
-        Err(_) => return write_empty(&mut stream, "404 Not Found"),
+        Err(_) => return write_empty(&mut writer, "404 Not Found"),
     };
     let file_len = file.metadata()?.len();
     if file_len == 0 {
         write!(
-            stream,
+            writer,
             "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nAccept-Ranges: bytes\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         )?;
-        return Ok(());
+        return writer.flush();
     }
     let (start, end, partial) = match resolve_range(range, file_len) {
         Some(value) => value,
         None => {
             write!(
-                stream,
+                writer,
                 "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{file_len}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             )?;
-            return Ok(());
+            return writer.flush();
         }
     };
     let content_len = end.saturating_sub(start) + 1;
@@ -148,28 +152,29 @@ fn handle_request(
         "200 OK"
     };
     write!(
-        stream,
+        writer,
         "HTTP/1.1 {status}\r\nContent-Type: video/mp4\r\nAccept-Ranges: bytes\r\nContent-Length: {content_len}\r\n"
     )?;
     if partial {
-        write!(stream, "Content-Range: bytes {start}-{end}/{file_len}\r\n")?;
+        write!(writer, "Content-Range: bytes {start}-{end}/{file_len}\r\n")?;
     }
     write!(
-        stream,
+        writer,
         "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
     )?;
     if method == "GET" && content_len > 0 {
         file.seek(SeekFrom::Start(start))?;
-        io::copy(&mut file.take(content_len), &mut stream)?;
+        io::copy(&mut file.take(content_len), &mut writer)?;
     }
-    Ok(())
+    writer.flush()
 }
 
-fn write_empty(stream: &mut TcpStream, status: &str) -> io::Result<()> {
+fn write_empty(writer: &mut impl Write, status: &str) -> io::Result<()> {
     write!(
-        stream,
+        writer,
         "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-    )
+    )?;
+    writer.flush()
 }
 
 fn random_token() -> io::Result<String> {
@@ -204,7 +209,9 @@ fn resolve_range(range: Option<(Option<u64>, Option<u64>)>, len: u64) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_range, resolve_range};
+    use super::{parse_range, resolve_range, MediaServer};
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
 
     #[test]
     fn parses_and_bounds_http_ranges() {
@@ -217,5 +224,44 @@ mod tests {
         assert_eq!(resolve_range(parse_range("-10"), 100), Some((90, 99, true)));
         assert_eq!(resolve_range(parse_range("100-"), 100), None);
         assert_eq!(resolve_range(parse_range("20-10"), 100), None);
+    }
+
+    #[test]
+    fn serves_a_registered_file_with_range_requests() {
+        let dir = std::env::temp_dir().join("wr-media-server-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        std::fs::write(&path, b"0123456789").unwrap();
+
+        let server = MediaServer::start().unwrap();
+        let url = server.register(path).unwrap();
+        let (host, token_path) = url
+            .strip_prefix("http://")
+            .and_then(|rest| rest.split_once('/'))
+            .unwrap();
+
+        let request = |range: Option<&str>| {
+            let mut stream = TcpStream::connect(host).unwrap();
+            let range = range.map_or(String::new(), |r| format!("Range: bytes={r}\r\n"));
+            write!(stream, "GET /{token_path} HTTP/1.1\r\n{range}\r\n").unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        };
+
+        let full = request(None);
+        assert!(full.starts_with("HTTP/1.1 200 OK"), "{full}");
+        assert!(full.ends_with("0123456789"), "{full}");
+
+        let partial = request(Some("2-5"));
+        assert!(
+            partial.starts_with("HTTP/1.1 206 Partial Content"),
+            "{partial}"
+        );
+        assert!(partial.contains("Content-Range: bytes 2-5/10"), "{partial}");
+        assert!(partial.ends_with("2345"), "{partial}");
+
+        let bad = request(Some("99-"));
+        assert!(bad.starts_with("HTTP/1.1 416"), "{bad}");
     }
 }

@@ -208,17 +208,18 @@ impl Manager {
     }
 
     async fn poll(&self) {
-        let mut pending = Vec::new();
         {
             let mut runtime = self.runtime.lock().await;
             if let Some(parser) = runtime.parser.as_mut() {
                 parser.poll_watch();
             }
-            while let Ok(event) = runtime.events.try_recv() {
-                pending.push(event);
-            }
         }
-        for event in pending {
+        // Take one event at a time so events queued behind the current one
+        // stay visible in the channel; the overrun wait below peeks at it to
+        // cut the overrun short when the next event arrives.
+        loop {
+            let event = self.runtime.lock().await.events.try_recv().ok();
+            let Some(event) = event else { return };
             if let Err(error) = self.handle_event(event).await {
                 self.report_error(error);
             }
@@ -250,8 +251,17 @@ impl Manager {
                 overrun_seconds,
                 video_name,
             } => {
-                tokio::time::sleep(std::time::Duration::from_secs_f64(overrun_seconds.max(0.0)))
-                    .await;
+                // Keep recording through the overrun, but cut it short as
+                // soon as another parser event arrives (next pull, force
+                // end): sleeping blocks the whole event loop, and the next
+                // recording's replay pre-roll covers its lead-in anyway.
+                let deadline = tokio::time::Instant::now()
+                    + std::time::Duration::from_secs_f64(overrun_seconds.max(0.0));
+                while tokio::time::Instant::now() < deadline
+                    && self.runtime.lock().await.events.is_empty()
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
                 self.recorder.stop().await?;
                 let source = self
                     .recorder
