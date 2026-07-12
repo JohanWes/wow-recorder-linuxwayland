@@ -17,7 +17,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Backdrop, Box, CircularProgress, Slider } from '@mui/material';
+import { Backdrop, Box, Slider } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import PauseIcon from '@mui/icons-material/Pause';
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
@@ -65,6 +65,7 @@ const ipc = window.electron.ipcRenderer;
 const playbackRates = [0.25, 0.5, 1, 2];
 const progressInterval = 100;
 const seekTimeout = 2500;
+const firstFrameTimeout = 250;
 
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (callback: () => void) => number;
@@ -134,6 +135,8 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
   const [activeBank, setActiveBank] = useState<0 | 1>(0);
   const activeBankRef = useRef<0 | 1>(0);
   const readyPlayers = useRef(new Set<number>());
+  const preparingPlayers = useRef(new Set<number>());
+  const cancelFirstFrameWaits = useRef(new Set<() => void>());
   const durations = useRef<number[]>(Array(4).fill(0));
   const progressSlider = useRef<HTMLSpanElement>(null);
 
@@ -785,10 +788,60 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     }
   };
 
-  const onCanPlay = (bank: number, index: number) => {
+  const onFirstFrame = (
+    bank: number,
+    index: number,
+    video: VideoWithFrameCallback,
+  ) => {
     if (bank !== 0) return;
-    readyPlayers.current.add(index);
-    if (readyPlayers.current.size >= videos.length) setSpinner(false);
+    if (
+      readyPlayers.current.has(index) ||
+      preparingPlayers.current.has(index)
+    ) {
+      return;
+    }
+
+    preparingPlayers.current.add(index);
+    let settled = false;
+    let frameHandle: number | undefined;
+    let animationFrameHandle: number | undefined;
+    const timeout = window.setTimeout(() => markReady(), firstFrameTimeout);
+
+    const cancel = () => {
+      if (settled) return;
+      settled = true;
+      cancelFirstFrameWaits.current.delete(cancel);
+      window.clearTimeout(timeout);
+      if (frameHandle !== undefined) {
+        video.cancelVideoFrameCallback?.(frameHandle);
+      }
+      if (animationFrameHandle !== undefined) {
+        cancelAnimationFrame(animationFrameHandle);
+      }
+    };
+
+    const markReady = () => {
+      if (settled) return;
+      cancel();
+      preparingPlayers.current.delete(index);
+      if (videoBanks.current[bank][index] !== video) return;
+      readyPlayers.current.add(index);
+      if (readyPlayers.current.size >= videos.length) setSpinner(false);
+    };
+    cancelFirstFrameWaits.current.add(cancel);
+
+    // loadeddata guarantees frame data exists, but WebKitGTK can still paint
+    // one black frame before presenting it. Keep the loading cover in place
+    // until the browser confirms that the first frame was actually rendered.
+    // A bounded fallback is required because a paused frame may have been
+    // presented just before this event handler registered the callback.
+    if (video.requestVideoFrameCallback) {
+      frameHandle = video.requestVideoFrameCallback(markReady);
+    } else {
+      animationFrameHandle = requestAnimationFrame(() => {
+        animationFrameHandle = requestAnimationFrame(markReady);
+      });
+    }
   };
 
   /**
@@ -873,7 +926,7 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
         onLoadedMetadata={(event) =>
           onLoadedMetadata(bank, index, event.currentTarget)
         }
-        onCanPlay={() => onCanPlay(bank, index)}
+        onLoadedData={(event) => onFirstFrame(bank, index, event.currentTarget)}
         onEnded={
           index === 0
             ? () => {
@@ -1255,6 +1308,8 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
       seekGeneration.current++;
       cancelSeekWaits.current.forEach((cancel) => cancel());
       cancelSeekWaits.current.clear();
+      cancelFirstFrameWaits.current.forEach((cancel) => cancel());
+      cancelFirstFrameWaits.current.clear();
       videoBanks.current.forEach((bank) =>
         bank.forEach((video) => video?.pause()),
       );
@@ -1309,12 +1364,13 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
           right: 0,
           bottom: 0,
           zIndex: 3,
-          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          // Do not expose the old container geometry or an undecoded frame
+          // while a newly selected video is being prepared.
+          backgroundColor: 'black',
         }}
         open={spinner}
-      >
-        <CircularProgress color="inherit" />
-      </Backdrop>
+        transitionDuration={0}
+      />
     );
   };
 
