@@ -123,12 +123,12 @@ const WarcraftRecorder = () => {
 
     // Don't count the same video with different storage types twice. Still
     // count different points of view of the same activity multiple times.
-    const seen: string[] = [];
+    const seen = new Set<string>();
 
     videoState.forEach((rv) => {
-      if (seen.includes(rv.videoName)) return;
+      if (seen.has(rv.videoName)) return;
       counts[rv.category]++;
-      seen.push(rv.videoName);
+      seen.add(rv.videoName);
     });
 
     return counts;

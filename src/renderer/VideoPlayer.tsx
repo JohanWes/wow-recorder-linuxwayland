@@ -63,7 +63,10 @@ interface IProps {
 
 const ipc = window.electron.ipcRenderer;
 const playbackRates = [0.25, 0.5, 1, 2];
-const progressInterval = 100;
+// Updating the controlled MUI slider re-renders the complete player. Four
+// updates per second keeps the time display fluid without continuously
+// competing with WebKitGTK's video compositor and pointer feedback.
+const progressInterval = 250;
 const seekTimeout = 2500;
 const firstFrameTimeout = 250;
 
@@ -133,6 +136,7 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     Array(4).fill(null),
   ]);
   const [activeBank, setActiveBank] = useState<0 | 1>(0);
+  const [preparingBank, setPreparingBank] = useState<0 | 1 | null>(null);
   const activeBankRef = useRef<0 | 1>(0);
   const readyPlayers = useRef(new Set<number>());
   const preparingPlayers = useRef(new Set<number>());
@@ -344,6 +348,14 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
       return;
     }
 
+    // Temporarily return the standby bank to the compositing tree so WebKit
+    // can present the decoded seek frame. Outside a seek it stays hidden.
+    setPreparingBank(nextBank);
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+    if (request.generation !== seekGeneration.current) return;
+
     currentVideos.forEach((video) => video?.pause());
     nextVideos.forEach((video) => {
       if (!video) return;
@@ -378,6 +390,7 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
 
     activeBankRef.current = nextBank;
     setActiveBank(nextBank);
+    setPreparingBank(null);
     const committedTime = nextVideos[0]?.currentTime ?? request.seconds;
     persistentProgress.current = Math.max(0, committedTime);
     setProgress(Math.max(0, committedTime));
@@ -424,6 +437,7 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
       }
     } finally {
       seekInFlight.current = false;
+      setPreparingBank(null);
       syncActivePlayback();
     }
   };
@@ -1406,6 +1420,13 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
               style={{
                 zIndex: bank === activeBank ? 1 : 0,
                 pointerEvents: bank === activeBank ? 'auto' : 'none',
+                // Do not leave the standby video surfaces in WebKitGTK's
+                // compositing tree. They remain mounted for seamless seeks,
+                // but only the active bank needs to be painted.
+                visibility:
+                  bank === activeBank || bank === preparingBank
+                    ? 'visible'
+                    : 'hidden',
               }}
             >
               {srcs.map((src, index) => renderPlayer(bank, src, index))}

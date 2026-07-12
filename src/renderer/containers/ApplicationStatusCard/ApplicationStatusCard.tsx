@@ -45,7 +45,7 @@ const ApplicationStatusCard = ({
       <div
         id="status-card-inner"
         className={cn(
-          'w-[calc(100%-5px)] h-full rounded-md border border-background-dark-gradient-from relative z-10 transition-all',
+          'w-[calc(100%-5px)] h-full rounded-md border border-background-dark-gradient-from relative z-10 transition-[width] duration-150',
           { 'w-[calc(100%-30px)]': hasExtraBar },
         )}
       >
@@ -70,7 +70,7 @@ const ApplicationStatusCard = ({
       </div>
       <div
         className={cn(
-          'bg-background-higher h-full w-[40px] rounded-r-md absolute top-0 right-0 z-1 border border-background-dark-gradient-to transition-all',
+          'bg-background-higher h-full w-[40px] rounded-r-md absolute top-0 right-0 z-1 border border-background-dark-gradient-to',
         )}
       >
         <div

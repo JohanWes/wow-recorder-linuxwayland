@@ -5,7 +5,8 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::{
     collections::HashMap,
-    fs,
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::mpsc,
     thread,
@@ -418,11 +419,15 @@ impl Parser {
                                 }
                                 let off = offsets.get(&p).copied().unwrap_or(0);
                                 if meta.len() > off {
-                                    if let Ok(b) = fs::read(&p) {
-                                        offsets.insert(p.clone(), meta.len());
-                                        for line in
-                                            String::from_utf8_lossy(&b[off as usize..]).lines()
-                                        {
+                                    let appended = File::open(&p).and_then(|mut file| {
+                                        file.seek(SeekFrom::Start(off))?;
+                                        let mut bytes = Vec::new();
+                                        file.read_to_end(&mut bytes)?;
+                                        Ok(bytes)
+                                    });
+                                    if let Ok(b) = appended {
+                                        offsets.insert(p.clone(), off + b.len() as u64);
+                                        for line in String::from_utf8_lossy(&b).lines() {
                                             let _ = line_tx
                                                 .send(WatchMessage::Line(line.trim().to_owned()));
                                         }

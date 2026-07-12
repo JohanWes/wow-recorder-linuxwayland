@@ -18,7 +18,7 @@ const Root = ({
   return (
     <div
       className={cn(
-        'w-full flex flex-row bg-transparent rounded-md px-4 py-3 items-center transition-all',
+        'w-full flex flex-row bg-transparent rounded-md px-4 py-3 items-center transition-colors duration-75',
         'text-foreground font-semibold text-sm font-sans border-t border-t-transparent',
         '[text-shadow:_0px_1px_1px_rgba(0,0,0,66)]',
         { 'hover:bg-card/60': currentValue !== value },
