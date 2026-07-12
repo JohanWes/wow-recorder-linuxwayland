@@ -27,8 +27,6 @@ import FullscreenIcon from '@mui/icons-material/Fullscreen';
 import MovieIcon from '@mui/icons-material/Movie';
 import ClearIcon from '@mui/icons-material/Clear';
 import DoneIcon from '@mui/icons-material/Done';
-import { OnProgressProps } from 'react-player/base';
-import ReactPlayer from 'react-player';
 import screenfull from 'screenfull';
 import { ConfigurationSchema } from 'config/configSchema';
 import { getLocalePhrase } from 'localisation/translations';
@@ -64,8 +62,20 @@ interface IProps {
 
 const ipc = window.electron.ipcRenderer;
 const playbackRates = [0.25, 0.5, 1, 2];
-const style = { backgroundColor: 'black' };
 const progressInterval = 100;
+const seekTimeout = 2500;
+
+type VideoWithFrameCallback = HTMLVideoElement & {
+  requestVideoFrameCallback?: (callback: () => void) => number;
+  cancelVideoFrameCallback?: (handle: number) => void;
+  fastSeek?: (time: number) => void;
+};
+
+interface SeekRequest {
+  seconds: number;
+  fast: boolean;
+  generation: number;
+}
 
 const sliderBaseSx = {
   '& .MuiSlider-thumb': {
@@ -113,36 +123,17 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     throw new Error('VideoPlayer should only be passed up to 4 videos');
   }
 
-  // Reference to each player. Required to control the ReactPlayer component.
-  // Probably breaking some hook rules here and being saved by the key in the
-  // parent remounting this when videos changes. Maybe should just use 4
-  // hardcoded refs rather than this array.
-  const players: MutableRefObject<ReactPlayer | null>[] = videos.map(() =>
-    useRef(null),
-  );
-  const seekPlayersTo = (seconds: number, fast: boolean) => {
-    players.forEach((player) => {
-      const internal = player.current?.getInternalPlayer() as
-        | (HTMLVideoElement & { fastSeek?: (time: number) => void })
-        | undefined;
-      if (fast && internal && typeof internal.fastSeek === 'function') {
-        internal.fastSeek(Math.max(0, seconds));
-      } else {
-        player.current?.seekTo(seconds, 'seconds');
-      }
-    });
-  };
-
-  // Exposes the seekTo method so that we can seek from outside the component.
-  useImperativeHandle(ref, () => ({
-    seekAllPlayersTo(seconds: number) {
-      // Seek all players
-      seekPlayersTo(seconds, true);
-      persistentProgress.current = seconds;
-    },
-  }));
-
-  const numReady = useRef<number>(0);
+  // Keep both banks rendered. The active bank completely covers the standby
+  // bank, allowing WebKitGTK to preroll real video frames without exposing its
+  // flush-to-black behaviour during a seek.
+  const videoBanks = useRef<(VideoWithFrameCallback | null)[][]>([
+    Array(4).fill(null),
+    Array(4).fill(null),
+  ]);
+  const [activeBank, setActiveBank] = useState<0 | 1>(0);
+  const activeBankRef = useRef<0 | 1>(0);
+  const readyPlayers = useRef(new Set<number>());
+  const durations = useRef<number[]>(Array(4).fill(0));
   const progressSlider = useRef<HTMLSpanElement>(null);
 
   // Progress is in seconds. Strictly it is the position of the
@@ -227,6 +218,7 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
    */
   const setPlaying = useCallback(
     (v: boolean) => {
+      playingRef.current = v;
       setAppState((prevState) => {
         return {
           ...prevState,
@@ -236,6 +228,183 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     },
     [setAppState],
   );
+
+  const playingRef = useRef(playing);
+  const volumeRef = useRef(volume);
+  const mutedRef = useRef(muted);
+  const playbackRateRef = useRef(playbackRate);
+  playingRef.current = playing;
+  volumeRef.current = volume;
+  mutedRef.current = muted;
+  playbackRateRef.current = playbackRate;
+
+  const seekGeneration = useRef(0);
+  const queuedSeek = useRef<SeekRequest | null>(null);
+  const seekInFlight = useRef(false);
+  const cancelSeekWaits = useRef(new Set<() => void>());
+
+  const waitForSeekFrame = (
+    video: VideoWithFrameCallback,
+    request: SeekRequest,
+  ) =>
+    new Promise<void>((resolve, reject) => {
+      let frameHandle: number | undefined;
+      let settled = false;
+      const timeout = window.setTimeout(() => {
+        finish(new Error('Timed out waiting for a decoded seek frame'));
+      }, seekTimeout);
+
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        cancelSeekWaits.current.delete(cancel);
+        window.clearTimeout(timeout);
+        video.removeEventListener('seeked', onSeeked);
+        video.removeEventListener('error', onError);
+        if (frameHandle !== undefined) {
+          video.cancelVideoFrameCallback?.(frameHandle);
+        }
+        if (error) reject(error);
+        else resolve();
+      };
+      const cancel = () => finish();
+      const onError = () => finish(new Error('Video failed while seeking'));
+      const finishAfterFrame = () => {
+        if (request.generation !== seekGeneration.current) {
+          finish();
+          return;
+        }
+        if (video.requestVideoFrameCallback) {
+          frameHandle = video.requestVideoFrameCallback(() => finish());
+        } else {
+          requestAnimationFrame(() => requestAnimationFrame(() => finish()));
+        }
+      };
+      const onSeeked = () => finishAfterFrame();
+
+      cancelSeekWaits.current.add(cancel);
+      video.addEventListener('seeked', onSeeked, { once: true });
+      video.addEventListener('error', onError, { once: true });
+      const target = Math.min(
+        Math.max(0, request.seconds),
+        Number.isFinite(video.duration) ? video.duration : request.seconds,
+      );
+      if (
+        Math.abs(video.currentTime - target) < 0.001 &&
+        video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+      ) {
+        finishAfterFrame();
+        return;
+      }
+      if (request.fast && video.fastSeek) video.fastSeek(target);
+      else video.currentTime = target;
+    });
+
+  const performSeek = async (request: SeekRequest) => {
+    const currentBank = activeBankRef.current;
+    const nextBank = currentBank === 0 ? 1 : 0;
+    const currentVideos = videoBanks.current[currentBank].slice(
+      0,
+      videos.length,
+    );
+    const nextVideos = videoBanks.current[nextBank].slice(0, videos.length);
+    if (
+      currentVideos.some((video) => !video) ||
+      nextVideos.some((video) => !video)
+    ) {
+      return;
+    }
+
+    currentVideos.forEach((video) => video?.pause());
+    nextVideos.forEach((video) => {
+      if (!video) return;
+      video.pause();
+      video.muted = true;
+      video.volume = volumeRef.current;
+      video.playbackRate = playbackRateRef.current;
+    });
+
+    const bankRequest = {
+      ...request,
+      // Independent keyframe layouts can make fastSeek land each POV at a
+      // different moment. Exact seeks preserve grid synchronization.
+      fast: request.fast && videos.length === 1,
+    };
+    await Promise.all(
+      nextVideos.map((video) =>
+        waitForSeekFrame(video as VideoWithFrameCallback, bankRequest),
+      ),
+    );
+    if (request.generation !== seekGeneration.current) return;
+
+    nextVideos.forEach((video, index) => {
+      if (!video) return;
+      video.muted = index !== 0 || mutedRef.current;
+    });
+    currentVideos.forEach((video) => {
+      if (!video) return;
+      video.pause();
+      video.muted = true;
+    });
+
+    activeBankRef.current = nextBank;
+    setActiveBank(nextBank);
+    const committedTime = nextVideos[0]?.currentTime ?? request.seconds;
+    persistentProgress.current = Math.max(0, committedTime);
+    setProgress(Math.max(0, committedTime));
+
+    if (playingRef.current) {
+      nextVideos.forEach((video) => void video?.play().catch(onError));
+    }
+  };
+
+  const syncActivePlayback = () => {
+    videoBanks.current[activeBankRef.current]
+      .slice(0, videos.length)
+      .forEach((video, index) => {
+        if (!video) return;
+        video.volume = volumeRef.current;
+        video.playbackRate = playbackRateRef.current;
+        video.muted = index !== 0 || mutedRef.current;
+        if (playingRef.current) void video.play().catch(onError);
+        else video.pause();
+      });
+  };
+
+  const drainSeekQueue = async () => {
+    if (seekInFlight.current) return;
+    seekInFlight.current = true;
+    try {
+      while (queuedSeek.current) {
+        const request = queuedSeek.current;
+        queuedSeek.current = null;
+        try {
+          await performSeek(request);
+        } catch (error) {
+          if (request.generation === seekGeneration.current) {
+            console.error('Video seek failed', error);
+          }
+        }
+      }
+    } finally {
+      seekInFlight.current = false;
+      syncActivePlayback();
+    }
+  };
+
+  const seekPlayersTo = (seconds: number, fast: boolean) => {
+    const generation = ++seekGeneration.current;
+    cancelSeekWaits.current.forEach((cancel) => cancel());
+    cancelSeekWaits.current.clear();
+    queuedSeek.current = { seconds, fast, generation };
+    void drainSeekQueue();
+  };
+
+  useImperativeHandle(ref, () => ({
+    seekAllPlayersTo(seconds: number) {
+      seekPlayersTo(seconds, true);
+    },
+  }));
 
   /**
    * Return a death marker appropriate for the MUI slider component.
@@ -483,30 +652,9 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     };
   };
 
-  /**
-   * Toggle if the video is currently playing or not. You would think this
-   * would be straight forward and you could just do setPlaying(!playing). You
-   * would be wrong. Seems a limitation on the react-player library we are using.
-   *
-   * Instead we access the internal player's state and determine if it's playing
-   * or not and set the state depending on that. That logic is stolen from here:
-   * https://stackoverflow.com/questions/6877403/how-to-tell-if-a-video-element-is-currently-playing.
-   */
+  /** Toggle playback for the active video bank. */
   const togglePlaying = () => {
-    const [primary] = players;
-
-    if (!primary.current) {
-      return;
-    }
-
-    const internalPlayer = primary.current.getInternalPlayer();
-    const { paused, currentTime, ended } = internalPlayer;
-
-    if (currentTime > 0 && !paused && !ended) {
-      setPlaying(false);
-    } else {
-      setPlaying(true);
-    }
+    setPlaying(!playingRef.current);
   };
 
   // By default the window hijacks media keys even when
@@ -542,18 +690,6 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
       setPlaybackRate(playbackRates[0]);
     } else {
       setPlaybackRate(playbackRates[index + 1]);
-    }
-  };
-
-  /**
-   * Handle an onProgress event fired from the player by updating the
-   * progresss bar position.
-   */
-  const onProgress = (event: OnProgressProps) => {
-    persistentProgress.current = event.playedSeconds;
-
-    if (!isDragging) {
-      setProgress(event.playedSeconds);
     }
   };
 
@@ -604,8 +740,6 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     if (multiPlayerMode) {
       // Force a pause in multi player mode to avoid any risk of video
       // desync or weird slider behaviour.
-      numReady.current = 0;
-      setSpinner(true);
       setPlaying(false);
     }
   };
@@ -621,42 +755,26 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     }
   };
 
-  /**
-   * Handle the onReady event. This is fired by each player when it is ready
-   * to play, shortly after initial mount and also on completion of a seek.
-   */
-  const onReady = (primary: boolean) => {
-    if (primary) {
-      const video = players[0].current?.getInternalPlayer() as
-        | HTMLVideoElement
-        | undefined;
-      if (video && video.videoWidth > 0 && video.videoHeight > 0) {
-        onVideoAspect?.(video.videoWidth / video.videoHeight);
-      }
+  const onLoadedMetadata = (
+    bank: number,
+    index: number,
+    video: HTMLVideoElement,
+  ) => {
+    if (bank !== 0) return;
+    durations.current[index] = video.duration;
+    const knownDurations = durations.current.slice(0, videos.length);
+    if (knownDurations.every((value) => Number.isFinite(value) && value > 0)) {
+      setDuration(Math.max(...knownDurations));
     }
-    numReady.current++;
-
-    if (numReady.current < videos.length) {
-      // Don't react until all the players have emitted a ready event.
-      return;
+    if (index === 0 && video.videoWidth > 0 && video.videoHeight > 0) {
+      onVideoAspect?.(video.videoWidth / video.videoHeight);
     }
+  };
 
-    setSpinner(false);
-
-    if (duration === 0) {
-      // We don't have a duration on the slider yet but the players
-      // are ready so each must know. Apply it to the component state.
-      const durations = players
-        .map((p) => p.current)
-        .filter((r): r is ReactPlayer => r !== null)
-        .map((r) => r.getDuration());
-
-      // Take the max duration of all videos, if we're in multiplayer
-      // mode some might have an overrun longer than others so we want
-      // the slider to represent the longest.
-      const max = Math.max(...durations);
-      setDuration(max);
-    }
+  const onCanPlay = (bank: number, index: number) => {
+    if (bank !== 0) return;
+    readyPlayers.current.add(index);
+    if (readyPlayers.current.size >= videos.length) setSpinner(false);
   };
 
   /**
@@ -695,7 +813,7 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
       : progress;
 
     const valueLabelFormat = clipMode ? getClipLabelFormat : secToMmSs;
-    const valueLabelDisplay = clipMode ? 'on' : 'auto';
+    const valueLabelDisplay = clipMode ? 'on' : 'off';
     const marks = clipMode ? undefined : getMarks();
 
     return (
@@ -720,39 +838,31 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     );
   };
 
-  /**
-   * Returns the video player itself, passing through all necessary callbacks
-   * and props for it to function and be controlled.
-   */
-  const renderPlayer = (src: string, index: number) => {
-    const primary = index === 0;
-    const player = players[index];
-
-    if (!player) {
-      // Protect against stupid programmer errors.
-      throw new Error('No player reference');
-    }
-
+  const renderPlayer = (bank: 0 | 1, src: string, index: number) => {
     return (
-      <ReactPlayer
-        id="react-player"
-        ref={player}
-        height="100%"
-        width="100%"
-        key={src}
-        url={src}
-        style={style}
-        playing={playing}
-        volume={volume}
-        muted={primary ? muted : true}
-        playbackRate={playbackRate}
-        progressInterval={progressInterval}
-        onProgress={primary ? onProgress : undefined}
+      <video
+        ref={(video) => {
+          videoBanks.current[bank][index] = video;
+        }}
+        key={`${bank}-${src}`}
+        src={src}
+        className="h-full w-full bg-black object-contain"
+        preload="auto"
+        playsInline
+        muted={bank !== activeBank || index !== 0 || muted}
         onClick={togglePlaying}
         onDoubleClick={toggleFullscreen}
-        onPlay={primary ? () => setPlaying(true) : undefined}
-        onPause={primary ? () => setPlaying(false) : undefined}
-        onReady={() => onReady(primary)}
+        onLoadedMetadata={(event) =>
+          onLoadedMetadata(bank, index, event.currentTarget)
+        }
+        onCanPlay={() => onCanPlay(bank, index)}
+        onEnded={
+          index === 0
+            ? () => {
+                if (bank === activeBankRef.current) setPlaying(false);
+              }
+            : undefined
+        }
         onError={onError}
       />
     );
@@ -1040,11 +1150,9 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
    * such events, so instead we do this.
    */
   const handleKeyDown = (e: KeyboardEvent) => {
-    const [primary] = players;
+    const primary = videoBanks.current[activeBankRef.current][0];
 
-    if (!primary.current) {
-      return;
-    }
+    if (!primary) return;
 
     if (e.key === 'k' || e.key === ' ') {
       togglePlaying();
@@ -1052,29 +1160,23 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     }
 
     if (e.key === 'j' || e.key === 'ArrowLeft') {
-      const current = primary.current.getCurrentTime();
-
-      seekPlayersTo(current - 5, true);
+      seekPlayersTo(primary.currentTime - 5, true);
     }
 
     if (e.key === 'l' || e.key === 'ArrowRight') {
-      const current = primary.current.getCurrentTime();
-
-      seekPlayersTo(current + 5, true);
+      seekPlayersTo(primary.currentTime + 5, true);
     }
 
     if (e.key === '.') {
-      const current = primary.current.getCurrentTime();
       const frame = 1 / 30; // Assume 30fps, not the end of the world if we skip 2 frames.
 
-      seekPlayersTo(current + frame, false);
+      seekPlayersTo(primary.currentTime + frame, false);
     }
 
     if (e.key === ',') {
-      const current = primary.current.getCurrentTime();
       const frame = 1 / 30; // Assume 30fps, not the end of the world if we skip 2 frames.
 
-      seekPlayersTo(current - frame, false);
+      seekPlayersTo(primary.currentTime - frame, false);
     }
   };
 
@@ -1095,6 +1197,52 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     window.addEventListener('resize', updateWidth);
     return () => window.removeEventListener('resize', updateWidth);
   }, []);
+
+  useEffect(() => {
+    if (seekInFlight.current) return;
+    syncActivePlayback();
+  }, [activeBank, playing, srcs, videos.length]);
+
+  useEffect(() => {
+    videoBanks.current.forEach((bank, bankIndex) => {
+      bank.slice(0, videos.length).forEach((video, index) => {
+        if (!video) return;
+        video.volume = volume;
+        video.muted = bankIndex !== activeBank || index !== 0 || muted;
+      });
+    });
+  }, [activeBank, muted, srcs, videos.length, volume]);
+
+  useEffect(() => {
+    videoBanks.current.forEach((bank) =>
+      bank
+        .slice(0, videos.length)
+        .forEach((video) => video && (video.playbackRate = playbackRate)),
+    );
+  }, [playbackRate, srcs, videos.length]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (seekInFlight.current) return;
+      const primary = videoBanks.current[activeBankRef.current][0];
+      if (!primary) return;
+      persistentProgress.current = primary.currentTime;
+      if (!isDragging) setProgress(primary.currentTime);
+    }, progressInterval);
+    return () => window.clearInterval(timer);
+  }, [isDragging, persistentProgress, srcs]);
+
+  useEffect(
+    () => () => {
+      seekGeneration.current++;
+      cancelSeekWaits.current.forEach((cancel) => cancel());
+      cancelSeekWaits.current.clear();
+      videoBanks.current.forEach((bank) =>
+        bank.forEach((video) => video?.pause()),
+      );
+    },
+    [],
+  );
 
   // Inform the main process of a volume or muted state change.
   useEffect(() => {
@@ -1123,7 +1271,7 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
 
   const renderDrawingOverlay = () => {
     return (
-      <div className="absolute top-0 left-0 w-full h-full">
+      <div className="absolute top-0 left-0 z-[2] w-full h-full">
         <DrawingOverlay
           isDrawingEnabled={isDrawingEnabled}
           onDrawingChange={setDrawingElements}
@@ -1142,7 +1290,7 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
           left: 0,
           right: 0,
           bottom: 0,
-          zIndex: 1,
+          zIndex: 3,
           backgroundColor: 'rgba(0, 0, 0, 0.5)',
         }}
         open={spinner}
@@ -1156,7 +1304,18 @@ export const VideoPlayer = forwardRef<VideoPlayerRef, IProps>((props, ref) => {
     <div id="player-and-controls" className="relative w-full h-full">
       <div style={{ height: isFullscreen ? '100%' : 'calc(100% - 40px)' }}>
         <div className="w-full h-full relative">
-          <div className={playerDivClass}>{srcs.map(renderPlayer)}</div>
+          {([0, 1] as const).map((bank) => (
+            <div
+              key={bank}
+              className={`${playerDivClass} absolute inset-0`}
+              style={{
+                zIndex: bank === activeBank ? 1 : 0,
+                pointerEvents: bank === activeBank ? 'auto' : 'none',
+              }}
+            >
+              {srcs.map((src, index) => renderPlayer(bank, src, index))}
+            </div>
+          ))}
           {isDrawingEnabled && renderDrawingOverlay()}
           {renderLoadingSpinner()}
         </div>
