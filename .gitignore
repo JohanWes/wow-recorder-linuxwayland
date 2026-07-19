@@ -37,6 +37,14 @@ src/main/osn-data/*
 *cpython*
 *__pycache__*
 
+# Rust/proof build and generated spike artifacts
+target/
+spikes/*/artifacts/
+spikes/*/media/
+spikes/*/work/
+spikes/*/fixture-logs/
+spikes/*/notify-logs/
+
 # Cloud storage dirs
 upload
 buffer
