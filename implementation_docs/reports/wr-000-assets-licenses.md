@@ -33,14 +33,15 @@ No asset-specific provenance or redistribution notice was found for any raster o
 
 - `LICENSE` begins with GNU GPL version 2 text (SHA-256 `1327219ca4c880c35fba4456eab11c59ad51f708403357c38b09bc267167308c`).
 - `package.json:19` says `Creative Commons Attribution-NonCommercial` (package SHA-256 `f19b94564034aa1d5f9dfc666ec0bdea40c20d029c57570586454dbf24d34d2a`). That is not an SPDX identifier and conflicts with the repository license file.
-- Decision dated 2026-07-19: canonical project SPDX is `GPL-2.0-only`, selected conservatively because the repository contains the GPL version 2 license text and no per-file or “or later” grant was found.
+- Initial decision dated 2026-07-19 was `GPL-2.0-only`, selected conservatively because the repository contains the GPL version 2 license text and no per-file or “or later” grant was found.
+- WR-002 then proved that the required canonical Clapper Rust bindings are `GPL-3.0-or-later` and cannot be linked into a GPL-2.0-only executable. Acting under the maintainer's authorization to resolve implementation decisions, the newly authored native rewrite is therefore licensed `GPL-3.0-or-later`. This does not relicense or alter the legacy Electron code; its existing terms remain in place until WR-013 deletes it before native publication.
 - The `package.json` CC-noncommercial value is noncanonical conflicting metadata. WR-013 owns its correction/removal during the Electron cutover; this report does not modify application metadata.
-- WR-002 must verify selected dependency licenses against `GPL-2.0-only`; WR-014 records the release/AppStream SPDX and payload inventory; WR-015 performs the final license gate.
+- WR-002 must verify selected dependency licenses against `GPL-3.0-or-later`; WR-014 records the release/AppStream SPDX and payload inventory; WR-015 performs the final license gate.
 
 ## Approval
 
 - Approver: maintainer (via user authorization in this session).
-- Date/result: 2026-07-19 — canonical SPDX `GPL-2.0-only`; unproven legacy assets rejected for native redistribution; WR-000 `DONE` under the named deferred-acceptance work.
+- Date/result: 2026-07-19 — native rewrite SPDX amended to `GPL-3.0-or-later` after the WR-002 Clapper binding audit; legacy code is not relicensed; unproven legacy assets rejected for native redistribution; WR-000 remains `DONE` under the named deferred-acceptance work.
 
 ## Skipped (YAGNI)
 

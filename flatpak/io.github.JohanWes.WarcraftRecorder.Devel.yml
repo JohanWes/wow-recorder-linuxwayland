@@ -1,0 +1,102 @@
+app-id: io.github.JohanWes.WarcraftRecorder.Devel
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: warcraft-recorder
+separate-locales: false
+
+finish-args:
+  # Native Wayland display only; there is deliberately no X11 fallback.
+  - --socket=wayland
+  # Playback and recording audio use the sandbox PulseAudio/PipeWire bridge.
+  - --socket=pulseaudio
+  # Hardware decode/encode and rendering require DRM render nodes.
+  - --device=dri
+  # ksni registers only with the desktop's StatusNotifierWatcher.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # One-way import of Electron's known config; writes are forbidden.
+  - --filesystem=xdg-config/WarcraftRecorder:ro
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib64/pkgconfig
+  - /share/aclocal
+  - /share/doc
+  - /share/man
+  - /share/locale
+
+modules:
+  - modules/ffmpeg.yml
+
+  - name: gpu-screen-recorder
+    buildsystem: meson
+    builddir: true
+    config-opts:
+      - --buildtype=release
+      - -Dcapabilities=false
+      - -Dsystemd=false
+      - -Dnvidia_suspend_fix=false
+      - -Dportal=true
+      - -Dapp_audio=false
+      - -Dplugin_examples=false
+    post-install:
+      - rm -f /app/bin/gsr-kms-server
+      - install -Dm644 ../LICENSE /app/share/licenses/$FLATPAK_ID/gpu-screen-recorder-LICENSE
+      - install -Dm644 ../LICENSE /app/share/licenses/$FLATPAK_ID/WarcraftRecorder-GPL-3.0
+    sources:
+      - type: archive
+        url: https://dec05eba.com/snapshot/gpu-screen-recorder.git.5.13.9.tar.gz
+        sha256: a09365f687002c87f99bcaa4665be1bd0188fa4358f437368fc6a95ab50f4d78
+        strip-components: 0
+      - type: patch
+        path: modules/gsr-run-hooks-in-sandbox.patch
+
+  - name: clapper
+    buildsystem: meson
+    builddir: true
+    config-opts:
+      - --buildtype=release
+      - -Dclapper=enabled
+      - -Dclapper-gtk=enabled
+      - -Dclapper-app=disabled
+      - -Dgst-plugin=enabled
+      - -Dintrospection=disabled
+      - -Dvapi=disabled
+      - -Ddoc=false
+      - -Denhancers-loader=disabled
+      - -Ddiscoverer=disabled
+      - -Dmpris=disabled
+      - -Dserver=disabled
+    post-install:
+      - install -Dm644 ../COPYING-LGPL /app/share/licenses/$FLATPAK_ID/Clapper-COPYING-LGPL
+      - install -Dm644 ../COPYING-GPL /app/share/licenses/$FLATPAK_ID/Clapper-COPYING-GPL
+    sources:
+      - type: archive
+        url: https://github.com/Rafostar/clapper/archive/refs/tags/0.10.0.tar.gz
+        sha256: 344c0f20e540a63c6fb44cdd5de88c168ed145bb66c1307e79b2b08124780118
+
+  - name: warcraft-recorder
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/warcraft-recorder/cargo
+    build-commands:
+      - cargo --offline build --manifest-path native/Cargo.toml --release --features development
+      - install -Dm755 native/target/release/warcraft-recorder /app/bin/warcraft-recorder
+      - install -Dm644 data/io.github.JohanWes.WarcraftRecorder.Devel.desktop /app/share/applications/io.github.JohanWes.WarcraftRecorder.Devel.desktop
+      - install -Dm644 data/io.github.JohanWes.WarcraftRecorder.Devel.metainfo.xml /app/share/metainfo/io.github.JohanWes.WarcraftRecorder.Devel.metainfo.xml
+      - install -Dm644 data/icons/io.github.JohanWes.WarcraftRecorder.Devel.svg /app/share/icons/hicolor/scalable/apps/io.github.JohanWes.WarcraftRecorder.Devel.svg
+      - install -Dm644 data/io.github.JohanWes.WarcraftRecorder.Devel.gschema.xml /app/share/glib-2.0/schemas/io.github.JohanWes.WarcraftRecorder.Devel.gschema.xml
+      - glib-compile-schemas /app/share/glib-2.0/schemas
+    sources:
+      - type: dir
+        path: ../native
+        dest: native
+      - type: dir
+        path: ../data
+        dest: data
+      - cargo-sources.json

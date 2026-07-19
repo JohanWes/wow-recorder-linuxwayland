@@ -1,0 +1,40 @@
+From: Warcraft Recorder contributors
+Subject: Run recording hooks inside the application sandbox
+
+The upstream Flatpak build delegates every hook through `flatpak-spawn
+--host`. Warcraft Recorder installs and owns its hook inside the sandbox, so
+host command execution is unnecessary and would require a broad permission.
+
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -911,23 +911,11 @@ static void run_recording_saved_script_async(const char *script_file, const cha
+         return;
+     }
+-
++
+-    const char *args[7];
+-    const bool inside_flatpak = getenv("FLATPAK_ID") != NULL;
+-
+-    if(inside_flatpak) {
+-        args[0] = "flatpak-spawn";
+-        args[1] = "--host";
+-        args[2] = "--";
+-        args[3] = script_file_full;
+-        args[4] = video_file;
+-        args[5] = type;
+-        args[6] = NULL;
+-    } else {
+-        args[0] = script_file_full;
+-        args[1] = video_file;
+-        args[2] = type;
+-        args[3] = NULL;
+-    }
++    const char *args[4];
++    args[0] = script_file_full;
++    args[1] = video_file;
++    args[2] = type;
++    args[3] = NULL;
+-
++
+     pid_t pid = fork();
+     if(pid == -1) {

@@ -1,0 +1,73 @@
+name: ffmpeg
+config-opts:
+  - --enable-gpl
+  - --enable-version3
+  - --enable-shared
+  - --disable-static
+  - --disable-debug
+  - --disable-doc
+  - --disable-network
+  - --disable-autodetect
+  - --disable-everything
+  - --disable-ffplay
+  - --disable-ffprobe
+  - --enable-ffmpeg
+  - --enable-avcodec
+  - --enable-avfilter
+  - --enable-avformat
+  - --enable-swresample
+  - --enable-swscale
+  - --enable-protocol=file,pipe
+  - --enable-demuxer=concat,matroska,mov
+  - --enable-muxer=matroska,mp4
+  - --enable-decoder=aac,h264,hevc,libdav1d
+  - --enable-encoder=aac,libx264,h264_nvenc,hevc_nvenc,av1_nvenc,h264_vaapi,hevc_vaapi,av1_vaapi,h264_vulkan,hevc_vulkan,av1_vulkan
+  - --enable-parser=aac,av1,h264,hevc
+  - --enable-bsf=aac_adtstoasc,h264_mp4toannexb,hevc_mp4toannexb
+  - --enable-filter=afade,aformat,amix,aresample,asetpts,atrim,concat,fade,format,fps,pad,scale,setpts,trim
+  - --enable-ffnvcodec
+  - --enable-libdav1d
+  - --enable-libx264
+  - --enable-nvenc
+  - --enable-vaapi
+  - --enable-vulkan
+cleanup:
+  - /share/ffmpeg/examples
+post-install:
+  - install -Dm644 COPYING.GPLv3 /app/share/licenses/$FLATPAK_ID/FFmpeg-COPYING.GPLv3
+sources:
+  - type: archive
+    url: https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz
+    sha256: 05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41
+modules:
+  - name: nv-codec-headers
+    no-autogen: true
+    make-install-args:
+      - PREFIX=/app
+    post-install:
+      - mkdir -p /app/share/licenses/$FLATPAK_ID/nv-codec-headers
+      - cp -a include/ffnvcodec/*.h /app/share/licenses/$FLATPAK_ID/nv-codec-headers/
+    cleanup:
+      - /include/ffnvcodec
+      - /lib/pkgconfig/ffnvcodec.pc
+    sources:
+      - type: git
+        url: https://github.com/FFmpeg/nv-codec-headers.git
+        commit: e844e5b26f46bb77479f063029595293aa8f812d
+        tag: n13.0.19.0
+  - name: x264
+    no-autogen: true
+    config-opts:
+      - --disable-cli
+      - --enable-shared
+      - --disable-opencl
+      - --disable-bashcompletion
+      - --enable-strip
+    make-install-args:
+      - PREFIX=/app
+    post-install:
+      - install -Dm644 COPYING /app/share/licenses/$FLATPAK_ID/x264-COPYING
+    sources:
+      - type: git
+        url: https://code.videolan.org/videolan/x264.git
+        commit: b35605ace3ddf7c1a5d67a2eb553f034aef41d55

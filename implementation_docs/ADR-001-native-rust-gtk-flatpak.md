@@ -25,6 +25,10 @@ Build one Rust application using:
 - JSON sidecars plus the filesystem as the library source of truth;
 - Flatpak as the only native release format after the final AppImage migration release.
 
+### License amendment (2026-07-19)
+
+The newly authored native rewrite is licensed `GPL-3.0-or-later`. WR-002 found that the canonical Clapper Rust bindings required by this ADR are `GPL-3.0-or-later`, which cannot be combined with a GPL-2.0-only executable. The maintainer approved the native license amendment so the selected Clapper contract can proceed. This amendment does not relicense the legacy Electron code; that tree retains its existing terms and is deleted by WR-013 before the native application is published.
+
 The Rust package remains under `native/`. Core domain code is GTK-free. One coordinator thread owns mutable domain state; one serialized worker performs media finalization, clipping, and kill-video jobs. A narrowly owned tray service thread sends only bounded Open/Quit events. Typed standard-library channels connect all three to the GTK thread; `main` owns and joins the coordinator and tray handles.
 
 ## Why Clapper instead of `gtk::Video` or a custom GStreamer pipeline
