@@ -43,8 +43,34 @@ jobs:
     - name: Build bundles
       run: npm run build
 
+  native:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install native development packages
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: 1.93.1
+        components: clippy, rustfmt
+
+    - name: Check native package
+      run: |
+        cargo fmt --manifest-path native/Cargo.toml --check
+        cargo clippy --manifest-path native/Cargo.toml --all-targets --all-features -- -D warnings
+        cargo test --manifest-path native/Cargo.toml --all-targets
+        cargo build --manifest-path native/Cargo.toml --release
+
   release:
-    needs: validate
+    needs: [validate, native]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -125,6 +151,7 @@ jobs:
         - TypeScript typecheck
         - unit tests
         - production bundle build
+        - native format, Clippy, tests, and release build
         EOF
 
         if gh release view "${tag}" >/dev/null 2>&1; then

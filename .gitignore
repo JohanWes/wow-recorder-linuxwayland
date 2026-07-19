@@ -38,12 +38,19 @@ src/main/osn-data/*
 *__pycache__*
 
 # Rust/proof build and generated spike artifacts
-target/
+/target/
+/native/target/
+/spikes/**/target/
 spikes/*/artifacts/
 spikes/*/media/
-spikes/*/work/
+/spikes/**/work/
 spikes/*/fixture-logs/
 spikes/*/notify-logs/
+
+# Flatpak build/export artifacts
+/.flatpak-builder/
+/build-flatpak/
+/flatpak-export/
 
 # Cloud storage dirs
 upload
