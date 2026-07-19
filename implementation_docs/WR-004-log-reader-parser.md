@@ -29,7 +29,11 @@ pub struct ParsedEvent {
 pub struct LogTailer { /* path, identity, byte offset, incomplete bytes, time context */ }
 
 impl LogTailer {
-    pub fn open(path: PathBuf, flavor: GameFlavor) -> Result<Self, LogError>;
+    pub fn open(
+        path: PathBuf,
+        flavor: GameFlavor,
+        time_context: ParseTimeContext,
+    ) -> Result<Self, LogError>;
     pub fn poll(&mut self) -> Result<Vec<ParsedEvent>, LogError>;
 }
 ```
@@ -42,14 +46,14 @@ impl LogTailer {
 2. On first open, start at EOF for live use. Provide an explicit fixture/replay constructor that starts at byte zero; never infer test mode from the path.
 3. Read appended bytes in bounded chunks with `std::io`. Retain only the final incomplete line between polls. Accept `\n` and `\r\n`; reject/record invalid UTF-8 without panicking.
 4. Track file identity plus length. Handle only realistic rotation/truncation states observed in WR-000: switch to a newer active file or reset offset after same-file truncation. Do not implement recursive history import, arbitrary rename recovery, compression, or network filesystems.
-5. Parse timestamps deterministically. WoW lines that omit a year use a `ParseTimeContext` derived from the file's recorded year/timezone rules in WR-000; fixture tests pass it explicitly. Never call “now” per line.
+5. Parse timestamps deterministically. Combat-log timestamps are local civil time; older lines omit a year and neither the file metadata nor WR-000 records a timezone. The caller therefore supplies one `ParseTimeContext` containing the current local year and UTC offset when the live tailer opens, and refreshes it before polling when either value changes. Full-year lines ignore only the context year, not its offset. Fixtures pass the context explicitly. Never assume UTC and never call “now” per line.
 6. Split fields according to the actual quoted/escaped combat-log grammar in the retained fixtures. Reuse the current app's factual encounter/map/affix tables only where WR-000 approved source/license; normalize them once in Rust data, not behind lookup abstractions.
 7. Unknown event names and malformed irrelevant lines are skipped. A malformed retained event returns a bounded diagnostic containing event name and line number/offset, never the whole potentially personal line. Deduplicate repeated diagnostics by `(kind, file)` in the coordinator rather than accumulating one per line.
 8. Preserve event occurrence time through every emitted `ParsedEvent`; WR-005 uses it for replay lead-in and media-relative markers.
 
 ## Acceptance criteria
 
-- Every WR-000 fixture produces the exact ordered parsed-event golden, including occurrence timestamps.
+- Every distinct retained parser shape/path in the WR-000 fixture inventory maps to a smallest consistently anonymized fixture and exact ordered parsed-event/timestamp golden. The mapping audit names the authoritative legacy fixture groups without copying personal identifiers; multiple raw logs that exercise the same parser shape need no duplicate native fixture.
 - A retained event split at every byte position across two reads parses exactly once after completion.
 - Appending, CRLF, one rotation/truncation example, unknown events, invalid UTF-8, and one malformed retained event behave as specified without panic or duplicate events.
 - Live open begins at EOF and replay open begins at zero.
