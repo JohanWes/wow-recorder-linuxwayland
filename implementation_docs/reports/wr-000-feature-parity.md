@@ -19,6 +19,12 @@ Evidence collection follows below.
 - The checkout has no `node_modules`, built AppImage, configured WoW installation, legacy library, or captured reference views. Consequently this is a source-traced contract, not a claim that the UI paths were manually exercised.
 - Classification approval: the repository's maintainer-owned README/ADR/ticket approves localization and the native in-app updater as `REMOVE_OBSOLETE`, disabled cloud/account/chat/pro as `REMOVE_DISABLED`, and non-Linux/OBS packaging paths as out of scope. On 2026-07-19, the maintainer (via user authorization in this session) approved this source-traced matrix and the additional decisions recorded below.
 
+## Native application identity
+
+- The legacy Electron package uses `org.WarcraftRecorder` (`package.json:68`), which is retained only as migration evidence.
+- The canonical native/Flatpak application ID is `io.github.JohanWes.WarcraftRecorder`, derived from the maintainer-controlled project URL and the Flatpak reverse-DNS convention. Development packaging uses `io.github.JohanWes.WarcraftRecorder.Devel` so it cannot collide with the stable installation.
+- WR-001 uses the stable ID for the host scaffold. WR-002 installs the Devel identity consistently across its manifest, desktop file, metainfo, icon, and running application; WR-014 owns the stable packaging identity.
+
 ## Reachable feature matrix
 
 `Manual` means the named scenario still must be run against a populated current AppImage. Source ranges are deliberately narrow entry-point/implementation anchors.
