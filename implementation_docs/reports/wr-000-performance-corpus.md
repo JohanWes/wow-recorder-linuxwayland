@@ -137,8 +137,13 @@ Current-app screenshots must cover: each of the ten category rows with represent
 
 ## Evidence status
 
-No built/runnable app or populated anonymized library was present, so no reference screenshot is recorded. This acceptance criterion remains blocked on a human-controlled run; screenshot paths and visual pass results are intentionally absent.
+No built/runnable current app or populated anonymized library was present, so no current-app reference screenshot is recorded and no visual check is claimed. The maintainer accepts the source-traced view inventory as an explicit WR-000 deviation. WR-009 owns native dark/light 1440×900 and narrow shell screenshots plus shell/status traversal; WR-010/011/012 own populated library, player, settings, and operational-action view evidence; WR-015 owns corpus generation/hash verification, absolute performance measurement, final 1440×900 workflow/identity comparison, and the consolidated screenshot/trace report.
 
 ## Skipped (YAGNI)
 
 - No Electron baseline benchmark or thumbnail corpus: release gates are absolute and the product has no thumbnail cache.
+
+## Approval
+
+- Approver: maintainer (via user authorization in this session).
+- Date/result: 2026-07-19 — corpus/view contract approved with generation, screenshots, and measurements deferred to WR-009/010/011/012/015; WR-000 `DONE`.

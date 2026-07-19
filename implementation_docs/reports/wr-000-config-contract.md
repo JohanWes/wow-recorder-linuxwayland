@@ -32,8 +32,8 @@ Every row with a concrete native field below is `KEEP`. A `none` destination is 
 | `encounterMarkers`, `roundMarkers` | bool / true | `show_encounter_markers`, `show_round_markers` | schema mistakenly declares encounter `type: integer`; accept only a JSON boolean or use default |
 | `hideEmptyCategories` | bool / false | `hide_empty_categories` | |
 | `manualRecord` | bool / false | `manual_record_enabled` | |
-| `manualRecordHotKey` | integer / -1 | `manual_record_keycode` | |
-| `manualRecordHotKeyModifiers` | string / `""` | `manual_record_modifiers` | substrings ctrl/win/shift/alt in legacy |
+| `manualRecordHotKey` | integer / -1 | none | `REMOVE_UNREACHABLE`: Linux never installs the legacy global key handler; WR-012 forbids adding a shortcut daemon |
+| `manualRecordHotKeyModifiers` | string / `""` | none | `REMOVE_UNREACHABLE` with the key; legacy substrings were ctrl/win/shift/alt |
 | `manualRecordSoundAlert` | bool / true | `manual_record_sound` | |
 | `validateLogPaths` | bool / true | `validate_log_paths` | |
 | `firstTimeSetup` | bool / true | `first_time_setup_complete = !value` | inverted meaning |
@@ -53,7 +53,7 @@ Defaults and bounds are source-backed by `src/config/configSchema.ts:99-557`. `C
 - `REMOVE_OBSOLETE` native update implementation state: `dismissedUpdateVersion`.
 - `REMOVE_DISABLED` cloud/chat/pro: `chatOverlay*`, `chatUserNameAgreed`, `manualRecordUpload`, `uploadCurrentRaidEncountersOnly`.
 - `REMOVE_UNREACHABLE` Windows/OBS-only: `monitorIndex`, `audioSources`, `obsOutputResolution`, `obsForceMono`, `obsQuality`, `obsCaptureMode`, `obsRecEncoder`, `pushToTalk*`, `obsAudioSuppression`, `hardwareAcceleration`, `forceSdr`, `videoSourceScale`, `videoSourceXPosition`, `videoSourceYPosition`.
-- Proposed `REMOVE_UNREACHABLE`, pending maintainer approval: `startUp`. It has a generic Electron listener but no renderer control; unlike the platform removals above, its omission is not pre-approved by the document set.
+- Approved `REMOVE_UNREACHABLE`: `startUp`. It has a generic Electron listener but no renderer control. The maintainer approved omission on 2026-07-19; WR-003 must not import it and WR-013 removes the legacy residue.
 - Compatibility-only `linuxGsrAudio` is used solely as fallback when the new split output key is absent.
 
 ## Validation/fallback
@@ -68,10 +68,15 @@ Defaults and bounds are source-backed by `src/config/configSchema.ts:99-557`. `C
 - Mute/volume are process-global only (`src/main/main.ts:577-593`) and are deliberately not imported/persisted.
 - Player height/progress, playback rate, filters, date range, selection, multi-player mode and drawings are session-only.
 
-## Blocker
+## Known limitation and deferred acceptance
 
-Manual collection of one anonymized full `config-v3.json` plus expected import is required before this report satisfies acceptance. No personal config location/content was guessed.
+No real legacy config was available, and no personal config location/content was guessed. Under the maintainer-approved source-traced deviation, WR-003 owns creation/collection of the smallest anonymized full `config-v3.json`, its expected native import golden, invalid/missing-value cases, and proof that the legacy file remains byte-identical. WR-002 owns sandbox proof that an authorized legacy config is readable but not writable. This report does not claim those checks ran.
 
 ## Skipped (YAGNI)
 
 - No migration framework/version graph: WR-003 needs one guarded one-way importer only.
+
+## Approval
+
+- Approver: maintainer (via user authorization in this session).
+- Date/result: 2026-07-19 — approved under the named deferred-acceptance work; WR-000 `DONE`.

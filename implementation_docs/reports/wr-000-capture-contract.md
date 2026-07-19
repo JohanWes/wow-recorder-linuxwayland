@@ -65,11 +65,17 @@ Audio uses unique non-empty output then input values joined with literal `|`; ou
 - Kill video output is `YYYY-MM-DD HH-MM-SS - Multiview - <encounterName> [<difficulty>] - Rendered at YYYY-MM-DD HH-MM-SS.mp4` in `storagePath`. The first timestamp uses activity `start` or filesystem `mtime`; the rendered timestamp is local wall time. The kill-video path does not call the normal filename sanitizer (`VideoProcessQueue.ts:735-755`).
 - Every successful final `.mp4` above receives an adjacent `.json` with the identical basename/stem. `getMetadataFileNameForVideo()` strips only `.mp4`; `writeMetadataFile()` writes `JSON.stringify(metadata, null, 2)` as UTF-8 and does not add a trailing newline (`util.ts:140-143,285-293`). Kill videos use the same helper after composing their multi-POV metadata (`VideoProcessQueue.ts:322-364`).
 
-## Runtime evidence still required
+## Known runtime-evidence limitations and deferred acceptance
 
 - Exact GSR stdout/stderr, PipeWire/portal implementation and token contents/lifecycle, portal-selected target behavior, actual audio devices, signal outcomes, GSR-generated replay/regular filenames, real detection delay and retry after a killed child were not exercised.
 - `linuxGsrReplayStorage=disk` destination semantics are delegated to GSR; current argv does not use `bufferStoragePath` to relocate it.
+- Under the maintainer-approved source-traced deviation, WR-002 owns real sandboxed arm/buffer, replay, audio, portal target/reselection, permission denial, shutdown, GSR filename, and failure evidence. WR-006 owns deterministic adapter argv/signal/hook/retry fixtures against the proven contract. WR-008 owns full automatic/manual/test/force-end headless flows, and WR-015 owns final process-cleanup and capture parity gates. This report does not claim those runtime checks ran.
 
 ## Skipped (YAGNI)
 
 - No invented capture-token abstraction, monitor ID, retry cap, or portal environment variable is specified because current code supplies none.
+
+## Approval
+
+- Approver: maintainer (via user authorization in this session).
+- Date/result: 2026-07-19 — source-traced capture contract approved with runtime proofs deferred to WR-002/006/008/015; WR-000 `DONE`.

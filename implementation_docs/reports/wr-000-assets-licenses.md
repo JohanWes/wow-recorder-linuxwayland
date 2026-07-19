@@ -10,7 +10,7 @@ No real legacy library was available, so no file is represented as a collected u
 
 - H.264 with audio: not available; no path/hash invented.
 - AV1 with audio: not available; no path/hash invented.
-- WR-002/WR-011 remain blocked on representative redistributable or private/manual media paths plus SHA-256.
+- Under the maintainer-approved source-traced deviation, WR-002 owns representative private/manual paths plus SHA-256 and sandbox playback/FFmpeg proofs; WR-011 repeats the retained player behavior against those samples. This report does not claim media checks ran.
 
 ## Exact asset inventory
 
@@ -27,19 +27,20 @@ The six packaged families contain exactly 125 files: 13 class, 41 spec, 40 affix
 
 Evidence: imports and maps in `src/renderer/images.ts:3-212`, sounds in `src/renderer/sounds.ts` and `src/parsing/LogHandler.ts:517-540`, icon consumers found by exact-path search in `src/renderer/components/RaidComp.tsx`, `src/renderer/VideoPlayer.tsx`, `src/renderer/containers/ApplicationStatusCard/ApplicationStatusCard.tsx`, `src/renderer/components/Tables/Cells.tsx`, and `src/main/main.ts`; packaging includes the asset glob. Per-file hashes were reviewed locally but are not committed because hashes do not prove provenance.
 
-No asset-specific provenance or redistribution notice was found for any raster or sound above. Therefore none is approved for native redistribution merely because it is imported or packaged. Use stock symbolic icons where the binding brief permits; otherwise obtain maintainer/provenance approval or an approved replacement before shipping.
+No asset-specific provenance or redistribution notice was found for any raster or sound above. The maintainer therefore rejects these legacy files for native redistribution merely because they are imported or packaged. WR-009 must use stock symbolic icons for generic actions; game-specific class/spec/affix/category/product art requires provenance or maintainer-approved replacements at WR-009. WR-014 inventories the resulting release payload and WR-015 performs the final unused-asset/license audit.
 
-## Canonical project license: hard block
+## Canonical project license decision
 
 - `LICENSE` begins with GNU GPL version 2 text (SHA-256 `1327219ca4c880c35fba4456eab11c59ad51f708403357c38b09bc267167308c`).
 - `package.json:19` says `Creative Commons Attribution-NonCommercial` (package SHA-256 `f19b94564034aa1d5f9dfc666ec0bdea40c20d029c57570586454dbf24d34d2a`). That is not an SPDX identifier and conflicts with the repository license file.
-- No maintainer decision was supplied. An agent cannot select or reconcile these terms.
-- Result: `BLOCKED(license decision)`. WR-002 must not select shipping dependencies or publish Flatpak metadata until a maintainer records the canonical SPDX expression and confirms dependency compatibility.
+- Decision dated 2026-07-19: canonical project SPDX is `GPL-2.0-only`, selected conservatively because the repository contains the GPL version 2 license text and no per-file or “or later” grant was found.
+- The `package.json` CC-noncommercial value is noncanonical conflicting metadata. WR-013 owns its correction/removal during the Electron cutover; this report does not modify application metadata.
+- WR-002 must verify selected dependency licenses against `GPL-2.0-only`; WR-014 records the release/AppStream SPDX and payload inventory; WR-015 performs the final license gate.
 
 ## Approval
 
-- Canonical SPDX: pending maintainer.
-- Feature/assets redistribution approval: pending maintainer.
+- Approver: maintainer (via user authorization in this session).
+- Date/result: 2026-07-19 — canonical SPDX `GPL-2.0-only`; unproven legacy assets rejected for native redistribution; WR-000 `DONE` under the named deferred-acceptance work.
 
 ## Skipped (YAGNI)
 

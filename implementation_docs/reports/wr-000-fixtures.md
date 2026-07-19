@@ -27,12 +27,17 @@ The golden schema for every detector path must include category/flavour, log sta
 
 A minimal set can combine requirements: (1) protected/tagged Raid POV A plus correlated POV B with missing optional fields; (2) abandoned M+; (3) arena; (4) BG; (5) shuffle; (6) Classic raid; (7) Era raid; (8) Classic challenge; (9) Manual; (10) clip parented to one of the preceding entries. Do not create one file per orthogonal flag.
 
-## Evidence status / blocker
+## Evidence status and deferred acceptance
 
 - No `node_modules` or built app is present, so the current parser could not be run to produce trustworthy exact metadata/hash/timestamp goldens.
 - The existing logs are not anonymized and include player/GUID data. Inventing simplified log lines or calculated MD5s would create false authoritative evidence. Therefore no fixture/golden files were added in this run.
-- A maintainer-controlled current-app run must capture outputs, after which the smallest source excerpts can be anonymized consistently and committed with a mapping audit. The source logs and expected filename Python definitions above are concrete evidence, but do not fully satisfy the WR-000 fixture acceptance criterion.
+- The maintainer accepts the source-traced inventory as WR-000's baseline and explicitly defers unavailable artifacts: WR-004 owns smallest consistently anonymized parser fixtures and event goldens; WR-005 owns activity action/metadata/timeline goldens; WR-007 owns representative legacy sidecars and clip/kill media-job goldens; WR-008 owns the headless end-to-end flow evidence. Those tickets must retain the mapping audit back to the existing logs without committing personal identifiers. This report does not claim the current parser was executed or that goldens already exist.
 
 ## Skipped (YAGNI)
 
 - No combinatorial codec, incidental roster-size, date, or malformed-log matrix; those do not represent distinct retained state-machine paths.
+
+## Approval
+
+- Approver: maintainer (via user authorization in this session).
+- Date/result: 2026-07-19 — source-traced fixture plan approved with artifacts deferred to WR-004/005/007/008; WR-000 `DONE`.
