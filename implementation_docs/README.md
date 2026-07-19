@@ -95,7 +95,7 @@ Statuses are `TODO`, `IN PROGRESS`, `BLOCKED(reason)`, and `DONE`. Start only wh
 
 | ID | Ticket | Depends on | Status |
 |---|---|---|---|
-| WR-000 | [Baseline and parity contract](WR-000-baseline-contract.md) | — | TODO |
+| WR-000 | [Baseline and parity contract](WR-000-baseline-contract.md) | — | BLOCKED(license decision and baseline evidence) |
 | WR-001 | [Rust package scaffold](WR-001-rust-scaffold.md) | WR-000 | TODO |
 | WR-002 | [Development Flatpak and platform proofs](WR-002-development-flatpak.md) | WR-001 | TODO |
 | WR-003 | [Domain model and config](WR-003-domain-config.md) | WR-002 | TODO |
