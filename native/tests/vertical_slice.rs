@@ -16,7 +16,8 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
 use warcraft_recorder::config::{
-    ActivitySettings, AuthorizedPath, CaptureSettings, Config, FlavorConfig, StorageSettings,
+    ActivitySettings, AuthorizedPath, CaptureSettings, Config, FlavorConfig, ManualSettings,
+    StorageSettings,
 };
 use warcraft_recorder::coordinator::{AppSnapshot, ClipRange, Command, Coordinator, Setup, start};
 use warcraft_recorder::domain::{Category, Outcome, RecorderStatus, StorageLimit, TimelineKind};
@@ -198,6 +199,10 @@ fn write_config(root: &Path, library: &Path, capture_root: &Path, log_dir: &Path
             separate_buffer_dir: true,
             buffer_dir: AuthorizedPath::authorized(capture_root),
             limit: StorageLimit::Unlimited,
+        },
+        manual: ManualSettings {
+            enabled: true,
+            ..Default::default()
         },
         capture: CaptureSettings {
             extra_lead_in_seconds: 10,
@@ -484,12 +489,12 @@ fn finalization_precedes_queued_user_jobs() {
     harness.pump(|snapshot| !snapshot.entries.is_empty());
     let source = harness.latest.entries[0].clone();
 
-    // A second recording, then force-end and clip in one command batch: both
-    // jobs are queued before the tick's single dispatch.
+    // A second recording, then complete it and queue a clip before the tick's
+    // single dispatch: both jobs are queued before dispatch chooses a job.
     harness.log(&raid_start(now_unix_ms() - 1_000));
     harness.pump(|snapshot| snapshot.active.is_some());
     harness.emit_artifacts(true);
-    harness.send(Command::ForceEnd);
+    harness.log(&[raid_end(now_unix_ms(), true)]);
     harness.send(Command::CreateClip(ClipRange {
         source: source.id.clone(),
         start_ms: 0,
@@ -514,7 +519,24 @@ fn finalization_precedes_queued_user_jobs() {
         .cloned()
         .collect();
     assert_eq!(raids.len(), 2);
+    assert!(harness.latest.correlations.iter().any(|correlation| {
+        (correlation.primary.id == raids[0].id && correlation.local_pov_ids.contains(&raids[1].id))
+            || (correlation.primary.id == raids[1].id
+                && correlation.local_pov_ids.contains(&raids[0].id))
+    }));
+    let correlated_id = harness
+        .latest
+        .correlations
+        .iter()
+        .find(|correlation| {
+            correlation.primary.id == raids[0].id || correlation.primary.id == raids[1].id
+        })
+        .expect("correlated raid activity")
+        .primary
+        .id
+        .clone();
     harness.send(Command::CreateKillVideo {
+        correlated_id,
         segments: raids
             .iter()
             .map(|entry| ClipRange {

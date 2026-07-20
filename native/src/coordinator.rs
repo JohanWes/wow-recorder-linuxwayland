@@ -51,6 +51,8 @@ const CLASSIC_DATA_TIMEOUT_MS: i64 = 2_000;
 const COMMAND_BATCH: usize = 16;
 /// Bounded problem list surfaced in the snapshot.
 const MAX_PROBLEMS: usize = 8;
+/// Keep queued transcodes finite while preserving the one-worker design.
+const MAX_MEDIA_QUEUE: usize = 16;
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -91,6 +93,7 @@ pub enum Command {
     },
     CreateClip(ClipRange),
     CreateKillVideo {
+        correlated_id: RecordingId,
         segments: Vec<ClipRange>,
         width: u32,
         height: u32,
@@ -145,7 +148,7 @@ pub struct AppSnapshot {
 /// GTK-side handle. Dropping it closes the command channel, which stops the
 /// coordinator on its next tick.
 pub struct CoordinatorHandle {
-    commands: SyncSender<Command>,
+    commands: Option<SyncSender<Command>>,
     pub snapshots: Receiver<Arc<AppSnapshot>>,
     pub stopped: Receiver<()>,
     join: Option<JoinHandle<()>>,
@@ -155,14 +158,36 @@ impl CoordinatorHandle {
     /// Returns `false` when the queue is full or the coordinator is gone; the
     /// caller shows one Busy problem rather than blocking the GTK thread.
     pub fn send(&self, command: Command) -> bool {
-        self.commands.try_send(command).is_ok()
+        self.commands
+            .as_ref()
+            .is_some_and(|commands| commands.try_send(command).is_ok())
     }
 
     /// Request shutdown and join the coordinator thread.
     pub fn shutdown(mut self) {
-        let _ = self.commands.try_send(Command::Shutdown);
+        self.request_shutdown();
         if let Some(join) = self.join.take() {
             let _ = join.join();
+        }
+    }
+
+    fn request_shutdown(&mut self) {
+        if let Some(commands) = self.commands.take() {
+            // Dropping the sender after the best-effort command makes a full
+            // queue safe too: the receiver observes disconnection after it
+            // drains the already queued commands and exits.
+            let _ = commands.try_send(Command::Shutdown);
+        }
+    }
+}
+
+impl Drop for CoordinatorHandle {
+    fn drop(&mut self) {
+        if self.join.is_some() {
+            self.request_shutdown();
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
         }
     }
 }
@@ -220,7 +245,7 @@ pub fn start(setup: Setup) -> CoordinatorHandle {
         })
         .expect("spawn coordinator thread");
     CoordinatorHandle {
-        commands: commands_tx,
+        commands: Some(commands_tx),
         snapshots,
         stopped,
         join: Some(join),
@@ -257,7 +282,8 @@ pub struct Coordinator {
     /// Injected test end event, released once its wall-clock deadline passes.
     pending_test_end: Option<(i64, ParsedEvent)>,
 
-    media_jobs: Sender<MediaJob>,
+    media_jobs: SyncSender<MediaJob>,
+    media_events_tx: Sender<MediaEvent>,
     media_control: SyncSender<MediaControl>,
     media_events: Receiver<MediaEvent>,
     media_join: Option<JoinHandle<()>>,
@@ -316,20 +342,13 @@ impl Coordinator {
         problems.truncate(MAX_PROBLEMS);
 
         let storage = build_storage(&config);
-        let (media_jobs, jobs_rx) = mpsc::channel();
-        let (media_control, control_rx) = mpsc::sync_channel(1);
         let (events_tx, media_events) = mpsc::channel();
-        let worker = MediaWorker::new(
+        let (media_jobs, media_control, media_join) = spawn_media_worker(
             setup.media.clone(),
             build_storage(&config),
-            jobs_rx,
-            control_rx,
-            events_tx,
-        );
-        let media_join = std::thread::Builder::new()
-            .name("media".to_owned())
-            .spawn(move || worker.run())
-            .expect("spawn media worker thread");
+            events_tx.clone(),
+        )
+        .expect("spawn media worker thread");
 
         Self {
             setup,
@@ -344,6 +363,7 @@ impl Coordinator {
             active: None,
             pending_test_end: None,
             media_jobs,
+            media_events_tx: events_tx,
             media_control,
             media_events,
             media_join: Some(media_join),
@@ -367,7 +387,20 @@ impl Coordinator {
     /// Sweep interrupted artifacts, scan the library, validate, and arm.
     pub fn startup(&mut self) {
         self.recorder = Recorder::with_timeouts(self.setup.recorder_timeouts);
-        let _ = self.storage.prepare();
+        self.setup_problems = self.config.validate();
+        if !self.setup_problems.is_empty() {
+            self.dirty = true;
+            return;
+        }
+        if let Err(error) = self.storage.prepare() {
+            self.push_problem(
+                "The recording directory could not be prepared.",
+                Some(error.to_string()),
+                Some(RecoveryAction::OpenSettings),
+            );
+            self.dirty = true;
+            return;
+        }
         let report = self.storage.sweep_orphans();
         if !report.failures.is_empty() {
             self.push_problem(
@@ -377,9 +410,8 @@ impl Coordinator {
             );
         }
         self.rescan();
-        self.setup_problems = self.config.validate();
-        self.open_tailers();
-        if self.setup_problems.is_empty() {
+        let tailers_ready = self.open_tailers();
+        if self.setup_problems.is_empty() && tailers_ready {
             self.arm();
         }
         self.enforce_limit();
@@ -456,12 +488,13 @@ impl Coordinator {
             Command::Delete { ids } => self.delete_entries(&ids),
             Command::CreateClip(range) => self.queue_clip(&range),
             Command::CreateKillVideo {
+                correlated_id,
                 segments,
                 width,
                 height,
                 fps,
                 audio,
-            } => self.queue_kill_video(&segments, width, height, fps, audio),
+            } => self.queue_kill_video(&correlated_id, &segments, width, height, fps, audio),
             Command::SetSelectedCategory { category } => {
                 let mut draft = self.config.clone();
                 draft.interface.selected_category = category;
@@ -496,6 +529,14 @@ impl Coordinator {
     }
 
     fn arm(&mut self) {
+        if self.active.is_some() {
+            self.push_problem(
+                "Screen capture cannot be rearmed while a recording is active.",
+                None,
+                Some(RecoveryAction::Retry),
+            );
+            return;
+        }
         let config = self.capture_config();
         match self.recorder.arm(&config) {
             Ok(()) => {
@@ -509,6 +550,14 @@ impl Coordinator {
     }
 
     fn disarm(&mut self) {
+        if self.active.is_some() {
+            self.push_problem(
+                "Screen capture cannot be disarmed while a recording is active.",
+                None,
+                Some(RecoveryAction::Retry),
+            );
+            return;
+        }
         self.armed = false;
         if let Err(error) = self.recorder.shutdown() {
             self.push_recorder_problem(&error);
@@ -516,7 +565,16 @@ impl Coordinator {
     }
 
     fn reselect_target(&mut self) {
+        if self.active.is_some() {
+            self.push_problem(
+                "The capture target cannot change while a recording is active.",
+                None,
+                Some(RecoveryAction::Retry),
+            );
+            return;
+        }
         let config = self.capture_config();
+        let was_armed = self.armed;
         match self.recorder.reselect_target(&config) {
             Ok(selection) => {
                 self.armed = true;
@@ -525,7 +583,7 @@ impl Coordinator {
                 }
             }
             Err(error) => {
-                self.armed = false;
+                self.armed = was_armed;
                 self.push_recorder_problem(&error);
             }
         }
@@ -549,15 +607,32 @@ impl Coordinator {
         for event in self.recorder.poll(now_unix_ms()) {
             match event {
                 RecorderEvent::TargetTokenAvailable(token) => self.store_token(token),
-                RecorderEvent::RestartFailed { message } => self.push_problem(
-                    "Screen capture could not be restarted.",
-                    Some(message),
-                    Some(RecoveryAction::ReselectCaptureTarget),
-                ),
+                RecorderEvent::RestartFailed { message } => {
+                    self.armed = false;
+                    self.push_problem(
+                        "Screen capture could not be restarted.",
+                        Some(message),
+                        Some(RecoveryAction::ReselectCaptureTarget),
+                    );
+                }
                 RecorderEvent::ChildExited { code } => {
-                    tracing::warn!(?code, "capture child exited");
+                    self.armed = false;
+                    self.push_problem(
+                        "Screen capture stopped unexpectedly.",
+                        Some(format!("gpu-screen-recorder exited with code {code:?}")),
+                        Some(RecoveryAction::ReselectCaptureTarget),
+                    );
+                    if let Some(active) = self.active.take() {
+                        self.pending_test_end = None;
+                        self.drop_activity(&active.draft.flavor);
+                        let report = self.storage.sweep_orphans();
+                        if !report.failures.is_empty() {
+                            tracing::warn!(failures = ?report.failures, "capture failure sweep failed");
+                        }
+                    }
                 }
                 RecorderEvent::Restarted => {
+                    self.armed = true;
                     tracing::info!("capture restarted");
                     self.dirty = true;
                 }
@@ -573,23 +648,28 @@ impl Coordinator {
     // Log polling and the activity engine
     // -----------------------------------------------------------------------
 
-    fn open_tailers(&mut self) {
+    fn open_tailers(&mut self) -> bool {
         self.tailers.clear();
         self.advanced_logging.clear();
         self.last_event.clear();
         let context = ParseTimeContext::new(self.setup.year, self.setup.media.utc_offset_minutes);
+        let mut all_opened = true;
         for (field, flavor, source) in enabled_log_sources(&self.config) {
             self.advanced_logging
                 .push((field, advanced_logging_enabled(&source)));
             match LogTailer::open(source.clone(), flavor, context) {
                 Ok(tailer) => self.tailers.push(tailer),
-                Err(error) => self.push_problem(
-                    format!("The {field} log folder could not be watched."),
-                    Some(error.to_string()),
-                    Some(RecoveryAction::OpenSettings),
-                ),
+                Err(error) => {
+                    all_opened = false;
+                    self.push_problem(
+                        format!("The {field} log folder could not be watched."),
+                        Some(error.to_string()),
+                        Some(RecoveryAction::OpenSettings),
+                    );
+                }
             }
         }
+        all_opened
     }
 
     fn poll_logs(&mut self) {
@@ -728,10 +808,7 @@ impl Coordinator {
             RecordingMode::Automatic | RecordingMode::Test(_) => {}
         }
         let flavor = active.draft.flavor.clone();
-        let occurred_at_ms = self
-            .last_event
-            .get(&flavor)
-            .map_or_else(now_unix_ms, |(_, log_ms)| *log_ms);
+        let occurred_at_ms = now_unix_ms();
         self.pending_test_end = None;
         for action in self.engine.force_end(flavor, occurred_at_ms) {
             self.apply(action);
@@ -768,7 +845,7 @@ impl Coordinator {
     // -----------------------------------------------------------------------
 
     fn start_manual(&mut self) {
-        if self.active.is_some() || !self.armed {
+        if self.active.is_some() || !self.armed || !self.config.manual.enabled {
             self.push_problem(
                 "A manual recording could not be started.",
                 None,
@@ -874,6 +951,18 @@ impl Coordinator {
         self.dirty = true;
         match self.recorder.end(&active.draft.id) {
             Ok(artifacts) => {
+                if self.finalize_queue.len() >= MAX_MEDIA_QUEUE {
+                    let report = self.storage.sweep_orphans();
+                    if !report.failures.is_empty() {
+                        tracing::warn!(failures = ?report.failures, "finalization queue overflow sweep failed");
+                    }
+                    self.push_problem(
+                        "The recording could not be queued for saving.",
+                        None,
+                        Some(RecoveryAction::Retry),
+                    );
+                    return;
+                }
                 self.finalize_queue.push_back(MediaJob::FinalizeRecording {
                     draft: Box::new(active.draft),
                     artifacts,
@@ -927,15 +1016,26 @@ impl Coordinator {
         else {
             return;
         };
-        self.media_busy = Some(job.kind());
-        self.dirty = true;
-        if self.media_jobs.send(job).is_err() {
-            self.media_busy = None;
-            self.push_problem(
-                "The media worker is unavailable.",
-                None,
-                Some(RecoveryAction::Quit),
-            );
+        let kind = job.kind();
+        match self.media_jobs.try_send(job) {
+            Ok(()) => {
+                self.media_busy = Some(kind);
+                self.dirty = true;
+            }
+            Err(TrySendError::Full(job)) => {
+                if kind == WorkKind::Finalize {
+                    self.finalize_queue.push_front(job);
+                } else {
+                    self.user_queue.push_front(job);
+                }
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.push_problem(
+                    "The media worker is unavailable.",
+                    None,
+                    Some(RecoveryAction::Quit),
+                );
+            }
         }
     }
 
@@ -944,10 +1044,10 @@ impl Coordinator {
             self.dirty = true;
             match event {
                 MediaEvent::Progress(progress) => self.work = Some(progress),
-                MediaEvent::Completed { entry, .. } => {
+                MediaEvent::Completed { .. } => {
                     self.media_busy = None;
                     self.work = None;
-                    self.insert_entry(*entry);
+                    self.rescan();
                     self.enforce_limit();
                 }
                 MediaEvent::Failed { kind, message } => {
@@ -973,8 +1073,21 @@ impl Coordinator {
 
     fn queue_clip(&mut self, range: &ClipRange) {
         let Some(source) = self.entry(&range.source).cloned() else {
+            self.push_problem(
+                "The clip source is no longer in the library.",
+                Some(range.source.to_string()),
+                Some(RecoveryAction::Retry),
+            );
             return;
         };
+        if self.user_queue.len() >= MAX_MEDIA_QUEUE {
+            self.push_problem(
+                "The media work queue is full.",
+                None,
+                Some(RecoveryAction::Retry),
+            );
+            return;
+        }
         self.user_queue.push_back(MediaJob::CreateClip {
             source: Box::new(source),
             start_ms: range.start_ms,
@@ -984,14 +1097,41 @@ impl Coordinator {
 
     fn queue_kill_video(
         &mut self,
+        correlated_id: &RecordingId,
         ranges: &[ClipRange],
         width: u32,
         height: u32,
         fps: u32,
         audio: KillAudio,
     ) {
+        let Some(correlation) = self.index.correlations.iter().find(|correlation| {
+            &correlation.primary.id == correlated_id
+                || correlation
+                    .local_pov_ids
+                    .iter()
+                    .any(|id| id == correlated_id)
+        }) else {
+            self.push_problem(
+                "The kill-video activity is no longer in the library.",
+                Some(correlated_id.to_string()),
+                Some(RecoveryAction::Retry),
+            );
+            return;
+        };
+        let mut allowed =
+            std::collections::HashSet::with_capacity(1 + correlation.local_pov_ids.len());
+        allowed.insert(correlation.primary.id.clone());
+        allowed.extend(correlation.local_pov_ids.iter().cloned());
         let mut segments = Vec::with_capacity(ranges.len());
         for range in ranges {
+            if !allowed.contains(&range.source) {
+                self.push_problem(
+                    "A kill-video source is outside the selected activity.",
+                    Some(range.source.to_string()),
+                    Some(RecoveryAction::Retry),
+                );
+                return;
+            }
             let Some(source) = self.entry(&range.source).cloned() else {
                 self.push_problem(
                     "A kill-video source is no longer in the library.",
@@ -1005,6 +1145,14 @@ impl Coordinator {
                 start_ms: range.start_ms,
                 end_ms: range.end_ms,
             });
+        }
+        if self.user_queue.len() >= MAX_MEDIA_QUEUE {
+            self.push_problem(
+                "The media work queue is full.",
+                None,
+                Some(RecoveryAction::Retry),
+            );
+            return;
         }
         self.user_queue.push_back(MediaJob::CreateKillVideo {
             segments,
@@ -1023,21 +1171,14 @@ impl Coordinator {
         self.index.entries.iter().find(|entry| &entry.id == id)
     }
 
-    fn insert_entry(&mut self, entry: LibraryEntry) {
-        self.index
-            .entries
-            .retain(|existing| existing.id != entry.id);
-        let position = self
-            .index
-            .entries
-            .partition_point(|existing| existing.start_unix_ms > entry.start_unix_ms);
-        self.index.entries.insert(position, entry);
-        self.recount();
-    }
-
     fn update_entries(&mut self, ids: &[RecordingId], change: &EntryUpdate) {
         for id in ids {
             let Some(entry) = self.entry(id).cloned() else {
+                self.push_problem(
+                    "A selected recording is no longer in the library.",
+                    Some(id.to_string()),
+                    Some(RecoveryAction::Retry),
+                );
                 continue;
             };
             match self.storage.update(&entry, change) {
@@ -1053,14 +1194,22 @@ impl Coordinator {
                 ),
             }
         }
+        self.refresh_correlations();
         self.enforce_limit();
     }
 
     fn delete_entries(&mut self, ids: &[RecordingId]) {
-        let entries: Vec<LibraryEntry> = ids
-            .iter()
-            .filter_map(|id| self.entry(id).cloned())
-            .collect();
+        let mut entries = Vec::new();
+        for id in ids {
+            match self.entry(id).cloned() {
+                Some(entry) => entries.push(entry),
+                None => self.push_problem(
+                    "A selected recording is no longer in the library.",
+                    Some(id.to_string()),
+                    Some(RecoveryAction::Retry),
+                ),
+            }
+        }
         let result = self.storage.delete(&entries);
         self.index
             .entries
@@ -1075,6 +1224,11 @@ impl Coordinator {
                 Some(RecoveryAction::Retry),
             );
         }
+        if result.failures.is_empty() {
+            self.refresh_correlations();
+        } else {
+            self.retain_valid_correlations();
+        }
         self.recount();
     }
 
@@ -1088,7 +1242,13 @@ impl Coordinator {
             .index
             .entries
             .iter()
-            .map(|entry| std::fs::metadata(&entry.media_path).map_or(0, |metadata| metadata.len()))
+            .map(|entry| {
+                let media =
+                    std::fs::metadata(&entry.media_path).map_or(0, |metadata| metadata.len());
+                let sidecar =
+                    std::fs::metadata(&entry.sidecar_path).map_or(0, |metadata| metadata.len());
+                media.saturating_add(sidecar)
+            })
             .fold(0, u64::saturating_add);
         self.dirty = true;
     }
@@ -1106,13 +1266,48 @@ impl Coordinator {
             self.index
                 .entries
                 .retain(|entry| !result.evicted.contains(&entry.id));
+            self.refresh_correlations();
         }
         self.recount();
+    }
+
+    fn refresh_correlations(&mut self) {
+        self.index.correlations = self.storage.scan().correlations;
+    }
+
+    fn retain_valid_correlations(&mut self) {
+        let ids: std::collections::HashSet<RecordingId> = self
+            .index
+            .entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        self.index.correlations.retain(|correlation| {
+            ids.contains(&correlation.primary.id)
+                && correlation.local_pov_ids.iter().all(|id| ids.contains(id))
+        });
     }
 
     // -----------------------------------------------------------------------
     // Configuration
     // -----------------------------------------------------------------------
+
+    fn restart_media_worker(&mut self) -> Result<(), String> {
+        let _ = self.media_control.try_send(MediaControl::Shutdown);
+        if let Some(join) = self.media_join.take() {
+            join.join()
+                .map_err(|_| "the previous media worker panicked".to_owned())?;
+        }
+        let (media_jobs, media_control, media_join) = spawn_media_worker(
+            self.setup.media.clone(),
+            build_storage(&self.config),
+            self.media_events_tx.clone(),
+        )?;
+        self.media_jobs = media_jobs;
+        self.media_control = media_control;
+        self.media_join = Some(media_join);
+        Ok(())
+    }
 
     /// UI-only fields: save atomically, reconfigure nothing.
     fn patch_config(&mut self, draft: Config) {
@@ -1128,7 +1323,11 @@ impl Coordinator {
     }
 
     fn save_config(&mut self, draft: Config) {
-        if self.active.is_some() || self.media_busy == Some(WorkKind::Finalize) {
+        if self.active.is_some()
+            || self.media_busy.is_some()
+            || !self.finalize_queue.is_empty()
+            || !self.user_queue.is_empty()
+        {
             self.push_problem(
                 "Settings cannot change while a recording is being captured or saved.",
                 None,
@@ -1166,21 +1365,39 @@ impl Coordinator {
         self.config = draft;
         self.setup_problems = Vec::new();
 
-        if logs_changed {
-            self.open_tailers();
+        let mut runtime_ready = true;
+        if logs_changed && !self.open_tailers() {
+            runtime_ready = false;
         }
         if storage_changed {
             self.storage = build_storage(&self.config);
-            let _ = self.storage.prepare();
+            if let Err(error) = self.storage.prepare() {
+                runtime_ready = false;
+                self.push_problem(
+                    "The new recording directory could not be prepared.",
+                    Some(error.to_string()),
+                    Some(RecoveryAction::OpenSettings),
+                );
+            }
             self.rescan();
+            if let Err(error) = self.restart_media_worker() {
+                runtime_ready = false;
+                self.push_problem(
+                    "The media worker could not switch to the new storage directory.",
+                    Some(error),
+                    Some(RecoveryAction::Retry),
+                );
+            }
         }
-        if capture_changed || storage_changed {
+        if runtime_ready && (capture_changed || storage_changed) {
             self.arm();
         }
-        if limit_changed || storage_changed {
+        if !runtime_ready {
+            self.disarm();
+        } else if limit_changed || storage_changed {
             self.enforce_limit();
         }
-        if !self.armed {
+        if (capture_changed || storage_changed) && !self.armed {
             // The saved config stands; only the runtime is down.
             self.push_problem(
                 "Screen capture did not restart with the new settings.",
@@ -1357,6 +1574,11 @@ impl Coordinator {
         if let Some(join) = self.media_join.take() {
             let _ = join.join();
         }
+        let report = self.storage.sweep_orphans();
+        if !report.failures.is_empty() {
+            tracing::warn!(failures = ?report.failures, "shutdown sweep failed");
+        }
+        self.finalize_queue.clear();
         self.poll_media();
     }
 }
@@ -1399,6 +1621,27 @@ fn build_storage(config: &Config) -> Storage {
         config.storage.recording_dir.path.clone(),
         capture_root(config),
     )
+}
+
+type MediaWorkerHandles = (
+    SyncSender<MediaJob>,
+    SyncSender<MediaControl>,
+    JoinHandle<()>,
+);
+
+fn spawn_media_worker(
+    config: MediaConfig,
+    storage: Storage,
+    events: Sender<MediaEvent>,
+) -> Result<MediaWorkerHandles, String> {
+    let (jobs, jobs_rx) = mpsc::sync_channel(1);
+    let (control, control_rx) = mpsc::sync_channel(1);
+    let worker = MediaWorker::new(config, storage, jobs_rx, control_rx, events);
+    let join = std::thread::Builder::new()
+        .name("media".to_owned())
+        .spawn(move || worker.run())
+        .map_err(|error| format!("spawn media worker: {error}"))?;
+    Ok((jobs, control, join))
 }
 
 fn enabled_log_sources(config: &Config) -> Vec<(&'static str, GameFlavor, PathBuf)> {
