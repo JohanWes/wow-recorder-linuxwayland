@@ -15,8 +15,9 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use warcraft_recorder::coordinator::{AppSnapshot, Command, CoordinatorHandle};
-use warcraft_recorder::domain::RecoveryAction;
+use warcraft_recorder::domain::{RecordingId, RecoveryAction};
 
+use super::library::{Library, Selection};
 use super::sidebar::Sidebar;
 use super::tray_backend::TrayBackend;
 use super::{ActionSink, ShellAction, category_label, install_actions, primary_menu, tray};
@@ -83,8 +84,7 @@ pub struct Shell {
     nav_page: adw::NavigationPage,
     setup_banner: adw::Banner,
     problem_banner: adw::Banner,
-    player_hint: gtk4::Label,
-    table_stack: gtk4::Stack,
+    library: Library,
     close_to_tray: Rc<Cell<bool>>,
     minimize_to_tray: Rc<Cell<bool>>,
     tray_available: Rc<Cell<bool>>,
@@ -173,49 +173,29 @@ impl Shell {
         player_area.set_height_request(240);
         player_area.append(&player_text);
 
-        // Toolbar/table placeholders below; WR-010 owns filters and rows.
-        let search = gtk4::SearchEntry::new();
-        search.set_placeholder_text(Some("Search recordings"));
-        search.set_sensitive(false);
-        search.set_hexpand(true);
-        let date_range = gtk4::Button::with_label("Date range");
-        date_range.set_sensitive(false);
-        let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-        toolbar.set_margin_top(6);
-        toolbar.set_margin_bottom(6);
-        toolbar.set_margin_start(12);
-        toolbar.set_margin_end(12);
-        toolbar.append(&search);
-        toolbar.append(&date_range);
-
-        let column_view = gtk4::ColumnView::new(None::<gtk4::SelectionModel>);
-        column_view.append_column(&placeholder_column());
-        column_view.set_hexpand(true);
-        column_view.set_vexpand(true);
-        let table_scroll = gtk4::ScrolledWindow::new();
-        table_scroll.set_child(Some(&column_view));
-        table_scroll.set_vexpand(true);
-
-        let empty_page = adw::StatusPage::new();
-        empty_page.set_title("No recordings in this category");
-        empty_page.set_description(Some("Recordings in the selected category appear here."));
-        empty_page.set_vexpand(true);
-
-        let table_stack = gtk4::Stack::new();
-        table_stack.add_named(&table_scroll, Some("table"));
-        table_stack.add_named(&empty_page, Some("empty"));
-        table_stack.set_visible_child_name("empty");
-
-        let table_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        table_box.append(&toolbar);
-        table_box.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
-        table_box.append(&table_stack);
+        // The virtualized library table, filters, and local actions (WR-010).
+        // Selecting a row updates the player-hint placeholder until WR-011 wires
+        // the real Clapper player; the montage entry point is likewise a seam.
+        let on_select: Rc<dyn Fn(Option<Selection>)> = {
+            let player_hint = player_hint.clone();
+            Rc::new(move |selection| {
+                player_hint.set_label(
+                    &selection
+                        .map(|selection| format!("Selected: {}", selection.title))
+                        .unwrap_or_default(),
+                );
+            })
+        };
+        let on_montage: Rc<dyn Fn(RecordingId)> = Rc::new(|id| {
+            tracing::info!(%id, "kill-video editor arrives with the player milestone");
+        });
+        let library = Library::new(Rc::clone(&sink), on_select, on_montage);
 
         let paned = gtk4::Paned::new(gtk4::Orientation::Vertical);
         paned.set_wide_handle(true);
         paned.set_vexpand(true);
         paned.set_start_child(Some(&player_area));
-        paned.set_end_child(Some(&table_box));
+        paned.set_end_child(Some(&library.widget));
         paned.set_resize_start_child(true);
         paned.set_shrink_start_child(false);
         paned.set_resize_end_child(true);
@@ -251,8 +231,7 @@ impl Shell {
             nav_page,
             setup_banner,
             problem_banner,
-            player_hint,
-            table_stack,
+            library,
             close_to_tray: Rc::new(Cell::new(close_to_tray)),
             minimize_to_tray: Rc::new(Cell::new(minimize_to_tray)),
             tray_available: Rc::new(Cell::new(
@@ -302,10 +281,7 @@ impl Shell {
         let view = content_view(snapshot);
         self.title.set_title(&view.title);
         self.nav_page.set_title(&view.title);
-        self.player_hint
-            .set_label(view.player_hint.as_deref().unwrap_or(""));
-        self.table_stack
-            .set_visible_child_name(if view.table_empty { "empty" } else { "table" });
+        self.library.apply(snapshot);
 
         self.setup_banner.set_revealed(view.setup_banner.is_some());
         if let Some(message) = &view.setup_banner {
@@ -369,13 +345,6 @@ fn hide_and_hold(
     if guard.is_none() {
         *guard = Some(window.application().expect("shell application").hold());
     }
-}
-
-fn placeholder_column() -> gtk4::ColumnViewColumn {
-    let factory = gtk4::SignalListItemFactory::new();
-    let column = gtk4::ColumnViewColumn::new(Some("Recordings"), Some(factory));
-    column.set_expand(true);
-    column
 }
 
 fn make_sink(

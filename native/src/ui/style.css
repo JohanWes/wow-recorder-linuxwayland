@@ -52,6 +52,18 @@
   font-size: 0.85em;
 }
 
+/* Suggestion chips in the library toolbar: compact accent pills. */
+.wr-chip {
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background-color: alpha(@accent_bg_color, 0.18);
+  color: @window_fg_color;
+}
+
+.wr-chip:hover {
+  background-color: alpha(@accent_bg_color, 0.30);
+}
+
 /* Setup/error detail: technical text stays selectable but quiet. */
 .problem-detail {
   font-family: monospace;
