@@ -58,3 +58,4 @@ buffer
 
 # Some stuff OBS window capture creates at runtime?
 win-capture/
+/.sdk-cargo/

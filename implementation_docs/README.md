@@ -100,7 +100,7 @@ Statuses are `TODO`, `IN PROGRESS`, `BLOCKED(reason)`, and `DONE`. Start only wh
 | WR-002 | [Development Flatpak and platform proofs](WR-002-development-flatpak.md) | WR-001 | DONE |
 | WR-003 | [Domain model and config](WR-003-domain-config.md) | WR-002 | DONE |
 | WR-004 | [Log reader and parser](WR-004-log-reader-parser.md) | WR-000, WR-003 | DONE |
-| WR-005 | [Activity state machine](WR-005-activity-state-machine.md) | WR-003, WR-004 | TODO |
+| WR-005 | [Activity state machine](WR-005-activity-state-machine.md) | WR-003, WR-004 | DONE |
 | WR-006 | [Recorder adapter](WR-006-recorder-adapter.md) | WR-002, WR-003 | TODO |
 | WR-007 | [Storage and library index](WR-007-storage-library.md) | WR-003, WR-006 | TODO |
 | WR-008 | [Coordinator and vertical slice](WR-008-coordinator-vertical-slice.md) | WR-004, WR-005, WR-006, WR-007 | TODO |

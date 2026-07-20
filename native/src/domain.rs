@@ -73,6 +73,10 @@ fn normalized_relative_path(path: &Path) -> String {
 pub enum GameFlavor {
     Retail,
     Classic,
+    /// Classic Era log source. Only used to tag parsed events and key per-flavour
+    /// engine state; Era recordings store `Classic` in their metadata, matching
+    /// the legacy `Flavour.Classic` written by `EraLogHandler`.
+    Era,
     Unknown(String),
 }
 
