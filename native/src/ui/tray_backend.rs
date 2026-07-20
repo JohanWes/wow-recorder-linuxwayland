@@ -11,20 +11,24 @@ const ICON_NAME: &str = "io.github.JohanWes.WarcraftRecorder";
 #[cfg(feature = "development")]
 const ICON_NAME: &str = "io.github.JohanWes.WarcraftRecorder.Devel";
 
+/// The only event carried over the bounded channel is Open; it is idempotent
+/// (present the window) so dropping it under saturation is harmless. Quit is a
+/// latched flag instead — see `RecorderTray::request_quit`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TrayEvent {
     Open,
-    Quit,
 }
 
 pub struct TrayBackend {
     handle: Handle<RecorderTray>,
     available: Arc<AtomicBool>,
+    quit_requested: Arc<AtomicBool>,
 }
 
 struct RecorderTray {
     events: SyncSender<TrayEvent>,
     available: Arc<AtomicBool>,
+    quit_requested: Arc<AtomicBool>,
     title: String,
     status: ksni::Status,
 }
@@ -32,9 +36,11 @@ struct RecorderTray {
 impl TrayBackend {
     pub fn start(events: SyncSender<TrayEvent>) -> Result<Self, ksni::Error> {
         let available = Arc::new(AtomicBool::new(true));
+        let quit_requested = Arc::new(AtomicBool::new(false));
         let tray = RecorderTray {
             events,
             available: Arc::clone(&available),
+            quit_requested: Arc::clone(&quit_requested),
             title: "Warcraft Recorder".into(),
             status: ksni::Status::Active,
         };
@@ -45,11 +51,23 @@ impl TrayBackend {
         }
         let handle = service.spawn()?;
 
-        Ok(Self { handle, available })
+        Ok(Self {
+            handle,
+            available,
+            quit_requested,
+        })
     }
 
     pub fn is_available(&self) -> bool {
         self.available.load(Ordering::Acquire)
+    }
+
+    /// Set by the tray's Quit menu item. The GTK pump reads this each tick and
+    /// dispatches one graceful `Shutdown`; using a latch instead of a channel
+    /// send keeps the single-threaded tray executor from ever parking (a
+    /// blocking send there would deadlock `shutdown`).
+    pub fn quit_requested(&self) -> bool {
+        self.quit_requested.load(Ordering::Acquire)
     }
 
     pub fn update(&self, title: impl Into<String>, status: ksni::Status) {
@@ -62,6 +80,18 @@ impl TrayBackend {
 
     pub fn shutdown(&self) {
         self.handle.shutdown().wait();
+    }
+}
+
+impl RecorderTray {
+    /// Non-blocking: the window-present intent is idempotent, so a dropped Open
+    /// under a saturated channel is fine and never stalls the tray executor.
+    fn request_open(&self) {
+        let _ = self.events.try_send(TrayEvent::Open);
+    }
+
+    fn request_quit(&self) {
+        self.quit_requested.store(true, Ordering::Release);
     }
 }
 
@@ -83,7 +113,7 @@ impl ksni::Tray for RecorderTray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        send_event(&self.events, TrayEvent::Open);
+        self.request_open();
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
@@ -91,18 +121,14 @@ impl ksni::Tray for RecorderTray {
             StandardItem {
                 label: "Open".into(),
                 icon_name: "window-new-symbolic".into(),
-                activate: Box::new(|tray: &mut RecorderTray| {
-                    send_event(&tray.events, TrayEvent::Open);
-                }),
+                activate: Box::new(|tray: &mut RecorderTray| tray.request_open()),
                 ..Default::default()
             }
             .into(),
             StandardItem {
                 label: "Quit".into(),
                 icon_name: "application-exit-symbolic".into(),
-                activate: Box::new(|tray: &mut RecorderTray| {
-                    send_event(&tray.events, TrayEvent::Quit);
-                }),
+                activate: Box::new(|tray: &mut RecorderTray| tray.request_quit()),
                 ..Default::default()
             }
             .into(),
@@ -119,31 +145,27 @@ impl ksni::Tray for RecorderTray {
     }
 }
 
-fn send_event(events: &SyncSender<TrayEvent>, event: TrayEvent) {
-    match event {
-        TrayEvent::Open => {
-            let _ = events.try_send(event);
-        }
-        TrayEvent::Quit => {
-            let _ = events.send(event);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn quit_waits_for_space_in_a_saturated_channel() {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        sender.send(TrayEvent::Open).unwrap();
+    fn open_and_quit_never_block_a_saturated_channel() {
+        // Capacity-one channel; a second Open would block a blocking send.
+        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
+        let quit = Arc::new(AtomicBool::new(false));
+        let tray = RecorderTray {
+            events: sender,
+            available: Arc::new(AtomicBool::new(true)),
+            quit_requested: Arc::clone(&quit),
+            title: "Warcraft Recorder".into(),
+            status: ksni::Status::Active,
+        };
 
-        let quit_sender = sender.clone();
-        let quit_thread = std::thread::spawn(move || send_event(&quit_sender, TrayEvent::Quit));
+        tray.request_open(); // fills the single slot
+        tray.request_open(); // dropped by try_send rather than blocking
+        tray.request_quit(); // latches without touching the channel
 
-        assert_eq!(receiver.recv().unwrap(), TrayEvent::Open);
-        assert_eq!(receiver.recv().unwrap(), TrayEvent::Quit);
-        quit_thread.join().unwrap();
+        assert!(quit.load(Ordering::Acquire));
     }
 }

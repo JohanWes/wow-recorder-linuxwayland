@@ -163,8 +163,10 @@ impl CoordinatorHandle {
             .is_some_and(|commands| commands.try_send(command).is_ok())
     }
 
-    /// Request shutdown and join the coordinator thread.
-    pub fn shutdown(mut self) {
+    /// Request shutdown and join the coordinator thread. Takes `&mut self` so
+    /// `main` can drive it through the shared handle after the GTK loop exits;
+    /// `join.take()` keeps the `Drop` guard from joining twice.
+    pub fn shutdown(&mut self) {
         self.request_shutdown();
         if let Some(join) = self.join.take() {
             let _ = join.join();

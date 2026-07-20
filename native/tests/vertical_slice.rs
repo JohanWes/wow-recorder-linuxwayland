@@ -623,7 +623,7 @@ fn production_handle_starts_and_shuts_down() {
     fs::write(log_dir.join("WoWCombatLog.txt"), b"").unwrap();
     write_config(&root, &library, &capture_root, &log_dir);
 
-    let handle = start(setup(&root));
+    let mut handle = start(setup(&root));
     let snapshot = handle
         .snapshots
         .recv_timeout(STEP_TIMEOUT)

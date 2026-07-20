@@ -1,0 +1,60 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+/* Warcraft Recorder shell hooks. Everything else is libadwaita defaults. */
+
+/* Warm red/orange accent derived from the current app (App.css #bb4220). */
+@define-color accent_bg_color #bb4220;
+@define-color accent_fg_color #ffffff;
+@define-color accent_color #d96a4a;
+
+/* Player area stays black in both system themes; WR-011 owns the player. */
+.player-area {
+  background-color: #000000;
+  color: #ffffff;
+}
+
+/* Status card light; one circle colored by the recorder state. */
+.status-light {
+  min-width: 10px;
+  min-height: 10px;
+  border-radius: 9999px;
+}
+
+.status-light.tone-ready {
+  background-color: @green_4;
+}
+
+.status-light.tone-recording,
+.status-light.tone-error {
+  background-color: @red_3;
+}
+
+.status-light.tone-waiting,
+.status-light.tone-invalid {
+  background-color: @yellow_4;
+}
+
+.status-light.tone-overrunning {
+  background-color: @orange_3;
+}
+
+.status-light.tone-finalizing {
+  background-color: @blue_3;
+}
+
+/* Compact category rail. */
+.category-row image {
+  color: @window_fg_color;
+}
+
+.category-count {
+  color: alpha(@window_fg_color, 0.6);
+  font-size: 0.85em;
+}
+
+/* Setup/error detail: technical text stays selectable but quiet. */
+.problem-detail {
+  font-family: monospace;
+  font-size: 0.85em;
+  color: alpha(@window_fg_color, 0.7);
+}
