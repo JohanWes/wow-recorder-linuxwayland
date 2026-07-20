@@ -1,0 +1,36 @@
+{
+  "category": "Mythic+",
+  "duration": 980.0,
+  "start": 1772390000000,
+  "result": true,
+  "flavour": "Classic",
+  "zoneID": 961,
+  "zoneName": "Gate of the Setting Sun",
+  "mapID": 2,
+  "level": 0,
+  "upgradeLevel": 3,
+  "affixes": [],
+  "challengeModeTimeline": [
+    {
+      "segmentType": "Trash",
+      "logStart": "2026-03-02T03:53:20.000Z",
+      "logEnd": "2026-03-02T04:00:00.000Z",
+      "timestamp": 0
+    }
+  ],
+  "deaths": [],
+  "player": {
+    "_GUID": "Player-4395-BBBB0002",
+    "_name": "Classictwo",
+    "_realm": "Classicrealm"
+  },
+  "combatants": [
+    {
+      "_GUID": "Player-4395-BBBB0002",
+      "_name": "Classictwo",
+      "_realm": "Classicrealm"
+    }
+  ],
+  "overrun": 0,
+  "uniqueHash": "abcdef0123456789abcdef0123456789"
+}

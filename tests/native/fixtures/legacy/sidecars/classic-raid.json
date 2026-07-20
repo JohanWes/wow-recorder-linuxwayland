@@ -1,0 +1,27 @@
+{
+  "category": "Raids",
+  "duration": 305.0,
+  "start": 1772370000000,
+  "result": false,
+  "flavour": "Classic",
+  "zoneID": 469,
+  "zoneName": "Blackwing Lair",
+  "encounterID": 617,
+  "encounterName": "Nefarian",
+  "difficultyID": 9,
+  "difficulty": "N",
+  "player": {
+    "_GUID": "Player-4395-BBBB0001",
+    "_name": "Classicone",
+    "_realm": "Classicrealm"
+  },
+  "combatants": [
+    {
+      "_GUID": "Player-4395-BBBB0001",
+      "_name": "Classicone",
+      "_realm": "Classicrealm"
+    }
+  ],
+  "overrun": 15,
+  "uniqueHash": "0102030405060708090a0b0c0d0e0f10"
+}

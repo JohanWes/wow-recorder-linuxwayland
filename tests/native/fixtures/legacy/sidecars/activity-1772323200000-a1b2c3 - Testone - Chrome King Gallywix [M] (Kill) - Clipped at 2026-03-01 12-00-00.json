@@ -1,0 +1,36 @@
+{
+  "category": "Clips",
+  "parentCategory": "Raids",
+  "duration": 28.0,
+  "start": 1772323200000,
+  "clippedAt": 1772410000000,
+  "result": true,
+  "flavour": "Retail",
+  "zoneID": 2769,
+  "zoneName": "Undermine",
+  "encounterID": 3009,
+  "encounterName": "Chrome King Gallywix",
+  "difficultyID": 16,
+  "difficulty": "M",
+  "protected": true,
+  "player": {
+    "_GUID": "Player-1000-AAAA0001",
+    "_teamID": 0,
+    "_specID": 577,
+    "_name": "Testone",
+    "_realm": "Testrealm",
+    "_region": "EU"
+  },
+  "combatants": [],
+  "deaths": [
+    {
+      "name": "Chrome King Gallywix",
+      "specId": -1,
+      "date": "2026-03-01T00:03:34.000Z",
+      "timestamp": 27.0,
+      "friendly": false
+    }
+  ],
+  "overrun": 0,
+  "uniqueHash": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+}

@@ -102,7 +102,7 @@ Statuses are `TODO`, `IN PROGRESS`, `BLOCKED(reason)`, and `DONE`. Start only wh
 | WR-004 | [Log reader and parser](WR-004-log-reader-parser.md) | WR-000, WR-003 | DONE |
 | WR-005 | [Activity state machine](WR-005-activity-state-machine.md) | WR-003, WR-004 | DONE |
 | WR-006 | [Recorder adapter](WR-006-recorder-adapter.md) | WR-002, WR-003 | DONE |
-| WR-007 | [Storage and library index](WR-007-storage-library.md) | WR-003, WR-006 | TODO |
+| WR-007 | [Storage and library index](WR-007-storage-library.md) | WR-003, WR-006 | DONE |
 | WR-008 | [Coordinator and vertical slice](WR-008-coordinator-vertical-slice.md) | WR-004, WR-005, WR-006, WR-007 | TODO |
 | WR-009 | [Native shell and UI system](WR-009-native-shell.md) | WR-008 | TODO |
 | WR-010 | [Library view and local actions](WR-010-library-view.md) | WR-007, WR-009 | TODO |

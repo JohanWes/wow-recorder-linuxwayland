@@ -1,0 +1,726 @@
+{
+  "entries": [
+    {
+      "activity_hash": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "category": "clip",
+      "combatants": [],
+      "details": {
+        "kind": "clip",
+        "source_category": "raids",
+        "source_recording": "activity-1772323200000-a1b2c3 - Testone - Chrome King Gallywix [M] (Kill).mp4",
+        "source_title": "Chrome King Gallywix"
+      },
+      "duration_ms": 28000,
+      "flavor": "retail",
+      "id": "activity-1772323200000-a1b2c3 - Testone - Chrome King Gallywix [M] (Kill) - Clipped at 2026-03-01 12-00-00.mp4",
+      "legacy_sidecar": true,
+      "media": {
+        "codec": null,
+        "fps": null,
+        "height": null,
+        "width": null
+      },
+      "media_file": "activity-1772323200000-a1b2c3 - Testone - Chrome King Gallywix [M] (Kill) - Clipped at 2026-03-01 12-00-00.mp4",
+      "outcome": "win",
+      "player": {
+        "class_id": null,
+        "guid": "Player-1000-AAAA0001",
+        "name": "Testone",
+        "realm": "Testrealm",
+        "spec_id": 577
+      },
+      "protected": true,
+      "schema_version": 1,
+      "start_unix_ms": 1772410000000,
+      "tag": null,
+      "timeline": [
+        {
+          "end_ms": null,
+          "kind": "death",
+          "label": "Chrome King Gallywix",
+          "outcome": "win",
+          "player_reference": null,
+          "shape": "point",
+          "start_ms": 27000
+        }
+      ],
+      "title": "Testone - Chrome King Gallywix"
+    },
+    {
+      "activity_hash": "fedcba9876543210fedcba9876543210",
+      "category": "manual",
+      "combatants": [],
+      "details": {
+        "kind": "manual"
+      },
+      "duration_ms": 45000,
+      "flavor": "retail",
+      "id": "manual.mp4",
+      "legacy_sidecar": true,
+      "media": {
+        "codec": null,
+        "fps": null,
+        "height": null,
+        "width": null
+      },
+      "media_file": "manual.mp4",
+      "outcome": "unknown",
+      "player": null,
+      "protected": false,
+      "schema_version": 1,
+      "start_unix_ms": 1772400000000,
+      "tag": null,
+      "timeline": [],
+      "title": "Manual recording"
+    },
+    {
+      "activity_hash": "abcdef0123456789abcdef0123456789",
+      "category": "mythic_plus",
+      "combatants": [
+        {
+          "class_id": null,
+          "guid": "Player-4395-BBBB0002",
+          "name": "Classictwo",
+          "realm": "Classicrealm",
+          "region": null,
+          "spec_id": null,
+          "team_id": null
+        }
+      ],
+      "details": {
+        "affixes": [],
+        "dungeon_name": "Gate of the Setting Sun",
+        "keystone_level": 0,
+        "kind": "dungeon",
+        "map_id": 2,
+        "upgrade_level": 3,
+        "zone_id": 961
+      },
+      "duration_ms": 980000,
+      "flavor": "classic",
+      "id": "classic-challenge.mp4",
+      "legacy_sidecar": true,
+      "media": {
+        "codec": null,
+        "fps": null,
+        "height": null,
+        "width": null
+      },
+      "media_file": "classic-challenge.mp4",
+      "outcome": "complete",
+      "player": {
+        "class_id": null,
+        "guid": "Player-4395-BBBB0002",
+        "name": "Classictwo",
+        "realm": "Classicrealm",
+        "spec_id": null
+      },
+      "protected": false,
+      "schema_version": 1,
+      "start_unix_ms": 1772390000000,
+      "tag": null,
+      "timeline": [
+        {
+          "end_ms": 400000,
+          "kind": "trash",
+          "label": null,
+          "outcome": null,
+          "player_reference": null,
+          "shape": "span",
+          "start_ms": 0
+        }
+      ],
+      "title": "Classictwo - Gate of the Setting Sun"
+    },
+    {
+      "activity_hash": "1020304050607080901a2b3c4d5e6f70",
+      "category": "raids",
+      "combatants": [
+        {
+          "class_id": null,
+          "guid": "Player-4800-CCCC0001",
+          "name": "Eraone",
+          "realm": "Erarealm",
+          "region": null,
+          "spec_id": null,
+          "team_id": null
+        }
+      ],
+      "details": {
+        "boss_percent": null,
+        "difficulty": null,
+        "difficulty_id": null,
+        "encounter_id": 234,
+        "encounter_name": "Mekgineer Thermaplugg",
+        "kind": "raid",
+        "pull": null,
+        "zone_id": 230,
+        "zone_name": "Gnomeregan"
+      },
+      "duration_ms": 128000,
+      "flavor": "classic",
+      "id": "era-raid.mp4",
+      "legacy_sidecar": true,
+      "media": {
+        "codec": null,
+        "fps": null,
+        "height": null,
+        "width": null
+      },
+      "media_file": "era-raid.mp4",
+      "outcome": "win",
+      "player": {
+        "class_id": null,
+        "guid": "Player-4800-CCCC0001",
+        "name": "Eraone",
+        "realm": "Erarealm",
+        "spec_id": null
+      },
+      "protected": false,
+      "schema_version": 1,
+      "start_unix_ms": 1772380000000,
+      "tag": null,
+      "timeline": [],
+      "title": "Eraone - Mekgineer Thermaplugg"
+    },
+    {
+      "activity_hash": "0102030405060708090a0b0c0d0e0f10",
+      "category": "raids",
+      "combatants": [
+        {
+          "class_id": null,
+          "guid": "Player-4395-BBBB0001",
+          "name": "Classicone",
+          "realm": "Classicrealm",
+          "region": null,
+          "spec_id": null,
+          "team_id": null
+        }
+      ],
+      "details": {
+        "boss_percent": null,
+        "difficulty": "N",
+        "difficulty_id": 9,
+        "encounter_id": 617,
+        "encounter_name": "Nefarian",
+        "kind": "raid",
+        "pull": null,
+        "zone_id": 469,
+        "zone_name": "Blackwing Lair"
+      },
+      "duration_ms": 305000,
+      "flavor": "classic",
+      "id": "classic-raid.mp4",
+      "legacy_sidecar": true,
+      "media": {
+        "codec": null,
+        "fps": null,
+        "height": null,
+        "width": null
+      },
+      "media_file": "classic-raid.mp4",
+      "outcome": "loss",
+      "player": {
+        "class_id": null,
+        "guid": "Player-4395-BBBB0001",
+        "name": "Classicone",
+        "realm": "Classicrealm",
+        "spec_id": null
+      },
+      "protected": false,
+      "schema_version": 1,
+      "start_unix_ms": 1772370000000,
+      "tag": null,
+      "timeline": [],
+      "title": "Classicone - Nefarian"
+    },
+    {
+      "activity_hash": "99887766554433221100ffeeddccbbaa",
+      "category": "solo_shuffle",
+      "combatants": [
+        {
+          "class_id": null,
+          "guid": "Player-1000-AAAA0001",
+          "name": "Testone",
+          "realm": "Testrealm",
+          "region": null,
+          "spec_id": 577,
+          "team_id": null
+        }
+      ],
+      "details": {
+        "kind": "solo_rounds",
+        "map_id": 572,
+        "map_name": "Ruins of Lordaeron",
+        "rounds": [
+          {
+            "duration_ms": 62000,
+            "outcome": "win",
+            "round": 1,
+            "start_ms": 0
+          },
+          {
+            "duration_ms": 58000,
+            "outcome": "loss",
+            "round": 2,
+            "start_ms": 70000
+          },
+          {
+            "duration_ms": 71000,
+            "outcome": "win",
+            "round": 3,
+            "start_ms": 135000
+          },
+          {
+            "duration_ms": 66000,
+            "outcome": "win",
+            "round": 4,
+            "start_ms": 215000
+          },
+          {
+            "duration_ms": 54000,
+            "outcome": "loss",
+            "round": 5,
+            "start_ms": 290000
+          },
+          {
+            "duration_ms": 60000,
+            "outcome": "win",
+            "round": 6,
+            "start_ms": 355000
+          }
+        ],
+        "rounds_played": 6,
+        "rounds_won": 4
+      },
+      "duration_ms": 420000,
+      "flavor": "retail",
+      "id": "solo-shuffle.mp4",
+      "legacy_sidecar": true,
+      "media": {
+        "codec": null,
+        "fps": null,
+        "height": null,
+        "width": null
+      },
+      "media_file": "solo-shuffle.mp4",
+      "outcome": "win",
+      "player": {
+        "class_id": null,
+        "guid": "Player-1000-AAAA0001",
+        "name": "Testone",
+        "realm": "Testrealm",
+        "spec_id": 577
+      },
+      "protected": false,
+      "schema_version": 1,
+      "start_unix_ms": 1772360000000,
+      "tag": null,
+      "timeline": [
+        {
+          "end_ms": 62000,
+          "kind": "round",
+          "label": "Round 1",
+          "outcome": "win",
+          "player_reference": null,
+          "shape": "span",
+          "start_ms": 0
+        },
+        {
+          "end_ms": 128000,
+          "kind": "round",
+          "label": "Round 2",
+          "outcome": "loss",
+          "player_reference": null,
+          "shape": "span",
+          "start_ms": 70000
+        },
+        {
+          "end_ms": 206000,
+          "kind": "round",
+          "label": "Round 3",
+          "outcome": "win",
+          "player_reference": null,
+          "shape": "span",
+          "start_ms": 135000
+        },
+        {
+          "end_ms": 281000,
+          "kind": "round",
+          "label": "Round 4",
+          "outcome": "win",
+          "player_reference": null,
+          "shape": "span",
+          "start_ms": 215000
+        },
+        {
+          "end_ms": 344000,
+          "kind": "round",
+          "label": "Round 5",
+          "outcome": "loss",
+          "player_reference": null,
+          "shape": "span",
+          "start_ms": 290000
+        },
+        {
+          "end_ms": 415000,
+          "kind": "round",
+          "label": "Round 6",
+          "outcome": "win",
+          "player_reference": null,
+          "shape": "span",
+          "start_ms": 355000
+        }
+      ],
+      "title": "Testone - Ruins of Lordaeron"
+    },
+    {
+      "activity_hash": "5566778899aabbccddeeff0011223344",
+      "category": "battlegrounds",
+      "combatants": [],
+      "details": {
+        "kind": "arena_or_battleground",
+        "map_id": 30,
+        "map_name": "Alterac Valley",
+        "team_mmr": null
+      },
+      "duration_ms": 1210000,
+      "flavor": "retail",
+      "id": "battleground.mp4",
+      "legacy_sidecar": true,
+      "media": {
+        "codec": null,
+        "fps": null,
+        "height": null,
+        "width": null
+      },
+      "media_file": "battleground.mp4",
+      "outcome": "loss",
+      "player": {
+        "class_id": null,
+        "guid": "Player-1000-AAAA0001",
+        "name": "Testone",
+        "realm": "Testrealm",
+        "spec_id": 577
+      },
+      "protected": false,
+      "schema_version": 1,
+      "start_unix_ms": 1772350000000,
+      "tag": null,
+      "timeline": [],
+      "title": "Testone - Alterac Valley"
+    },
+    {
+      "activity_hash": "aa00bb11cc22dd33ee44ff5566778899",
+      "category": "two_v_two",
+      "combatants": [
+        {
+          "class_id": null,
+          "guid": "Player-1000-AAAA0001",
+          "name": "Testone",
+          "realm": "Testrealm",
+          "region": null,
+          "spec_id": 577,
+          "team_id": 0
+        },
+        {
+          "class_id": null,
+          "guid": "Player-1000-AAAA0004",
+          "name": "Testfour",
+          "realm": "Otherrealm",
+          "region": null,
+          "spec_id": 260,
+          "team_id": 1
+        }
+      ],
+      "details": {
+        "kind": "arena_or_battleground",
+        "map_id": 1552,
+        "map_name": "Ashamane's Fall",
+        "team_mmr": 1850
+      },
+      "duration_ms": 96000,
+      "flavor": "retail",
+      "id": "arena-2v2.mp4",
+      "legacy_sidecar": true,
+      "media": {
+        "codec": null,
+        "fps": null,
+        "height": null,
+        "width": null
+      },
+      "media_file": "arena-2v2.mp4",
+      "outcome": "win",
+      "player": {
+        "class_id": null,
+        "guid": "Player-1000-AAAA0001",
+        "name": "Testone",
+        "realm": "Testrealm",
+        "spec_id": 577
+      },
+      "protected": false,
+      "schema_version": 1,
+      "start_unix_ms": 1772340000000,
+      "tag": null,
+      "timeline": [
+        {
+          "end_ms": null,
+          "kind": "death",
+          "label": "Testfour",
+          "outcome": "win",
+          "player_reference": null,
+          "shape": "point",
+          "start_ms": 95000
+        }
+      ],
+      "title": "Testone - Ashamane's Fall"
+    },
+    {
+      "activity_hash": "112233445566778899aabbccddeeff00",
+      "category": "mythic_plus",
+      "combatants": [
+        {
+          "class_id": null,
+          "guid": "Player-1000-AAAA0001",
+          "name": "Testone",
+          "realm": "Testrealm",
+          "region": null,
+          "spec_id": 577,
+          "team_id": null
+        }
+      ],
+      "details": {
+        "affixes": [
+          9,
+          10,
+          152
+        ],
+        "dungeon_name": "Ara-Kara, City of Echoes",
+        "keystone_level": 12,
+        "kind": "dungeon",
+        "map_id": 503,
+        "upgrade_level": 0,
+        "zone_id": 2660
+      },
+      "duration_ms": 640000,
+      "flavor": "retail",
+      "id": "mythicplus-abandoned.mp4",
+      "legacy_sidecar": true,
+      "media": {
+        "codec": "hevc",
+        "fps": null,
+        "height": null,
+        "width": null
+      },
+      "media_file": "mythicplus-abandoned.mp4",
+      "outcome": "abandoned",
+      "player": {
+        "class_id": null,
+        "guid": "Player-1000-AAAA0001",
+        "name": "Testone",
+        "realm": "Testrealm",
+        "spec_id": 577
+      },
+      "protected": false,
+      "schema_version": 1,
+      "start_unix_ms": 1772330000000,
+      "tag": null,
+      "timeline": [
+        {
+          "end_ms": 160000,
+          "kind": "trash",
+          "label": null,
+          "outcome": null,
+          "player_reference": null,
+          "shape": "span",
+          "start_ms": 0
+        },
+        {
+          "end_ms": 310000,
+          "kind": "encounter",
+          "label": null,
+          "outcome": null,
+          "player_reference": null,
+          "shape": "span",
+          "start_ms": 160000
+        },
+        {
+          "end_ms": null,
+          "kind": "death",
+          "label": "Testone",
+          "outcome": "loss",
+          "player_reference": null,
+          "shape": "point",
+          "start_ms": 230000
+        }
+      ],
+      "title": "Testone - Ara-Kara, City of Echoes"
+    },
+    {
+      "activity_hash": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "category": "raids",
+      "combatants": [],
+      "details": {
+        "boss_percent": null,
+        "difficulty": null,
+        "difficulty_id": 16,
+        "encounter_id": 3009,
+        "encounter_name": "Chrome King Gallywix",
+        "kind": "raid",
+        "pull": null,
+        "zone_id": null,
+        "zone_name": null
+      },
+      "duration_ms": 201000,
+      "flavor": "retail",
+      "id": "raid-pov-b.mp4",
+      "legacy_sidecar": true,
+      "media": {
+        "codec": null,
+        "fps": null,
+        "height": null,
+        "width": null
+      },
+      "media_file": "raid-pov-b.mp4",
+      "outcome": "win",
+      "player": {
+        "class_id": null,
+        "guid": null,
+        "name": "Testthree",
+        "realm": null,
+        "spec_id": null
+      },
+      "protected": false,
+      "schema_version": 1,
+      "start_unix_ms": 1772323221000,
+      "tag": null,
+      "timeline": [],
+      "title": "Testthree - Chrome King Gallywix"
+    },
+    {
+      "activity_hash": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "category": "raids",
+      "combatants": [
+        {
+          "class_id": null,
+          "guid": "Player-1000-AAAA0001",
+          "name": "Testone",
+          "realm": "Testrealm",
+          "region": "EU",
+          "spec_id": 577,
+          "team_id": 0
+        },
+        {
+          "class_id": null,
+          "guid": "Player-1000-AAAA0002",
+          "name": "Testtwo",
+          "realm": "Testrealm",
+          "region": "EU",
+          "spec_id": 102,
+          "team_id": 0
+        }
+      ],
+      "details": {
+        "boss_percent": 0,
+        "difficulty": "M",
+        "difficulty_id": 16,
+        "encounter_id": 3009,
+        "encounter_name": "Chrome King Gallywix",
+        "kind": "raid",
+        "pull": null,
+        "zone_id": 2769,
+        "zone_name": "Undermine"
+      },
+      "duration_ms": 214500,
+      "flavor": "retail",
+      "id": "activity-1772323200000-a1b2c3 - Testone - Chrome King Gallywix [M] (Kill).mp4",
+      "legacy_sidecar": true,
+      "media": {
+        "codec": "h264",
+        "fps": 60,
+        "height": null,
+        "width": null
+      },
+      "media_file": "activity-1772323200000-a1b2c3 - Testone - Chrome King Gallywix [M] (Kill).mp4",
+      "outcome": "win",
+      "player": {
+        "class_id": null,
+        "guid": "Player-1000-AAAA0001",
+        "name": "Testone",
+        "realm": "Testrealm",
+        "spec_id": 577
+      },
+      "protected": true,
+      "schema_version": 1,
+      "start_unix_ms": 1772323200000,
+      "tag": "good pull",
+      "timeline": [
+        {
+          "end_ms": null,
+          "kind": "death",
+          "label": "Testtwo",
+          "outcome": "loss",
+          "player_reference": null,
+          "shape": "point",
+          "start_ms": 130500
+        },
+        {
+          "end_ms": null,
+          "kind": "death",
+          "label": "Chrome King Gallywix",
+          "outcome": "win",
+          "player_reference": null,
+          "shape": "point",
+          "start_ms": 214000
+        }
+      ],
+      "title": "Testone - Chrome King Gallywix"
+    }
+  ],
+  "correlations": [
+    {
+      "local_pov_ids": [],
+      "primary": "activity-1772323200000-a1b2c3 - Testone - Chrome King Gallywix [M] (Kill) - Clipped at 2026-03-01 12-00-00.mp4"
+    },
+    {
+      "local_pov_ids": [],
+      "primary": "manual.mp4"
+    },
+    {
+      "local_pov_ids": [],
+      "primary": "classic-challenge.mp4"
+    },
+    {
+      "local_pov_ids": [],
+      "primary": "era-raid.mp4"
+    },
+    {
+      "local_pov_ids": [],
+      "primary": "classic-raid.mp4"
+    },
+    {
+      "local_pov_ids": [],
+      "primary": "solo-shuffle.mp4"
+    },
+    {
+      "local_pov_ids": [],
+      "primary": "battleground.mp4"
+    },
+    {
+      "local_pov_ids": [],
+      "primary": "arena-2v2.mp4"
+    },
+    {
+      "local_pov_ids": [],
+      "primary": "mythicplus-abandoned.mp4"
+    },
+    {
+      "local_pov_ids": [
+        "activity-1772323200000-a1b2c3 - Testone - Chrome King Gallywix [M] (Kill).mp4"
+      ],
+      "primary": "raid-pov-b.mp4"
+    }
+  ],
+  "skipped": [],
+  "ignored_files": 1
+}

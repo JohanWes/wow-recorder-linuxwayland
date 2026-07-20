@@ -1,0 +1,28 @@
+-nostdin
+-hide_banner
+-i
+/library dir/POV one.mp4
+-i
+/library dir/POV two.mp4
+-filter_complex
+[0:v]trim=start=4:end=14,setpts=PTS-STARTPTS,fps=60,scale=1280:-2,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fade=t=in:st=0:d=1,fade=t=out:st=9:d=1[v0];[1:v]trim=start=2:end=9.5,setpts=PTS-STARTPTS,fps=60,scale=1280:-2,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fade=t=in:st=0:d=1,fade=t=out:st=6.5:d=1[v1];[v0][v1]concat=n=2:v=1:a=0[v]
+-map
+[v]
+-map
+1:a
+-shortest
+-c:v
+libx264
+-crf
+22
+-c:a
+aac
+-preset
+fast
+-pix_fmt
+yuv420p
+-movflags
++faststart
+-xerror
+-y
+/staging dir/clip out.mp4
