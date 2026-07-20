@@ -271,11 +271,9 @@ impl Recorder {
                 "audio device IDs must not contain '|'".to_string(),
             ));
         }
-        if let Some(mut child) = self.child.take() {
-            process::terminate(&mut child, self.timeouts.exit_grace)?;
-        }
-        self.active = None;
-
+        // Check the replacement binary before touching a live capture. The
+        // remaining setup errors occur only after the deliberate replacement
+        // begins; invalid settings and an unavailable binary do not disarm.
         let version = Command::new(&config.gsr_binary)
             .arg("--version")
             .stdout(Stdio::null())
@@ -296,6 +294,12 @@ impl Recorder {
                 });
             }
         }
+        self.desired_running = false;
+        self.restart_at_ms = None;
+        if let Some(mut child) = self.child.take() {
+            process::terminate(&mut child, self.timeouts.exit_grace)?;
+        }
+        self.active = None;
 
         fs::create_dir_all(&config.data_dir)?;
         for dir in ["replay", "regular", "staging"] {
@@ -453,7 +457,12 @@ impl Recorder {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        match self.arm(config) {
+        // Do not let arm restore the token we just invalidated. The portal
+        // must select a new target; once it writes the replacement token,
+        // poll reports it to the coordinator.
+        let mut reselect_config = config.clone();
+        reselect_config.settings.capture_target_token = None;
+        match self.arm(&reselect_config) {
             Ok(()) => {
                 let token = read_token(&token_path);
                 self.last_token = token.clone();
@@ -488,10 +497,23 @@ impl Recorder {
                 message: format!("audio discovery failed: {error}"),
                 log_tail: String::new(),
             })?;
-        if !process::wait_with_timeout(&mut child, Duration::from_secs(2))? {
-            child.kill()?;
-            child.wait()?;
-        }
+        let timed_out = !process::wait_with_timeout(&mut child, Duration::from_secs(2))?;
+        let status = if timed_out {
+            // The process may have exited between the timeout check and the
+            // escalation; avoid reporting a spurious kill failure in that
+            // race and still collect its final status.
+            match child.try_wait()? {
+                Some(status) => status,
+                None => {
+                    child.kill()?;
+                    child.wait()?
+                }
+            }
+        } else {
+            child
+                .try_wait()?
+                .ok_or_else(|| io::Error::other("audio discovery exited without a status"))?
+        };
         let mut text = String::new();
         if let Some(stdout) = child.stdout.as_mut() {
             stdout.read_to_string(&mut text)?;
@@ -499,6 +521,18 @@ impl Recorder {
         text.push('\n');
         if let Some(stderr) = child.stderr.as_mut() {
             stderr.read_to_string(&mut text)?;
+        }
+        if timed_out {
+            return Err(RecorderError::SpawnFailed {
+                message: "audio discovery timed out after 2 seconds".to_string(),
+                log_tail: text_tail(&text),
+            });
+        }
+        if !status.success() {
+            return Err(RecorderError::SpawnFailed {
+                message: format!("audio discovery exited unsuccessfully: {status}"),
+                log_tail: text_tail(&text),
+            });
         }
         Ok(parse_audio_devices(&text))
     }
@@ -772,6 +806,13 @@ fn read_log_tail(path: &Path) -> String {
     String::from_utf8_lossy(&tail).into_owned()
 }
 
+fn text_tail(text: &str) -> String {
+    let start = text
+        .len()
+        .saturating_sub(usize::try_from(LOG_TAIL_BYTES).unwrap_or(usize::MAX));
+    String::from_utf8_lossy(&text.as_bytes()[start..]).into_owned()
+}
+
 /// Legacy `parseGsrAudioDevices`: sectioned `--list-audio-devices` output,
 /// `default_output`/`default_input`/`device:<nonspace>` values, de-duplicated,
 /// with defaults always present.
@@ -802,9 +843,12 @@ fn parse_audio_devices(text: &str) -> AudioDevices {
             .strip_prefix("- ")
             .or_else(|| line.strip_prefix("* "))
             .unwrap_or(line);
-        let (value, detail) = match normalized.split_once(char::is_whitespace) {
-            Some((value, detail)) => (value, detail.trim()),
-            None => (normalized, ""),
+        let (value, detail) = match normalized.split_once('|') {
+            Some((value, detail)) => (value.trim(), detail.trim()),
+            None => match normalized.split_once(char::is_whitespace) {
+                Some((value, detail)) => (value, detail.trim()),
+                None => (normalized, ""),
+            },
         };
         let recognized = value == "default_output"
             || value == "default_input"
@@ -1015,6 +1059,7 @@ mod tests {
         append_event(&config, "screenshot", &replay);
         append_event(&config, "replay", &config.capture_root.join("Replay_x.mkv"));
         append_event(&config, "replay", &replay);
+        append_event(&config, "replay", &replay);
         append_event(&config, "regular", &regular);
 
         let artifacts = recorder.end(&id).unwrap();
@@ -1112,6 +1157,35 @@ mod tests {
         }
         assert_eq!(delays, vec![2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
 
+        // A failed automatic respawn keeps retrying with the capped delay;
+        // removing the failure marker allows the next scheduled attempt to
+        // recover without resetting the attempt counter.
+        fs::write(config.data_dir.join("fake-exit"), "1").unwrap();
+        process::send_signal(recorder.child.as_ref().unwrap(), libc::SIGKILL).unwrap();
+        recorder.child.as_mut().unwrap().wait().unwrap();
+        let events = recorder.poll(now_ms);
+        assert!(events.contains(&RecorderEvent::RestartScheduled {
+            attempt: 7,
+            at_ms: now_ms + 30_000,
+        }));
+        let events = recorder.poll(now_ms + 30_000);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RecorderEvent::RestartFailed { .. }))
+        );
+        let retry_at = events.iter().find_map(|event| match event {
+            RecorderEvent::RestartScheduled { at_ms, .. } => Some(*at_ms),
+            _ => None,
+        });
+        assert_eq!(retry_at, Some(now_ms + 60_000));
+        fs::remove_file(config.data_dir.join("fake-exit")).unwrap();
+        assert!(
+            recorder
+                .poll(retry_at.unwrap())
+                .contains(&RecorderEvent::Restarted)
+        );
+
         // A deliberate arm resets the attempt counter.
         recorder.arm(&config).unwrap();
         process::send_signal(recorder.child.as_ref().unwrap(), libc::SIGKILL).unwrap();
@@ -1131,7 +1205,8 @@ mod tests {
     #[test]
     fn reselection_rotates_the_token_and_denial_restores_it() {
         let mut recorder = Recorder::with_timeouts(test_timeouts());
-        let config = test_config("reselect");
+        let mut config = test_config("reselect");
+        config.settings.capture_target_token = Some("configured-old-token".to_string());
         recorder.arm(&config).unwrap();
         let token_path = Recorder::token_path(&config);
         fs::write(&token_path, "old-token").unwrap();
@@ -1196,6 +1271,34 @@ mod tests {
         );
         assert_eq!(parsed.inputs.len(), 2);
         assert_eq!(parsed.outputs[1].label, "device:x — Some Device");
+
+        let parsed = parse_audio_devices(
+            "Output devices:\ndefault_output|Default output\ndevice:alsa_output.test|Built-in output\nInput devices:\ndefault_input|Default input\ndevice:alsa_input.test|USB microphone\n",
+        );
+        assert_eq!(
+            parsed
+                .outputs
+                .iter()
+                .map(|device| device.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["default_output", "device:alsa_output.test"]
+        );
+        assert_eq!(
+            parsed.outputs[1].label,
+            "device:alsa_output.test — Built-in output"
+        );
+        assert_eq!(
+            parsed
+                .inputs
+                .iter()
+                .map(|device| device.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["default_input", "device:alsa_input.test"]
+        );
+        assert_eq!(
+            parsed.inputs[1].label,
+            "device:alsa_input.test — USB microphone"
+        );
     }
 
     #[test]
@@ -1224,5 +1327,27 @@ mod tests {
             recorder.arm(&config),
             Err(RecorderError::InvalidSettings(_))
         ));
+    }
+
+    #[test]
+    fn invalid_arm_does_not_disarm_existing_capture() {
+        let mut recorder = Recorder::with_timeouts(test_timeouts());
+        let config = test_config("invalid-live");
+        recorder.arm(&config).unwrap();
+
+        let mut invalid = config.clone();
+        invalid.settings.audio_output = "a|b".to_string();
+        assert!(matches!(
+            recorder.arm(&invalid),
+            Err(RecorderError::InvalidSettings(_))
+        ));
+        recorder
+            .begin(StartRequest {
+                id: RecordingId::new(),
+                requested_replay_ms: 0,
+                mode: RecordingMode::Test(Category::Raids),
+            })
+            .unwrap();
+        recorder.shutdown().unwrap();
     }
 }

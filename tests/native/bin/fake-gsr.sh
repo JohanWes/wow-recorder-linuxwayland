@@ -20,11 +20,11 @@ fi
 if [ "${1:-}" = "--list-audio-devices" ]; then
   cat << 'DEVICES'
 Output devices:
-- default_output Default output
-- device:alsa_output.pci.analog-stereo Built-in Analog Stereo
+default_output|Default output
+device:alsa_output.pci.analog-stereo|Built-in Analog Stereo
 Input devices:
-- default_input Default input
-- device:alsa_input.usb-mic Fake USB Microphone
+default_input|Default input
+device:alsa_input.usb-mic|Fake USB Microphone
 DEVICES
   exit 0
 fi

@@ -65,8 +65,8 @@ impl Recorder {
    ```
 
    ```text
-   1755620000123	replay_saved	/…/replays/Replay_2026-07-19_20-13-20.mp4
-   1755620180456	regular_saved	/…/recordings/Video_2026-07-19_20-16-00.mp4
+   1755620000123	replay	/…/replays/Replay_2026-07-19_20-13-20.mp4
+   1755620180456	regular	/…/recordings/Video_2026-07-19_20-16-00.mp4
    ```
 
    `arm` truncates the events file and resets a stored byte offset; `poll` reads only newly appended complete lines from that offset. Accept an event only when its kind matches the stage the single active recording is waiting for and the artifact's canonical parent is the configured replay/regular directory; ignore everything else with one bounded diagnostic. There is no persistent journal, sequence numbering, compaction, or restart recovery in Recorder.
