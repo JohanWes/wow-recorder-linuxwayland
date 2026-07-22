@@ -81,6 +81,12 @@
 .wr-result-win { color: @success_color; font-weight: 600; }
 .wr-result-loss { color: @error_color; font-weight: 600; }
 
+/* The library scrollbar remains an overlay, so leave a modest trailing gutter
+   inside the table for the final Date column. */
+.data-table {
+  padding-right: 18px;
+}
+
 /* WoW class colors for player names (canonical palette, dark theme). */
 .wr-class-death-knight { color: #c41e3a; }
 .wr-class-demon-hunter { color: #a330c9; }

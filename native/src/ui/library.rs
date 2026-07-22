@@ -458,6 +458,8 @@ impl Library {
         let scroll = gtk4::ScrolledWindow::new();
         scroll.set_child(Some(&column_view));
         scroll.set_vexpand(true);
+        // Keep the compact overlay scrollbar used elsewhere in the shell.
+        scroll.set_overlay_scrolling(true);
 
         let empty = adw::StatusPage::new();
         empty.set_title("No recordings in this category");
@@ -1220,12 +1222,27 @@ impl Inner {
     }
 
     fn date_column(&self) -> gtk4::ColumnViewColumn {
-        text_column(
-            "Date",
-            false,
-            |r| format_date(r.date_ms),
-            sort_by(|r| r.date_ms),
-        )
+        let factory = gtk4::SignalListItemFactory::new();
+        factory.connect_setup(|_, item| {
+            let label = gtk4::Label::new(None);
+            label.set_xalign(0.0);
+            label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            // Keep the final text column clear of the vertical scrollbar.
+            label.set_margin_end(6);
+            item.downcast_ref::<gtk4::ListItem>()
+                .unwrap()
+                .set_child(Some(&label));
+        });
+        factory.connect_bind(|_, item| {
+            let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
+            let label = item.child().and_downcast::<gtk4::Label>().unwrap();
+            let row = row_of(&item.item().unwrap());
+            label.set_text(&format_date(row.date_ms));
+        });
+        let column = gtk4::ColumnViewColumn::new(Some("Date"), Some(factory));
+        column.set_resizable(true);
+        column.set_sorter(Some(&sort_by(|r| r.date_ms)));
+        column
     }
 
     fn star_column(self: &Rc<Self>) -> gtk4::ColumnViewColumn {
