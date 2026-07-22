@@ -978,6 +978,9 @@ impl Coordinator {
                     artifacts,
                     facts: self.media_facts(),
                 });
+                if self.maintenance_busy {
+                    let _ = self.media_control.try_send(MediaControl::CancelMaintenance);
+                }
             }
             Err(error) => {
                 self.push_recorder_problem(&error);
@@ -1113,6 +1116,9 @@ impl Coordinator {
             start_ms: range.start_ms,
             end_ms: range.end_ms,
         });
+        if self.maintenance_busy {
+            let _ = self.media_control.try_send(MediaControl::CancelMaintenance);
+        }
     }
 
     // -----------------------------------------------------------------------

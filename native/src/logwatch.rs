@@ -7,6 +7,7 @@ use std::fmt;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::domain::GameFlavor;
 use crate::parser::{ParseFailure, ParseTimeContext, ParsedEvent, event_name, parse_line};
@@ -15,6 +16,10 @@ const READ_CHUNK_BYTES: usize = 64 * 1024;
 const CHECKPOINT_BYTES: usize = 64;
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_DIAGNOSTICS: usize = 32;
+/// A new combat log only appears at session boundaries. Directory mtime makes
+/// discovery immediate in the normal case; this interval is the fallback for
+/// filesystems whose directory timestamps are coarse or unreliable.
+const ACTIVE_FILE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub enum LogError {
@@ -77,6 +82,10 @@ pub struct LogTailer {
     time_context: ParseTimeContext,
     replay: bool,
     checkpoint: Vec<u8>,
+    observed_len: u64,
+    observed_modified: Option<SystemTime>,
+    source_modified: Option<SystemTime>,
+    next_active_refresh: Instant,
     discarding_long_line: bool,
     diagnostics: VecDeque<LogDiagnostic>,
 }
@@ -112,6 +121,9 @@ impl LogTailer {
         let identity = file_identity(&metadata);
         let offset = if replay { 0 } else { metadata.len() };
         let checkpoint = read_checkpoint(&path, offset)?;
+        let source_modified = (!source.is_file())
+            .then(|| fs::metadata(&source).ok()?.modified().ok())
+            .flatten();
         Ok(Self {
             source,
             path,
@@ -124,6 +136,10 @@ impl LogTailer {
             time_context,
             replay,
             checkpoint,
+            observed_len: metadata.len(),
+            observed_modified: metadata.modified().ok(),
+            source_modified,
+            next_active_refresh: Instant::now() + ACTIVE_FILE_REFRESH_INTERVAL,
             discarding_long_line: false,
             diagnostics: VecDeque::new(),
         })
@@ -141,14 +157,19 @@ impl LogTailer {
         self.refresh_active_file()?;
         let current_metadata = metadata(&self.path)?;
         let current_identity = file_identity(&current_metadata);
+        let current_modified = current_metadata.modified().ok();
+        let metadata_changed = current_metadata.len() != self.observed_len
+            || current_modified != self.observed_modified;
         let reset = current_identity != self.identity
             || current_metadata.len() < self.offset
-            || !self.checkpoint_matches()?;
+            || (metadata_changed && !self.checkpoint_matches()?);
         if reset {
             self.reset_for_file(current_identity);
         }
 
         let available = current_metadata.len().saturating_sub(self.offset);
+        self.observed_len = current_metadata.len();
+        self.observed_modified = current_modified;
         if available == 0 {
             return Ok(Vec::new());
         }
@@ -176,7 +197,15 @@ impl LogTailer {
         if self.source.is_file() || self.replay {
             return Ok(());
         }
+        let source_metadata = metadata(&self.source)?;
+        let source_modified = source_metadata.modified().ok();
+        let now = Instant::now();
+        if source_modified == self.source_modified && now < self.next_active_refresh {
+            return Ok(());
+        }
         let active = active_path(&self.source)?;
+        self.source_modified = source_modified;
+        self.next_active_refresh = now + ACTIVE_FILE_REFRESH_INTERVAL;
         if active == self.path {
             return Ok(());
         }
@@ -194,6 +223,8 @@ impl LogTailer {
         self.line_number = 0;
         self.discarding_long_line = false;
         self.checkpoint.clear();
+        self.observed_len = 0;
+        self.observed_modified = None;
     }
 
     fn checkpoint_matches(&self) -> Result<bool, LogError> {

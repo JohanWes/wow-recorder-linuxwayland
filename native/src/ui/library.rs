@@ -397,6 +397,9 @@ struct State {
     selected_chips: RefCell<Vec<Chip>>,
     date_range: Cell<Option<(i64, i64)>>,
     available: RefCell<Vec<Chip>>,
+    suggestions_dirty: Cell<bool>,
+    suggestions_active: Cell<bool>,
+    rebuilding_store: Cell<bool>,
     category: RefCell<Option<Category>>,
     signature: Cell<u64>,
     /// A protect/tag/delete is in flight; the bulk bar stays disabled until the
@@ -427,7 +430,8 @@ struct Inner {
     chips_row: gtk4::Box,
     search: gtk4::SearchEntry,
     suggestion_popover: gtk4::Popover,
-    suggestion_list: gtk4::ListBox,
+    suggestion_model: gio::ListStore,
+    suggestion_list: gtk4::ListView,
     date_label: gtk4::Label,
     from_calendar: gtk4::Calendar,
     to_calendar: gtk4::Calendar,
@@ -476,8 +480,14 @@ impl Library {
         let search = gtk4::SearchEntry::new();
         search.set_placeholder_text(Some("Search recordings"));
         search.set_hexpand(true);
-        let suggestion_list = gtk4::ListBox::new();
-        suggestion_list.set_selection_mode(gtk4::SelectionMode::None);
+        let suggestion_model = gio::ListStore::new::<BoxedAnyObject>();
+        let suggestion_selection = gtk4::NoSelection::new(Some(suggestion_model.clone()));
+        let suggestion_list =
+            gtk4::ListView::new(Some(suggestion_selection), Some(suggestion_factory()));
+        suggestion_list.set_single_click_activate(true);
+        // Search owns keyboard focus (Tab/Enter acceptance); pointer activation
+        // must not steal it and collapse the popover before the click arrives.
+        suggestion_list.set_focusable(false);
         suggestion_list.add_css_class("boxed-list");
         let suggestion_scroll = gtk4::ScrolledWindow::new();
         suggestion_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
@@ -556,6 +566,7 @@ impl Library {
             chips_row,
             search,
             suggestion_popover,
+            suggestion_model,
             suggestion_list,
             date_label,
             from_calendar,
@@ -568,6 +579,9 @@ impl Library {
                 selected_chips: RefCell::new(Vec::new()),
                 date_range: Cell::new(None),
                 available: RefCell::new(Vec::new()),
+                suggestions_dirty: Cell::new(true),
+                suggestions_active: Cell::new(false),
+                rebuilding_store: Cell::new(false),
                 category: RefCell::new(None),
                 signature: Cell::new(0),
                 mutation_pending: Cell::new(false),
@@ -608,13 +622,20 @@ impl Inner {
         // React to filter results: empty state, suggestions, and the bulk bar.
         let this = Rc::clone(self);
         self.filter_model.connect_items_changed(move |_, _, _, _| {
-            this.after_filter_change();
+            if !this.state.rebuilding_store.get() {
+                this.after_filter_change();
+            }
         });
     }
 
     fn connect_search(self: &Rc<Self>) {
         let this = Rc::clone(self);
         self.search.connect_search_changed(move |_| {
+            this.refresh_suggestion_popover();
+        });
+        let this = Rc::clone(self);
+        self.search.connect_has_focus_notify(move |search| {
+            this.state.suggestions_active.set(search.has_focus());
             this.refresh_suggestion_popover();
         });
         // Enter accepts the top narrowed suggestion, matching legacy Tab/Enter.
@@ -635,9 +656,9 @@ impl Inner {
         self.search.add_controller(key);
 
         let this = Rc::clone(self);
-        self.suggestion_list.connect_row_activated(move |_, row| {
-            if let Some(chip) = this.state.available_narrowed().get(row.index() as usize) {
-                this.add_chip(chip.clone());
+        self.suggestion_list.connect_activate(move |_, position| {
+            if let Some(item) = this.suggestion_model.item(position) {
+                this.add_chip(chip_of(&item));
             }
         });
     }
@@ -682,7 +703,10 @@ impl Inner {
     // --- filtering feedback -------------------------------------------------
 
     fn after_filter_change(self: &Rc<Self>) {
-        self.refresh_available_suggestions();
+        self.state.suggestions_dirty.set(true);
+        if self.state.suggestions_active.get() {
+            self.refresh_available_suggestions();
+        }
         self.update_stack();
         self.refresh_suggestion_popover();
     }
@@ -701,35 +725,48 @@ impl Inner {
     /// Suggestions come from the currently *filtered* rows (WR-000), deduped by
     /// label and minus the already-selected chips.
     fn refresh_available_suggestions(&self) {
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        let mut chips: BTreeSet<Chip> = BTreeSet::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut chips = Vec::new();
         for index in 0..self.filter_model.n_items() {
             if let Some(item) = self.filter_model.item(index) {
                 let row = row_of(&item);
                 for chip in &row.combined {
                     if seen.insert(chip.label.clone()) {
-                        chips.insert(chip.clone());
+                        chips.push(chip.clone());
                     }
                 }
             }
         }
-        *self.state.available.borrow_mut() = chips.into_iter().collect();
+        chips.sort_unstable();
+        *self.state.available.borrow_mut() = chips;
+        self.state.suggestions_dirty.set(false);
     }
 
     fn refresh_suggestion_popover(self: &Rc<Self>) {
-        let narrowed = self.state.available_narrowed_with(&self.search.text());
-        while let Some(child) = self.suggestion_list.first_child() {
-            self.suggestion_list.remove(&child);
+        if !self.state.suggestions_active.get() {
+            self.suggestion_popover.popdown();
+            return;
         }
-        for chip in &narrowed {
-            self.suggestion_list.append(&suggestion_row(chip));
+        if self.state.suggestions_dirty.get() {
+            self.refresh_available_suggestions();
         }
-        let show = self.search.has_focus() && !narrowed.is_empty();
-        if show {
+        self.rebuild_suggestion_model(&self.search.text());
+        if self.search.has_focus() && self.suggestion_model.n_items() > 0 {
             self.suggestion_popover.popup();
-        } else {
+        } else if self.suggestion_model.n_items() == 0 {
             self.suggestion_popover.popdown();
         }
+    }
+
+    fn rebuild_suggestion_model(&self, query: &str) {
+        let suggestions: Vec<BoxedAnyObject> = self
+            .state
+            .available_narrowed_with(query)
+            .into_iter()
+            .map(BoxedAnyObject::new)
+            .collect();
+        self.suggestion_model
+            .splice(0, self.suggestion_model.n_items(), &suggestions);
     }
 
     fn accept_first_suggestion(self: &Rc<Self>) {
@@ -1030,10 +1067,10 @@ impl Inner {
             .map(|row| row.id.clone())
             .collect();
 
-        self.store.remove_all();
-        for row in rows {
-            self.store.append(&BoxedAnyObject::new(row));
-        }
+        let rows: Vec<BoxedAnyObject> = rows.into_iter().map(BoxedAnyObject::new).collect();
+        self.state.rebuilding_store.set(true);
+        self.store.splice(0, self.store.n_items(), &rows);
+        self.state.rebuilding_store.set(false);
         self.after_filter_change();
 
         // Re-select the surviving rows. If none survive — a fresh category, or
@@ -1512,21 +1549,41 @@ fn result_column() -> gtk4::ColumnViewColumn {
     column
 }
 
-fn suggestion_row(chip: &Chip) -> gtk4::ListBoxRow {
-    let icon = gtk4::Image::from_icon_name(chip.icon_name());
-    let label = gtk4::Label::new(Some(&chip.label));
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    let content = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-    content.set_margin_top(4);
-    content.set_margin_bottom(4);
-    content.set_margin_start(8);
-    content.set_margin_end(8);
-    content.append(&icon);
-    content.append(&label);
-    let row = gtk4::ListBoxRow::new();
-    row.set_child(Some(&content));
-    row
+fn chip_of(item: &glib::Object) -> Chip {
+    item.downcast_ref::<BoxedAnyObject>()
+        .expect("suggestions are BoxedAnyObject")
+        .borrow::<Chip>()
+        .clone()
+}
+
+fn suggestion_factory() -> gtk4::SignalListItemFactory {
+    let factory = gtk4::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        let icon = gtk4::Image::new();
+        let label = gtk4::Label::new(None);
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        let content = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        content.set_margin_top(4);
+        content.set_margin_bottom(4);
+        content.set_margin_start(8);
+        content.set_margin_end(8);
+        content.append(&icon);
+        content.append(&label);
+        item.downcast_ref::<gtk4::ListItem>()
+            .expect("factory item")
+            .set_child(Some(&content));
+    });
+    factory.connect_bind(|_, item| {
+        let item = item.downcast_ref::<gtk4::ListItem>().expect("factory item");
+        let content = item.child().and_downcast::<gtk4::Box>().unwrap();
+        let icon = content.first_child().and_downcast::<gtk4::Image>().unwrap();
+        let label = icon.next_sibling().and_downcast::<gtk4::Label>().unwrap();
+        let chip = chip_of(&item.item().unwrap());
+        icon.set_icon_name(Some(chip.icon_name()));
+        label.set_text(&chip.label);
+    });
+    factory
 }
 
 fn chip_pill(chip: &Chip) -> gtk4::Button {
@@ -1663,6 +1720,38 @@ mod release_gate_tests {
         let library = Library::new(Rc::new(|_| true), Rc::new(|_| {}));
         library.apply(&snapshot);
         assert_eq!(library.inner.store.n_items(), 200);
+        assert_eq!(
+            library.inner.suggestion_model.n_items(),
+            0,
+            "a hidden popover must not materialize suggestion rows"
+        );
+        assert!(library.inner.state.suggestions_dirty.get());
+
+        // Exercise the focused-search path without depending on compositor
+        // focus policy in this manual harness.
+        library.inner.state.suggestions_active.set(true);
+        library.inner.refresh_suggestion_popover();
+        assert!(!library.inner.state.available.borrow().is_empty());
+
+        // A relevant snapshot while search is focused replaces the backing
+        // store with one notification, rather than rescanning a growing model
+        // once per row.
+        let notifications = Rc::new(Cell::new(0u32));
+        let notification_count = Rc::clone(&notifications);
+        library
+            .inner
+            .store
+            .connect_items_changed(move |_, _, _, _| {
+                notification_count.set(notification_count.get() + 1);
+            });
+        let entries = Arc::make_mut(&mut snapshot.entries);
+        entries
+            .iter_mut()
+            .find(|entry| entry.category == Category::MythicPlus)
+            .expect("Mythic+ entry")
+            .tag = Some("focused rebuild".to_owned());
+        library.apply(&snapshot);
+        assert_eq!(notifications.get(), 1);
 
         // Exercise the actual widgets and GtkFilterListModel/GtkSortListModel,
         // then enumerate the resulting selection model so lazy work is paid
@@ -1681,8 +1770,43 @@ mod release_gate_tests {
             } else {
                 "dungeon"
             });
-            force_model();
+            library
+                .inner
+                .search
+                .emit_by_name::<()>("search-changed", &[]);
+            for position in 0..library.inner.suggestion_model.n_items() {
+                std::hint::black_box(library.inner.suggestion_model.item(position));
+            }
         });
+        let normal_suggestions = library.inner.state.available.borrow().clone();
+        *library.inner.state.available.borrow_mut() = (0..10_000)
+            .map(|index| Chip {
+                group: 200,
+                label: format!(
+                    "stress-{}-{index:05}",
+                    if index % 2 == 0 { 'a' } else { 'b' }
+                ),
+            })
+            .collect();
+        let mut high_card_toggle = false;
+        let (high_card_samples, high_card_median) = measure(|| {
+            high_card_toggle = !high_card_toggle;
+            library.inner.search.set_text(if high_card_toggle {
+                "stress-a"
+            } else {
+                "stress-b"
+            });
+            library
+                .inner
+                .search
+                .emit_by_name::<()>("search-changed", &[]);
+            assert_eq!(library.inner.suggestion_model.n_items(), 5_000);
+            for position in 0..library.inner.suggestion_model.n_items() {
+                std::hint::black_box(library.inner.suggestion_model.item(position));
+            }
+        });
+        *library.inner.state.available.borrow_mut() = normal_suggestions;
+        library.inner.search.set_text("");
         let chip = library.inner.state.available.borrow()[0].clone();
         let mut chip_toggle = false;
         let (chip_samples, chip_median) = measure(|| {
@@ -1733,6 +1857,7 @@ mod release_gate_tests {
         });
         println!(
             "suggestion_us={suggestion_samples:?} median={suggestion_median}; \
+             high_card_suggestion_us={high_card_samples:?} median={high_card_median}; \
              chip_us={chip_samples:?} median={chip_median}; \
              date_us={date_samples:?} median={date_median}; \
              sort_us={sort_samples:?} median={sort_median}"

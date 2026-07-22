@@ -177,6 +177,18 @@ impl Storage {
         retail_log_dirs: &[PathBuf],
         context: ParseTimeContext,
     ) -> TimelineEnrichmentReport {
+        self.enrich_legacy_bloodlust_cancellable(retail_log_dirs, context, || false)
+    }
+
+    /// Worker-facing variant. Historical logs can be very large, so shutdown
+    /// and newly queued recording finalization must be able to stop this
+    /// optional one-time maintenance pass between bounded batches of lines.
+    pub(crate) fn enrich_legacy_bloodlust_cancellable(
+        &self,
+        retail_log_dirs: &[PathBuf],
+        context: ParseTimeContext,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> TimelineEnrichmentReport {
         let mut report = TimelineEnrichmentReport::default();
         let mut targets = self.legacy_enrichment_targets(&mut report.failures);
         if targets.is_empty() {
@@ -195,14 +207,22 @@ impl Storage {
         log_paths.sort();
         log_paths.dedup();
         for log_path in log_paths {
-            if let Err(error) = collect_bloodlust_casts(&log_path, context, &mut targets) {
-                report
+            if cancelled() || targets.iter().all(|target| target.covered) {
+                break;
+            }
+            match collect_bloodlust_casts(&log_path, context, &mut targets, &mut cancelled) {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(error) => report
                     .failures
-                    .push(format!("{}: {error}", log_path.display()));
+                    .push(format!("{}: {error}", log_path.display())),
             }
         }
 
         for target in targets.iter_mut().filter(|target| target.covered) {
+            if cancelled() {
+                break;
+            }
             target.casts.sort_by_key(|cast| cast.timestamp_ms);
             let Value::Object(object) = &mut target.value else {
                 continue;
@@ -1488,17 +1508,23 @@ fn collect_bloodlust_casts(
     path: &Path,
     context: ParseTimeContext,
     targets: &mut [LegacyEnrichmentTarget],
-) -> io::Result<()> {
+    cancelled: &mut impl FnMut() -> bool,
+) -> io::Result<bool> {
     let naive_context = ParseTimeContext::new(context.year, 0);
     let mut reader = BufReader::new(File::open(path)?);
     let mut line = String::new();
     let mut starts = Vec::new();
     let mut casts = Vec::new();
+    let mut lines = 0usize;
     loop {
+        if lines.is_multiple_of(1024) && cancelled() {
+            return Ok(true);
+        }
         line.clear();
         if reader.read_line(&mut line)? == 0 {
             break;
         }
+        lines += 1;
         if !line.contains("CHALLENGE_MODE_START") && !line.contains("SPELL_CAST_SUCCESS") {
             continue;
         }
@@ -1519,7 +1545,7 @@ fn collect_bloodlust_casts(
         }
     }
     let Some(last_naive_ms) = last_log_timestamp(path, naive_context)? else {
-        return Ok(());
+        return Ok(false);
     };
 
     for target in targets.iter_mut().filter(|target| !target.covered) {
@@ -1577,7 +1603,7 @@ fn collect_bloodlust_casts(
             }
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn rounded_timezone_offset(delta_ms: i64, expected_offset_minutes: i32) -> Option<i64> {
@@ -1893,6 +1919,70 @@ mod tests {
         assert_eq!(marker.start_ms(), 37_000);
         assert_eq!(marker.end_ms(), Some(77_000));
         assert_eq!(marker.label(), Some("Fury of the Aspects"));
+    }
+
+    #[test]
+    fn legacy_enrichment_checks_cancellation_while_streaming_historical_logs() {
+        let tree = TempTree::new("bloodlust-cancel");
+        let logs = tree.root.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let sidecar = tree.write(
+            "run.json",
+            r#"{"category":"Mythic+","duration":120,"start":1784396963000}"#,
+        );
+        tree.write("run.mp4", "media");
+        fs::write(logs.join("WoWCombatLog.txt"), "irrelevant\n".repeat(2048)).unwrap();
+
+        let mut checks = 0;
+        let report = tree.storage().enrich_legacy_bloodlust_cancellable(
+            std::slice::from_ref(&logs),
+            ParseTimeContext::new(2026, 120),
+            || {
+                checks += 1;
+                checks >= 3
+            },
+        );
+
+        assert_eq!(report.enriched, 0);
+        assert_eq!(checks, 3);
+        let value: Value = serde_json::from_str(&fs::read_to_string(sidecar).unwrap()).unwrap();
+        assert!(value.get("bloodlustTimeline").is_none());
+    }
+
+    #[test]
+    fn legacy_enrichment_cancellation_prevents_persisting_covered_targets() {
+        let tree = TempTree::new("bloodlust-cancel-covered");
+        let logs = tree.root.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let sidecar = tree.write(
+            "run.json",
+            r#"{"category":"Mythic+","duration":120,"start":1784396963000}"#,
+        );
+        tree.write("run.mp4", "media");
+        fs::write(
+            logs.join("WoWCombatLog.txt"),
+            concat!(
+                "7/18/2026 19:49:23.0000  CHALLENGE_MODE_START,\"Dungeon\",2526,402,22,[]\n",
+                "7/18/2026 19:50:00.0000  SPELL_CAST_SUCCESS,Player-1-A,\"Evoker-Realm\",0x512,0x0,0000000000000000,nil,0x80000000,0x80000000,390386,\"Fury of the Aspects\",0x40\n",
+                "7/18/2026 19:51:24.0000  CHALLENGE_MODE_END,2526,1,3,120000,0,0\n",
+            ),
+        )
+        .unwrap();
+
+        let mut checks = 0;
+        let report = tree.storage().enrich_legacy_bloodlust_cancellable(
+            std::slice::from_ref(&logs),
+            ParseTimeContext::new(2026, 120),
+            || {
+                checks += 1;
+                checks >= 3
+            },
+        );
+
+        assert_eq!(checks, 3, "cancel after the log has covered the target");
+        assert_eq!(report.enriched, 0);
+        let value: Value = serde_json::from_str(&fs::read_to_string(sidecar).unwrap()).unwrap();
+        assert!(value.get("bloodlustTimeline").is_none());
     }
 
     #[test]

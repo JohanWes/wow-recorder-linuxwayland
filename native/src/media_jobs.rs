@@ -97,6 +97,9 @@ impl MediaJob {
 }
 
 pub enum MediaControl {
+    /// Stop optional startup maintenance so recording finalization can use the
+    /// sole worker. Ignored once a real media job is running.
+    CancelMaintenance,
     Shutdown {
         pending_finalizations: Vec<MediaJob>,
     },
@@ -174,20 +177,18 @@ impl MediaWorker {
             return;
         }
         match self.control.try_recv() {
-            Ok(control) => self.begin_shutdown(control),
+            Ok(MediaControl::Shutdown {
+                pending_finalizations,
+            }) => self.begin_shutdown(pending_finalizations),
+            Ok(MediaControl::CancelMaintenance) => {}
             Err(TryRecvError::Disconnected) => {
-                self.begin_shutdown(MediaControl::Shutdown {
-                    pending_finalizations: Vec::new(),
-                });
+                self.begin_shutdown(Vec::new());
             }
             Err(TryRecvError::Empty) => {}
         }
     }
 
-    fn begin_shutdown(&mut self, control: MediaControl) {
-        let MediaControl::Shutdown {
-            pending_finalizations,
-        } = control;
+    fn begin_shutdown(&mut self, pending_finalizations: Vec<MediaJob>) {
         if self.shutdown_at.is_none() {
             self.shutdown_at = Some(Instant::now());
             self.shutdown_finalizations.extend(pending_finalizations);
@@ -204,9 +205,36 @@ impl MediaWorker {
                 retail_log_dirs,
                 context,
             } => {
-                let report = self
-                    .storage
-                    .enrich_legacy_bloodlust(&retail_log_dirs, context);
+                let control = &self.control;
+                let mut shutdown_finalizations = None;
+                let mut cancellation_observed = false;
+                let report = self.storage.enrich_legacy_bloodlust_cancellable(
+                    &retail_log_dirs,
+                    context,
+                    || {
+                        if cancellation_observed {
+                            return true;
+                        }
+                        cancellation_observed = match control.try_recv() {
+                            Ok(MediaControl::CancelMaintenance) => true,
+                            Ok(MediaControl::Shutdown {
+                                pending_finalizations,
+                            }) => {
+                                shutdown_finalizations = Some(pending_finalizations);
+                                true
+                            }
+                            Err(TryRecvError::Disconnected) => {
+                                shutdown_finalizations = Some(Vec::new());
+                                true
+                            }
+                            Err(TryRecvError::Empty) => false,
+                        };
+                        cancellation_observed
+                    },
+                );
+                if let Some(pending) = shutdown_finalizations {
+                    self.begin_shutdown(pending);
+                }
                 self.emit(MediaEvent::TimelineEnriched {
                     enriched: report.enriched,
                     failures: report.failures,
@@ -595,8 +623,10 @@ impl MediaWorker {
                 std::thread::sleep(self.config.poll_interval);
             } else {
                 match self.control.recv_timeout(self.config.poll_interval) {
-                    Ok(control) => {
-                        self.begin_shutdown(control);
+                    Ok(MediaControl::Shutdown {
+                        pending_finalizations,
+                    }) => {
+                        self.begin_shutdown(pending_finalizations);
                         // Automatic finalization may finish inside the grace
                         // period; user jobs are cancelled immediately. The
                         // deadline is set once: a disconnected control channel
@@ -606,10 +636,9 @@ impl MediaWorker {
                             _ => Instant::now(),
                         });
                     }
+                    Ok(MediaControl::CancelMaintenance) => {}
                     Err(RecvTimeoutError::Disconnected) => {
-                        self.begin_shutdown(MediaControl::Shutdown {
-                            pending_finalizations: Vec::new(),
-                        });
+                        self.begin_shutdown(Vec::new());
                         interrupt_at = Some(match kind {
                             WorkKind::Finalize => Instant::now() + self.config.finalize_grace,
                             _ => Instant::now(),
@@ -1570,6 +1599,55 @@ mod tests {
                 has_content: true,
             },
         }
+    }
+
+    #[test]
+    fn shutdown_cancels_maintenance_and_preserves_carried_finalization() {
+        let harness = Harness::new("maintenance-shutdown");
+        let logs = harness.root.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        fs::write(harness.library().join("legacy.mp4"), b"media").unwrap();
+        fs::write(
+            harness.library().join("legacy.json"),
+            r#"{"category":"Mythic+","duration":120,"start":1784396963000}"#,
+        )
+        .unwrap();
+        fs::write(logs.join("WoWCombatLog.txt"), "irrelevant\n".repeat(2048)).unwrap();
+
+        let (_jobs, jobs_rx) = std::sync::mpsc::channel();
+        let (control, control_rx) = sync_channel(1);
+        let (events_tx, events) = std::sync::mpsc::channel();
+        let storage = Storage::new(harness.library(), harness.root.join("capture"));
+        let mut worker = MediaWorker::new(
+            MediaConfig {
+                ffmpeg: fake_ffmpeg(),
+                utc_offset_minutes: 120,
+                poll_interval: Duration::from_millis(20),
+                finalize_grace: Duration::from_secs(5),
+                sigint_grace: Duration::from_millis(400),
+            },
+            storage,
+            jobs_rx,
+            control_rx,
+            events_tx,
+        );
+        control
+            .send(MediaControl::Shutdown {
+                pending_finalizations: vec![finalize_job(&harness, true)],
+            })
+            .unwrap();
+
+        worker.run_job(MediaJob::EnrichLegacyBloodlust {
+            retail_log_dirs: vec![logs],
+            context: ParseTimeContext::new(2026, 120),
+        });
+
+        assert!(worker.shutdown_at.is_some());
+        assert_eq!(worker.shutdown_finalizations.len(), 1);
+        assert!(matches!(
+            events.try_recv(),
+            Ok(MediaEvent::TimelineEnriched { enriched: 0, .. })
+        ));
     }
 
     #[test]
