@@ -427,12 +427,6 @@ impl Config {
                 "Minimum raid duration cannot exceed 10000 seconds.",
             ));
         }
-        if self.activities.min_keystone_level < 2 {
-            problems.push(ValidationProblem::new(
-                "activities.min_keystone_level",
-                "Minimum keystone level must be at least 2.",
-            ));
-        }
         if self.activities.raid_overrun_seconds > 60 {
             problems.push(ValidationProblem::new(
                 "activities.raid_overrun_seconds",
@@ -790,7 +784,7 @@ fn import_legacy(values: &Map<String, Value>) -> LegacyImport {
             record_solo_shuffle: reader.boolean("recordSoloShuffle", true),
             record_battlegrounds: reader.boolean("recordBattlegrounds", true),
             record_challenge_modes: reader.boolean("recordChallengeModes", true),
-            min_keystone_level: reader.integer("minKeystoneLevel", 2, Some(2), None) as u32,
+            min_keystone_level: reader.integer("minKeystoneLevel", 2, Some(0), None) as u32,
             min_raid_difficulty: reader.raid_difficulty("minRaidDifficulty"),
             min_raid_duration_seconds: reader.integer(
                 "minEncounterDuration",
@@ -1230,11 +1224,6 @@ mod tests {
                 Box::new(|config| config.activities.min_raid_duration_seconds = 10_001),
             ),
             (
-                "keystone level",
-                "activities.min_keystone_level",
-                Box::new(|config| config.activities.min_keystone_level = 1),
-            ),
-            (
                 "raid overrun",
                 "activities.raid_overrun_seconds",
                 Box::new(|config| config.activities.raid_overrun_seconds = 61),
@@ -1278,7 +1267,6 @@ mod tests {
         config.capture.extra_lead_in_seconds = 31;
         config.capture.audio_output.clear();
         config.activities.min_raid_duration_seconds = 10_001;
-        config.activities.min_keystone_level = 1;
         config.activities.raid_overrun_seconds = 61;
         config.activities.dungeon_overrun_seconds = 61;
         config.flavors.retail = FlavorConfig {
@@ -1302,7 +1290,6 @@ mod tests {
                 "capture.extra_lead_in_seconds",
                 "capture.audio_output",
                 "activities.min_raid_duration_seconds",
-                "activities.min_keystone_level",
                 "activities.raid_overrun_seconds",
                 "activities.dungeon_overrun_seconds",
                 "storage.recording_dir",
@@ -1429,6 +1416,50 @@ mod tests {
             StorageLimit::Gib(NonZeroU64::new(50).expect("50 is nonzero"))
         );
         assert_eq!(rejected.warnings[0].key, "maxStorage");
+    }
+
+    #[test]
+    fn legacy_keystone_level_bounds_are_mapped() {
+        for level in [0, 1] {
+            let value: Value = serde_json::from_value(serde_json::json!({
+                "minKeystoneLevel": level
+            }))
+            .expect("build valid keystone level");
+            let imported = import_legacy(value.as_object().expect("legacy object"));
+
+            assert_eq!(imported.config.activities.min_keystone_level, level);
+            assert!(imported.warnings.is_empty());
+            assert!(
+                !imported
+                    .config
+                    .validate()
+                    .iter()
+                    .any(|problem| problem.field == "activities.min_keystone_level")
+            );
+
+            let encoded = serde_json::to_string(&imported.config).expect("serialize native config");
+            let decoded: Config =
+                serde_json::from_str(&encoded).expect("deserialize native config");
+            assert_eq!(
+                decoded.activities.min_keystone_level,
+                imported.config.activities.min_keystone_level
+            );
+        }
+
+        let value: Value = serde_json::from_value(serde_json::json!({
+            "minKeystoneLevel": -1
+        }))
+        .expect("build negative keystone level");
+        let imported = import_legacy(value.as_object().expect("legacy object"));
+        assert_eq!(imported.config.activities.min_keystone_level, 2);
+        assert_eq!(
+            imported.warnings,
+            [ImportWarning {
+                key: "minKeystoneLevel".to_owned(),
+                message: "Value was outside its supported range; used the legacy default."
+                    .to_owned(),
+            }]
+        );
     }
 
     #[test]
