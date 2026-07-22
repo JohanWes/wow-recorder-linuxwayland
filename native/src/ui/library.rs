@@ -86,7 +86,6 @@ struct RowModel {
     result: String,
     date_ms: i64,
     duration_ms: u64,
-    viewpoints: usize,
     // Family-specific display fields; only the family's columns read them.
     encounter: String,
     place: String,
@@ -274,7 +273,6 @@ fn build_rows(snapshot: &AppSnapshot, category: &Category) -> Vec<Rc<RowModel>> 
                 result: result_label(primary, family),
                 date_ms: primary.start_unix_ms,
                 duration_ms: primary.duration_ms,
-                viewpoints: 1 + correlation.local_pov_ids.len(),
                 encounter,
                 place,
                 pull,
@@ -1079,7 +1077,6 @@ impl Inner {
                 ));
                 columns.push(self.duration_column());
                 columns.push(self.date_column());
-                columns.push(self.viewpoints_column());
             }
             Family::Dungeon => {
                 columns.push(text_column(
@@ -1103,7 +1100,6 @@ impl Inner {
                 ));
                 columns.push(self.duration_column());
                 columns.push(self.date_column());
-                columns.push(self.viewpoints_column());
             }
             Family::Pvp => {
                 columns.push(text_column(
@@ -1115,7 +1111,6 @@ impl Inner {
                 columns.push(result_column());
                 columns.push(self.duration_column());
                 columns.push(self.date_column());
-                columns.push(self.viewpoints_column());
             }
             Family::Clip => {
                 columns.push(text_column(
@@ -1132,7 +1127,6 @@ impl Inner {
                 ));
                 columns.push(self.duration_column());
                 columns.push(self.date_column());
-                columns.push(self.viewpoints_column());
             }
             Family::Manual => {
                 columns.push(text_column(
@@ -1163,15 +1157,6 @@ impl Inner {
             false,
             |r| format_date(r.date_ms),
             sort_by(|r| r.date_ms),
-        )
-    }
-
-    fn viewpoints_column(&self) -> gtk4::ColumnViewColumn {
-        text_column(
-            "Viewpoints",
-            false,
-            |r| r.viewpoints.to_string(),
-            sort_by(|r| r.viewpoints),
         )
     }
 
@@ -1420,7 +1405,8 @@ fn rows_signature(rows: &[Rc<RowModel>]) -> u64 {
         row.protected.hash(&mut hasher);
         row.all_protected.hash(&mut hasher);
         row.tag.hash(&mut hasher);
-        row.viewpoints.hash(&mut hasher);
+        // Correlated-POV changes still refresh the player's viewpoint selector.
+        row.correlated_ids.len().hash(&mut hasher);
         row.date_ms.hash(&mut hasher);
     }
     hasher.finish()

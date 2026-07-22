@@ -174,11 +174,45 @@ impl Sidebar {
             });
         }
 
+        let update_button = gtk4::Button::from_icon_name("view-refresh-symbolic");
+        update_button.add_css_class("flat");
+        update_button.set_tooltip_text(Some("Check for updates"));
+        update_button.update_property(&[gtk4::accessible::Property::Label("Check for updates")]);
+        {
+            let sink = Rc::clone(&sink);
+            update_button.connect_clicked(move |_| {
+                sink(ShellAction::CheckForUpdates);
+            });
+        }
+        let test_button = gtk4::Button::from_icon_name("applications-science-symbolic");
+        test_button.add_css_class("flat");
+        test_button.set_tooltip_text(Some("Test recording"));
+        test_button.update_property(&[gtk4::accessible::Property::Label("Test recording")]);
+        {
+            let sink = Rc::clone(&sink);
+            test_button.connect_clicked(move |_| {
+                sink(ShellAction::TestRecording);
+            });
+        }
+        let version = gtk4::Label::new(Some(concat!("Version ", env!("CARGO_PKG_VERSION"))));
+        version.add_css_class("dim-label");
+        version.add_css_class("caption");
+        version.set_xalign(0.0);
+        version.set_hexpand(true);
+        let footer = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        footer.set_margin_start(12);
+        footer.set_margin_end(6);
+        footer.set_margin_bottom(6);
+        footer.append(&version);
+        footer.append(&test_button);
+        footer.append(&update_button);
+
         let separator = gtk4::Separator::new(gtk4::Orientation::Horizontal);
         separator.set_margin_start(6);
         separator.set_margin_end(6);
         widget.append(&separator);
         widget.append(&settings_button);
+        widget.append(&footer);
 
         Self {
             widget,

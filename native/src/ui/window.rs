@@ -20,7 +20,7 @@ use warcraft_recorder::domain::RecoveryAction;
 use warcraft_recorder::domain::RecorderStatus;
 
 use super::library::{Library, Selection};
-use super::operational_actions::{ManualBar, present_test_dialog};
+use super::operational_actions::{ManualBar, present_test_dialog, present_update_dialog};
 use super::player::Player;
 use super::settings::Settings;
 use super::sidebar::Sidebar;
@@ -456,6 +456,10 @@ fn make_sink(
             }
             ShellAction::About => {
                 present_about(&window, &application);
+                return true;
+            }
+            ShellAction::CheckForUpdates => {
+                present_update_dialog(window.upcast_ref());
                 return true;
             }
             ShellAction::Quit => Command::Shutdown,

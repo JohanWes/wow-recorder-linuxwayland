@@ -601,6 +601,9 @@ pub struct Settings {
     pub dialog: adw::Dialog,
     sink: ActionSink,
     draft: Rc<RefCell<Config>>,
+    /// The last config known applied; the discard warning compares the draft
+    /// against it.
+    baseline: Rc<RefCell<Config>>,
     /// Draft sent with `SaveConfig` and the wall-clock send time, until the
     /// snapshot confirms disk and runtime match.
     pending: Rc<RefCell<Option<(Config, i64)>>>,
@@ -861,12 +864,17 @@ impl Settings {
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(&switcher));
         header.set_show_start_title_buttons(false);
-        header.set_show_end_title_buttons(false);
+        // The X closes the dialog; a discard warning guards unapplied edits.
+        header.set_show_end_title_buttons(true);
         let cancel = gtk4::Button::with_label("Cancel");
         let apply = gtk4::Button::with_label("Apply");
         apply.add_css_class("suggested-action");
-        header.pack_start(&cancel);
-        header.pack_end(&apply);
+        let action_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+        action_bar.set_halign(gtk4::Align::Center);
+        action_bar.set_margin_top(8);
+        action_bar.set_margin_bottom(8);
+        action_bar.append(&cancel);
+        action_bar.append(&apply);
 
         let feedback = gtk4::Label::new(None);
         feedback.set_wrap(true);
@@ -882,6 +890,7 @@ impl Settings {
         body.append(&stack);
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header);
+        toolbar_view.add_bottom_bar(&action_bar);
         toolbar_view.set_content(Some(&body));
 
         let dialog = adw::Dialog::new();
@@ -890,10 +899,36 @@ impl Settings {
         dialog.set_content_height(680);
         dialog.set_child(Some(&toolbar_view));
 
+        // Closing (X, Cancel, or Escape) with unapplied edits warns first.
+        let baseline = Rc::new(RefCell::new(snapshot.config.clone()));
+        dialog.set_can_close(false);
+        {
+            let draft = Rc::clone(&draft);
+            let baseline = Rc::clone(&baseline);
+            dialog.connect_close_attempt(move |dialog| {
+                if *draft.borrow() == *baseline.borrow() {
+                    dialog.force_close();
+                    return;
+                }
+                let warning = adw::AlertDialog::new(
+                    Some("Discard unapplied settings?"),
+                    Some("Changes you made have not been applied and will be lost."),
+                );
+                warning.add_responses(&[("keep", "Keep editing"), ("discard", "Discard")]);
+                warning.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+                warning.set_default_response(Some("keep"));
+                warning.set_close_response("keep");
+                let closing = dialog.clone();
+                warning.connect_response(Some("discard"), move |_, _| closing.force_close());
+                warning.present(Some(dialog));
+            });
+        }
+
         let settings = Rc::new(Self {
             dialog: dialog.clone(),
             sink,
             draft: Rc::clone(&draft),
+            baseline,
             pending: Rc::new(RefCell::new(None)),
             registry,
             gated: RefCell::new(gated),
@@ -958,6 +993,9 @@ impl Settings {
 
     fn on_apply(&self) {
         self.clear_marks();
+        // Keep the draft equal to what a confirmed save will report back, so
+        // the discard warning stays quiet after Apply.
+        self.draft.borrow_mut().first_time_setup_complete = true;
         match apply_outcome(&self.draft.borrow(), None) {
             ApplyOutcome::Blocked(_) => {}
             ApplyOutcome::Invalid(problems) => self.show_problems(&problems),
@@ -1069,6 +1107,7 @@ impl Settings {
             && snapshot.config == sent
         {
             *self.pending.borrow_mut() = None;
+            *self.baseline.borrow_mut() = sent;
             let runtime_problems: Vec<String> = snapshot
                 .problems
                 .iter()

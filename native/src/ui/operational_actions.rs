@@ -230,6 +230,125 @@ pub fn present_test_dialog(parent: &gtk4::Widget, sink: ActionSink, ready: bool)
     dialog.present(Some(parent));
 }
 
+/// The published install script: adds the signed Flatpak remote and installs
+/// or updates the app. The same script drives the AppImage→Flatpak migration.
+const UPDATE_SCRIPT_URL: &str =
+    "https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/install.sh";
+const APP_ID: &str = "io.github.JohanWes.WarcraftRecorder";
+
+fn flatpak_available() -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|path| path.join("flatpak").is_file())
+    })
+}
+
+fn info_dialog(parent: &gtk4::Widget, heading: &str, body: &str) {
+    let dialog = adw::AlertDialog::new(Some(heading), Some(body));
+    dialog.add_responses(&[("close", "Close")]);
+    dialog.set_close_response("close");
+    dialog.present(Some(parent));
+}
+
+/// "Check for updates": inside Flatpak, point at the software center; without
+/// Flatpak, warn and give the manual path; otherwise confirm and run the
+/// install script off the GTK thread.
+pub fn present_update_dialog(parent: &gtk4::Widget) {
+    if std::path::Path::new("/.flatpak-info").exists() {
+        info_dialog(
+            parent,
+            "Updates are managed by Flatpak",
+            &format!(
+                "This installation updates through your software center or with:\n\n\
+                 flatpak update --user {APP_ID}"
+            ),
+        );
+        return;
+    }
+    if !flatpak_available() {
+        info_dialog(
+            parent,
+            "Flatpak is not installed",
+            "Updates install the native Flatpak build, which needs Flatpak. Install it with \
+             your distribution's package manager (for example 'sudo pacman -S flatpak' or \
+             'sudo apt install flatpak'), then check for updates again.",
+        );
+        return;
+    }
+    let dialog = adw::AlertDialog::new(
+        Some("Check for updates"),
+        Some(
+            "This runs the Warcraft Recorder install script: it adds the project's signed \
+             Flatpak remote and installs or updates the latest release. This installation is \
+             left in place for rollback.",
+        ),
+    );
+    dialog.add_responses(&[("cancel", "Cancel"), ("update", "Update")]);
+    dialog.set_response_appearance("update", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("update"));
+    dialog.set_close_response("cancel");
+    let parent = parent.clone();
+    let dialog_parent = parent.clone();
+    dialog.connect_response(Some("update"), move |_, _| run_update(&parent));
+    dialog.present(Some(&dialog_parent));
+}
+
+/// Runs the install script on GIO's blocking pool: a copy next to the
+/// executable if present (development), otherwise the published one.
+fn run_update(parent: &gtk4::Widget) {
+    let parent = parent.clone();
+    gtk4::glib::spawn_future_local(async move {
+        let output = gtk4::gio::spawn_blocking(|| {
+            let local_script = std::env::current_exe()
+                .ok()
+                .and_then(|exe| Some(exe.parent()?.join("install.sh")))
+                .filter(|script| script.is_file());
+            let mut command = std::process::Command::new("bash");
+            match local_script {
+                Some(script) => {
+                    command.arg(script);
+                }
+                None => {
+                    command
+                        .arg("-c")
+                        .arg(format!("curl -fsSL {UPDATE_SCRIPT_URL} | bash"));
+                }
+            }
+            command.stdin(std::process::Stdio::null()).output()
+        })
+        .await
+        .unwrap_or_else(|_| Err(std::io::Error::other("the update task crashed")));
+        match output {
+            Ok(output) if output.status.success() => info_dialog(
+                &parent,
+                "Update finished",
+                &format!("Launch the updated app with:\n\nflatpak run {APP_ID}"),
+            ),
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let tail: Vec<&str> = stderr.lines().rev().take(8).collect();
+                let tail: Vec<&str> = tail.into_iter().rev().collect();
+                info_dialog(
+                    &parent,
+                    "The update failed",
+                    &format!(
+                        "The install script did not finish.\n\n{}",
+                        if tail.is_empty() {
+                            "No error output was produced.".to_owned()
+                        } else {
+                            tail.join("\n")
+                        }
+                    ),
+                );
+            }
+            Err(error) => info_dialog(
+                &parent,
+                "The update could not start",
+                &format!("The install script could not be run: {error}"),
+            ),
+        }
+    });
+}
+
 /// The capture-reselection explanation: the platform portal prompt follows,
 /// and cancelling it keeps the previous usable selection (WR-006 contract).
 pub fn present_reselect_dialog(parent: &gtk4::Widget, sink: ActionSink) {

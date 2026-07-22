@@ -66,10 +66,10 @@ Required category columns, matching the current table's useful information:
 
 | Category family | Columns after selection/protection |
 |---|---|
-| Raid | Details, Encounter, Result, Pull, Difficulty, Duration, Date, Viewpoints |
-| Mythic+ | Details, Dungeon, Result, Level, Affixes, Duration, Date, Viewpoints |
-| Arena/Battleground/Solo Shuffle | Details, Map, Result, Duration, Date, Viewpoints |
-| Clips | Details, Type, Source activity, Duration, Date, Viewpoints |
+| Raid | Details, Encounter, Result, Pull, Difficulty, Duration, Date |
+| Mythic+ | Details, Dungeon, Result, Level, Affixes, Duration, Date |
+| Arena/Battleground/Solo Shuffle | Details, Map, Result, Duration, Date |
+| Clips | Details, Type, Source activity, Duration, Date |
 | Manual/unknown | Details, Type, Duration, Date |
 
 WR-010 may omit a value when legacy metadata lacks it; it may not omit the column or fabricate a value. Clicking a sortable header cycles ascending/descending with a visible indicator. Default is newest first.
