@@ -23,7 +23,7 @@
     <file alias="wr-category-clips-symbolic.svg">assets/icons/wr-category-clips-symbolic.svg</file>
   </gresource>
   <gresource prefix="/io/github/JohanWes/WarcraftRecorder/icons/scalable/apps">
-    <file alias="warcraft-recorder.svg">icons/io.github.JohanWes.WarcraftRecorder.Devel.svg</file>
+    <file alias="warcraft-recorder.svg">icons/io.github.JohanWes.WarcraftRecorder.svg</file>
   </gresource>
   <gresource prefix="/io/github/JohanWes/WarcraftRecorder/licenses">
     <file alias="lucide-ISC.txt">assets/icons/LUCIDE-LICENSE</file>

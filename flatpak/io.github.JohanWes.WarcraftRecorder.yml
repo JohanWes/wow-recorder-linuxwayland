@@ -1,4 +1,4 @@
-app-id: io.github.JohanWes.WarcraftRecorder.Devel
+app-id: io.github.JohanWes.WarcraftRecorder
 runtime: org.gnome.Platform
 runtime-version: '50'
 sdk: org.gnome.Sdk
@@ -8,6 +8,9 @@ command: warcraft-recorder
 separate-locales: false
 
 finish-args:
+  # GTK/GStreamer create many threads; two glibc arenas avoid retaining a
+  # separate heap arena per thread after the 2,000-sidecar startup scan.
+  - --env=MALLOC_ARENA_MAX=2
   # Native Wayland display only; there is deliberately no X11 fallback.
   - --socket=wayland
   # Playback and recording audio use the sandbox PulseAudio/PipeWire bridge.
@@ -27,6 +30,11 @@ cleanup:
   - /share/doc
   - /share/man
   - /share/locale
+
+cleanup-commands:
+  # Flatpak-builder's default strip pass stages symbols in /app/lib/debug;
+  # the stable channel does not publish a matching debug extension.
+  - rm -rf /app/lib/debug
 
 modules:
   - modules/ffmpeg.yml
@@ -72,6 +80,9 @@ modules:
     post-install:
       - install -Dm644 ../COPYING-LGPL /app/share/licenses/$FLATPAK_ID/Clapper-COPYING-LGPL
       - install -Dm644 ../COPYING-GPL /app/share/licenses/$FLATPAK_ID/Clapper-COPYING-GPL
+      # The native rewrite is GPL-3.0-or-later. The repository-root LICENSE is
+      # the untouched GPLv2 text for the deleted legacy app, so use Clapper's
+      # canonical GPLv3 text rather than mislabelling the legacy file.
       - install -Dm644 ../COPYING-GPL /app/share/licenses/$FLATPAK_ID/WarcraftRecorder-GPL-3.0-or-later
     sources:
       - type: archive
@@ -85,13 +96,14 @@ modules:
       env:
         CARGO_HOME: /run/build/warcraft-recorder/cargo
     build-commands:
-      - cargo --offline build --manifest-path native/Cargo.toml --release --features development
+      - cargo --offline fmt --manifest-path native/Cargo.toml --check
+      - cargo --offline clippy --manifest-path native/Cargo.toml --all-targets --all-features -- -D warnings
+      - cargo --offline test --manifest-path native/Cargo.toml --all-targets
+      - cargo --offline build --manifest-path native/Cargo.toml --release
       - install -Dm755 native/target/release/warcraft-recorder /app/bin/warcraft-recorder
-      - install -Dm644 data/io.github.JohanWes.WarcraftRecorder.Devel.desktop /app/share/applications/io.github.JohanWes.WarcraftRecorder.Devel.desktop
-      - install -Dm644 data/io.github.JohanWes.WarcraftRecorder.Devel.metainfo.xml /app/share/metainfo/io.github.JohanWes.WarcraftRecorder.Devel.metainfo.xml
-      - install -Dm644 data/icons/io.github.JohanWes.WarcraftRecorder.Devel.svg /app/share/icons/hicolor/scalable/apps/io.github.JohanWes.WarcraftRecorder.Devel.svg
-      - install -Dm644 data/io.github.JohanWes.WarcraftRecorder.Devel.gschema.xml /app/share/glib-2.0/schemas/io.github.JohanWes.WarcraftRecorder.Devel.gschema.xml
-      - glib-compile-schemas /app/share/glib-2.0/schemas
+      - install -Dm644 data/io.github.JohanWes.WarcraftRecorder.desktop /app/share/applications/io.github.JohanWes.WarcraftRecorder.desktop
+      - install -Dm644 data/io.github.JohanWes.WarcraftRecorder.metainfo.xml /app/share/metainfo/io.github.JohanWes.WarcraftRecorder.metainfo.xml
+      - install -Dm644 data/icons/io.github.JohanWes.WarcraftRecorder.svg /app/share/icons/hicolor/scalable/apps/io.github.JohanWes.WarcraftRecorder.svg
     sources:
       - type: dir
         path: ../native
@@ -99,4 +111,7 @@ modules:
       - type: dir
         path: ../data
         dest: data
+      - type: dir
+        path: ../tests/native
+        dest: tests/native
       - cargo-sources.json

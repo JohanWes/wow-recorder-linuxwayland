@@ -1,5 +1,12 @@
 # WR-007: storage, legacy library, and media-job evidence
 
+WR-015 addendum (2026-07-22): the deterministic performance corpus uses
+zero-byte media placeholders. Scanning retains them with runtime-only
+`media.has_content = false`; finalization still requires non-empty real media,
+and the player refuses unusable media. Mutation/deletion now accepts only
+direct children of the intentionally flat recording directory and rejects
+leaf or intermediate-directory symlink escapes. Regression tests cover both.
+
 ## Environment
 
 - Commit under test: b5879b76be5812e9377048fa97a236ff6c979b80 plus the WR-007 work in this tree.

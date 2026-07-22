@@ -215,8 +215,8 @@ fn write_config(root: &Path, library: &Path, capture_root: &Path, log_dir: &Path
 
 fn empty_snapshot() -> AppSnapshot {
     AppSnapshot {
-        entries: Arc::from(Vec::new()),
-        correlations: Arc::from(Vec::new()),
+        entries: Arc::new(Vec::new()),
+        correlations: Arc::new(Vec::new()),
         category_counts: Vec::new(),
         status: RecorderStatus::SetupRequired,
         active: None,
@@ -520,8 +520,8 @@ fn finalization_precedes_queued_user_jobs() {
         .collect();
     assert_eq!(raids.len(), 2);
     assert!(harness.latest.correlations.iter().any(|correlation| {
-        (correlation.primary.id == raids[0].id && correlation.local_pov_ids.contains(&raids[1].id))
-            || (correlation.primary.id == raids[1].id
+        (correlation.primary_id == raids[0].id && correlation.local_pov_ids.contains(&raids[1].id))
+            || (correlation.primary_id == raids[1].id
                 && correlation.local_pov_ids.contains(&raids[0].id))
     }));
     let correlated_id = harness
@@ -529,11 +529,10 @@ fn finalization_precedes_queued_user_jobs() {
         .correlations
         .iter()
         .find(|correlation| {
-            correlation.primary.id == raids[0].id || correlation.primary.id == raids[1].id
+            correlation.primary_id == raids[0].id || correlation.primary_id == raids[1].id
         })
         .expect("correlated raid activity")
-        .primary
-        .id
+        .primary_id
         .clone();
     harness.send(Command::CreateKillVideo {
         correlated_id,

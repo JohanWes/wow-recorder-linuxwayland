@@ -91,7 +91,7 @@ pub fn advanced_logging_warnings(snapshot: &AppSnapshot) -> Vec<String> {
                 "era" => "Era",
                 other => other,
             };
-            format!("Advanced combat logging is disabled for {flavor}. Enable it in-game (System → Network) or some stats will be missing.")
+            format!("Advanced combat logging is off for {flavor}.")
         })
         .collect()
 }
@@ -265,6 +265,7 @@ impl StatusCard {
     pub fn new(sink: ActionSink) -> Self {
         let widget = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
         widget.add_css_class("card");
+        widget.add_css_class("wr-status-card");
         widget.set_margin_top(12);
         widget.set_margin_bottom(12);
         widget.set_margin_start(12);
@@ -298,6 +299,7 @@ impl StatusCard {
         detail.set_xalign(0.0);
         detail.set_wrap(true);
         detail.add_css_class("dim-label");
+        detail.add_css_class("caption");
 
         let force_end = gtk4::Button::with_label("Force end");
         force_end.add_css_class("destructive-action");
@@ -401,12 +403,16 @@ impl StatusCard {
         }
         for warning in advanced_logging_warnings(snapshot) {
             let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+            row.set_tooltip_text(Some(
+                "Enable advanced combat logging in-game (System → Network) or some stats will be missing.",
+            ));
             let icon = gtk4::Image::from_icon_name("dialog-warning-symbolic");
-            icon.set_tooltip_text(Some("Advanced combat logging"));
+            icon.add_css_class("warning");
             let label = gtk4::Label::new(Some(&warning));
             label.set_xalign(0.0);
             label.set_wrap(true);
             label.add_css_class("caption");
+            label.add_css_class("dim-label");
             row.append(&icon);
             row.append(&label);
             self.warnings.append(&row);

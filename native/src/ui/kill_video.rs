@@ -250,6 +250,7 @@ pub fn present(
     video.set_size_request(-1, 300);
     let play = gtk4::Button::from_icon_name("media-playback-start-symbolic");
     play.set_tooltip_text(Some("Play/pause preview"));
+    play.update_property(&[gtk4::accessible::Property::Label("Play/pause preview")]);
     {
         let editor = Rc::clone(&editor);
         let playing = Cell::new(false);
@@ -267,6 +268,7 @@ pub fn present(
     let mute = gtk4::ToggleButton::new();
     mute.set_icon_name("audio-volume-muted-symbolic");
     mute.set_tooltip_text(Some("Mute preview"));
+    mute.update_property(&[gtk4::accessible::Property::Label("Mute preview")]);
     {
         let editor = Rc::clone(&editor);
         mute.connect_toggled(move |button| editor.preview.set_muted(button.is_active()));
@@ -463,6 +465,7 @@ impl Editor {
                 let button = gtk4::Button::from_icon_name(icon);
                 button.add_css_class("flat");
                 button.set_tooltip_text(Some(tooltip));
+                button.update_property(&[gtk4::accessible::Property::Label(tooltip)]);
                 let target = position as i32 + delta;
                 button.set_sensitive(target >= 0 && (target as usize) < track.order.len());
                 let editor = Rc::clone(self);
@@ -478,6 +481,7 @@ impl Editor {
             let remove = gtk4::Button::from_icon_name("user-trash-symbolic");
             remove.add_css_class("flat");
             remove.set_tooltip_text(Some("Remove source"));
+            remove.update_property(&[gtk4::accessible::Property::Label("Remove source")]);
             remove.set_sensitive(track.order.len() > 2);
             {
                 let editor = Rc::clone(self);

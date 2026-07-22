@@ -693,6 +693,8 @@ impl Settings {
         audio_group.set_description(Some("Loading audio devices…"));
         let refresh_audio = gtk4::Button::from_icon_name("view-refresh-symbolic");
         refresh_audio.set_tooltip_text(Some("Refresh audio devices"));
+        refresh_audio
+            .update_property(&[gtk4::accessible::Property::Label("Refresh audio devices")]);
         refresh_audio.set_valign(gtk4::Align::Center);
         audio_group.set_header_suffix(Some(&refresh_audio));
 

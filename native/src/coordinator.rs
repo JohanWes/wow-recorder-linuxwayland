@@ -127,8 +127,8 @@ pub struct ActiveRecordingView {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppSnapshot {
-    pub entries: Arc<[LibraryEntry]>,
-    pub correlations: Arc<[CorrelatedActivity]>,
+    pub entries: Arc<Vec<LibraryEntry>>,
+    pub correlations: Arc<Vec<CorrelatedActivity>>,
     pub category_counts: Vec<(Category, usize)>,
     pub status: RecorderStatus,
     pub active: Option<ActiveRecordingView>,
@@ -998,6 +998,7 @@ impl Coordinator {
             width: None,
             height: None,
             codec: Some(self.config.capture.codec),
+            has_content: true,
         }
     }
 
@@ -1107,7 +1108,7 @@ impl Coordinator {
         audio: KillAudio,
     ) {
         let Some(correlation) = self.index.correlations.iter().find(|correlation| {
-            &correlation.primary.id == correlated_id
+            &correlation.primary_id == correlated_id
                 || correlation
                     .local_pov_ids
                     .iter()
@@ -1122,7 +1123,7 @@ impl Coordinator {
         };
         let mut allowed =
             std::collections::HashSet::with_capacity(1 + correlation.local_pov_ids.len());
-        allowed.insert(correlation.primary.id.clone());
+        allowed.insert(correlation.primary_id.clone());
         allowed.extend(correlation.local_pov_ids.iter().cloned());
         let mut segments = Vec::with_capacity(ranges.len());
         for range in ranges {
@@ -1185,7 +1186,10 @@ impl Coordinator {
             };
             match self.storage.update(&entry, change) {
                 Ok(updated) => {
-                    if let Some(slot) = self.index.entries.iter_mut().find(|slot| &slot.id == id) {
+                    if let Some(slot) = Arc::make_mut(&mut self.index.entries)
+                        .iter_mut()
+                        .find(|slot| &slot.id == id)
+                    {
                         *slot = updated;
                     }
                 }
@@ -1213,9 +1217,7 @@ impl Coordinator {
             }
         }
         let result = self.storage.delete(&entries);
-        self.index
-            .entries
-            .retain(|entry| !result.deleted.contains(&entry.id));
+        Arc::make_mut(&mut self.index.entries).retain(|entry| !result.deleted.contains(&entry.id));
         for (id, error) in &result.failures {
             let title = self
                 .entry(id)
@@ -1265,8 +1267,7 @@ impl Coordinator {
             .enforce_limit(self.config.storage.limit, &self.index.entries);
         self.protected_over_limit = result.protected_over_limit;
         if !result.evicted.is_empty() {
-            self.index
-                .entries
+            Arc::make_mut(&mut self.index.entries)
                 .retain(|entry| !result.evicted.contains(&entry.id));
             self.refresh_correlations();
         }
@@ -1284,8 +1285,8 @@ impl Coordinator {
             .iter()
             .map(|entry| entry.id.clone())
             .collect();
-        self.index.correlations.retain(|correlation| {
-            ids.contains(&correlation.primary.id)
+        Arc::make_mut(&mut self.index.correlations).retain(|correlation| {
+            ids.contains(&correlation.primary_id)
                 && correlation.local_pov_ids.iter().all(|id| ids.contains(id))
         });
     }
@@ -1514,8 +1515,8 @@ impl Coordinator {
             overrun_until_ms: active.stop_at_ms,
         });
         Arc::new(AppSnapshot {
-            entries: Arc::from(self.index.entries.clone()),
-            correlations: Arc::from(self.index.correlations.clone()),
+            entries: Arc::clone(&self.index.entries),
+            correlations: Arc::clone(&self.index.correlations),
             category_counts: category_counts(&self.index.entries),
             status: self.status(),
             active,

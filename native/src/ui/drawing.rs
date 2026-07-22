@@ -547,6 +547,7 @@ fn build_toolbar(state: &Rc<State>, area: &gtk4::DrawingArea) -> gtk4::Box {
         initial.3 as f32,
     ));
     color.set_tooltip_text(Some("Stroke color"));
+    color.update_property(&[gtk4::accessible::Property::Label("Stroke color")]);
     {
         let state = Rc::clone(state);
         color.connect_rgba_notify(move |button| {

@@ -1,5 +1,10 @@
 # WR-011 evidence: player, combat timeline, drawing, clips, and viewpoints
 
+WR-015 addendum (2026-07-22): an empty/failed media load disables transport,
+mute/volume, speed, seek/frame shortcuts, drawing, and clip creation while
+preserving Reveal. A previously loaded backend item can no longer receive
+actions after an unusable corpus entry is selected.
+
 Status: **code complete and verified on host** (fmt/clippy/tests/release).
 In-Flatpak manual acceptance with real media follows the same WR-000
 source-traced, owner-executed deferral used by WR-009/WR-010 (see "Known

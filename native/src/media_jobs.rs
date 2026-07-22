@@ -549,6 +549,7 @@ impl MediaWorker {
                 width: Some(width),
                 height: Some(height),
                 codec: Some(Codec::H264),
+                has_content: true,
             },
         };
 
@@ -616,6 +617,9 @@ impl MediaWorker {
 
         let mut command = Command::new(&self.config.ffmpeg);
         command
+            // Stable Flatpak constrains the GTK process allocator arenas for
+            // its RSS gate; media tools must retain their own defaults.
+            .env_remove("MALLOC_ARENA_MAX")
             .arg("-progress")
             .arg(&progress_path)
             .arg("-nostats")
@@ -1309,6 +1313,7 @@ mod tests {
                     width: Some(1920),
                     height: Some(1080),
                     codec: Some(Codec::H264),
+                    has_content: true,
                 },
             }
         }
@@ -1638,6 +1643,7 @@ mod tests {
                 width: None,
                 height: None,
                 codec: Some(Codec::H264),
+                has_content: true,
             },
         }
     }

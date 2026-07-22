@@ -344,6 +344,9 @@ impl Recorder {
             .open(Self::log_path(config))?;
         let mut command = Command::new(&config.gsr_binary);
         command
+            // Stable Flatpak constrains the GTK process allocator arenas for
+            // its RSS gate; the recorder must retain its own defaults.
+            .env_remove("MALLOC_ARENA_MAX")
             .args(build_gsr_args(config))
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone()?))
@@ -488,6 +491,7 @@ impl Recorder {
             .map(|config| config.gsr_binary.clone())
             .unwrap_or_else(|| PathBuf::from("gpu-screen-recorder"));
         let mut child = Command::new(binary)
+            .env_remove("MALLOC_ARENA_MAX")
             .arg("--list-audio-devices")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

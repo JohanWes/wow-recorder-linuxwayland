@@ -1,0 +1,8 @@
+[Flatpak Repo]
+Title=Warcraft Recorder
+Url=https://johanwes.github.io/wow-recorder-linuxwayland/
+Homepage=https://github.com/JohanWes/wow-recorder-linuxwayland
+Comment=Signed native releases of Warcraft Recorder for Linux/Wayland
+Description=Automatically record and review World of Warcraft gameplay locally.
+# The release job replaces this marker with the base64-encoded public key.
+GPGKey=@FLATPAK_GPG_KEY_BASE64@

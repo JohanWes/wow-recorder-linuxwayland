@@ -1,0 +1,129 @@
+name: Warcraft Recorder Flatpak
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/flatpak-release.yml'
+      - 'native/**'
+      - 'flatpak/**'
+      - 'data/**'
+      - 'implementation_docs/reports/wr-014-release.md'
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  APP_ID: io.github.JohanWes.WarcraftRecorder
+  MANIFEST: flatpak/io.github.JohanWes.WarcraftRecorder.yml
+
+jobs:
+  flatpak:
+    name: Candidate Flatpak and native checks
+    if: github.event_name == 'pull_request' || !startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4
+      - name: Build unsigned candidate
+        uses: flatpak/flatpak-github-actions/flatpak-builder@401fe28a8384095fc1531b9d320b292f0ee45adb # v6.7
+        with:
+          manifest-path: ${{ env.MANIFEST }}
+          bundle: warcraft-recorder.flatpak
+          build-dir: build-flatpak
+          repo-dir: repo
+          branch: stable
+          cache-key: flatpak-pr-${{ hashFiles('native/Cargo.lock', 'flatpak/cargo-sources.json', env.MANIFEST) }}
+          upload-artifact: false
+      - name: Add mirrored AppStream screenshot
+        run: |
+          ostree --repo=repo refs --delete \
+            runtime/io.github.JohanWes.WarcraftRecorder.Debug/x86_64/stable || true
+          mkdir -p screenshot-tree
+          cp data/screenshots/*.png screenshot-tree/
+          ostree --repo=repo commit --branch=screenshots/x86_64 \
+            --subject='Warcraft Recorder AppStream screenshots' screenshot-tree
+          flatpak build-update-repo repo
+      - name: Validate release inputs
+        run: |
+          flatpak-builder-lint --exceptions --user-exceptions flatpak/lint-exceptions.json manifest "$MANIFEST"
+          if [[ "$GITHUB_EVENT_NAME" != pull_request ]]; then
+            flatpak-builder-lint --appid "$APP_ID" appstream data/io.github.JohanWes.WarcraftRecorder.metainfo.xml
+          else
+            echo 'AppStream URL validation runs after the screenshot is present on main.'
+          fi
+          flatpak-builder-lint --exceptions --user-exceptions flatpak/lint-exceptions.json repo repo
+      - name: Run sandbox smoke subset
+        run: bash scripts/flatpak-release-smoke.sh repo "$APP_ID"
+      - name: Upload candidate artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: warcraft-recorder-flatpak-candidate
+          path: warcraft-recorder.flatpak
+          if-no-files-found: error
+
+  release:
+    name: Signed release candidate
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4
+      - name: Check tag version
+        run: bash scripts/check-release-version.sh "$GITHUB_REF_NAME"
+      - name: Import signing key
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          test -n "$FLATPAK_GPG_PRIVATE_KEY"
+          printf '%s\n' "$FLATPAK_GPG_PRIVATE_KEY" | gpg --batch --import
+      - name: Build and sign candidate
+        uses: flatpak/flatpak-github-actions/flatpak-builder@401fe28a8384095fc1531b9d320b292f0ee45adb # v6.7
+        with:
+          manifest-path: ${{ env.MANIFEST }}
+          bundle: warcraft-recorder.flatpak
+          build-dir: build-flatpak
+          repo-dir: repo
+          branch: stable
+          gpg-sign: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+          cache-key: flatpak-release-${{ hashFiles('native/Cargo.lock', 'flatpak/cargo-sources.json', env.MANIFEST) }}
+          upload-artifact: false
+      - name: Add and sign mirrored AppStream screenshot
+        env:
+          FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+        run: |
+          ostree --repo=repo refs --delete \
+            runtime/io.github.JohanWes.WarcraftRecorder.Debug/x86_64/stable || true
+          mkdir -p screenshot-tree
+          cp data/screenshots/*.png screenshot-tree/
+          ostree --repo=repo commit --gpg-sign="$FLATPAK_GPG_KEY_ID" \
+            --branch=screenshots/x86_64 \
+            --subject='Warcraft Recorder AppStream screenshots' screenshot-tree
+      - name: Validate signed outputs
+        env:
+          FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+        run: |
+          flatpak-builder-lint --exceptions --user-exceptions flatpak/lint-exceptions.json manifest "$MANIFEST"
+          flatpak-builder-lint --appid "$APP_ID" --exceptions --user-exceptions flatpak/lint-exceptions.json appstream data/io.github.JohanWes.WarcraftRecorder.metainfo.xml
+          flatpak-builder-lint --exceptions --user-exceptions flatpak/lint-exceptions.json repo repo
+          bash scripts/prepare-flatpakrepo.sh repo
+          sha256sum warcraft-recorder.flatpak > warcraft-recorder.flatpak.sha256
+          sha256sum repo/summary repo/index.flatpakrepo >> warcraft-recorder.flatpak.sha256
+      - name: Upload release-candidate artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: warcraft-recorder-flatpak-${{ github.ref_name }}
+          path: |
+            warcraft-recorder.flatpak
+            warcraft-recorder.flatpak.sha256
+            repo
+          if-no-files-found: error

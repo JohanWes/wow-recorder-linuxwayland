@@ -395,6 +395,15 @@ pub struct MediaFacts {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub codec: Option<Codec>,
+    /// Runtime filesystem fact. It is deliberately absent from sidecars: the
+    /// media worker validates real outputs, while WR-015's scan-only corpus
+    /// uses zero-byte placeholders that the player must not try to decode.
+    #[serde(skip, default = "default_media_has_content")]
+    pub has_content: bool,
+}
+
+fn default_media_has_content() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,7 +452,7 @@ impl LibraryEntry {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CorrelatedActivity {
-    pub primary: LibraryEntry,
+    pub primary_id: RecordingId,
     pub local_pov_ids: Vec<RecordingId>,
 }
 
@@ -571,6 +580,7 @@ mod tests {
                 width: Some(1920),
                 height: Some(1080),
                 codec: Some(Codec::H264),
+                has_content: true,
             },
         }
     }

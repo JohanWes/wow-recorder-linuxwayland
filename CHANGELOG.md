@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 ### Changed
+- The native Linux/Wayland release candidate is Flatpak-only. The permanent
+  signed remote is published only after WR-015; existing recordings and legacy
+  configuration remain local and are imported once by the native app.
+- The final AppImage migration release remains usable until stable Flatpak
+  availability is announced. Running it is the rollback path against untouched
+  legacy data.
 ### Added
 - API now provides up to date keystone timers live when computing keystone result, with hardcoded timers as a fallback.
 ### Fixed

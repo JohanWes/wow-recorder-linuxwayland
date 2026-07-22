@@ -506,6 +506,7 @@ mod tests {
                 width: None,
                 height: None,
                 codec: Some(Codec::H264),
+                has_content: true,
             },
         }
     }

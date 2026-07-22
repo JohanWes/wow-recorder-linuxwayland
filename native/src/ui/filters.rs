@@ -68,6 +68,41 @@ impl Chip {
             _ => "view-more-symbolic",
         }
     }
+
+    /// A per-grouping tint class for the chip pill, restoring the legacy
+    /// colored-chip identity (colour is a deterministic function of grouping).
+    pub fn css_class(&self) -> &'static str {
+        match self.group {
+            GROUP_NAME => "wr-chip-name",
+            GROUP_SPEC => "wr-chip-spec",
+            GROUP_ZONE | GROUP_DUNGEON | GROUP_ENCOUNTER => "wr-chip-place",
+            GROUP_AFFIX => "wr-chip-affix",
+            GROUP_RESULT => "wr-chip-result",
+            GROUP_DIFFICULTY_LFR..=GROUP_DIFFICULTY_MYTHIC => "wr-chip-difficulty",
+            _ => "wr-chip-misc",
+        }
+    }
+}
+
+/// Spec id → the owning class's CSS class, for class-colored player names.
+/// Sidecars never carry `class_id`, so the spec id is the class source.
+pub fn class_css_class(spec_id: u16) -> Option<&'static str> {
+    Some(match spec_id {
+        250..=252 => "wr-class-death-knight",
+        577 | 581 | 1480 => "wr-class-demon-hunter",
+        102..=105 => "wr-class-druid",
+        1467 | 1468 | 1473 => "wr-class-evoker",
+        253..=255 => "wr-class-hunter",
+        62..=64 => "wr-class-mage",
+        268..=270 => "wr-class-monk",
+        65 | 66 | 70 => "wr-class-paladin",
+        256..=258 => "wr-class-priest",
+        259..=261 => "wr-class-rogue",
+        262..=264 => "wr-class-shaman",
+        265..=267 => "wr-class-warlock",
+        71..=73 => "wr-class-warrior",
+        _ => return None,
+    })
 }
 
 /// Every suggestion the entry contributes, mirroring
@@ -247,7 +282,8 @@ pub fn spec_name(id: u16) -> Option<String> {
 }
 
 /// Affix id → affix name (`src/main/constants.ts` `dungeonAffixesById`).
-fn affix_name(id: u32) -> Option<String> {
+/// Public so the library's Affixes column shows names, not raw ids.
+pub fn affix_name(id: u32) -> Option<String> {
     AFFIX_NAMES
         .iter()
         .find(|(candidate, _)| *candidate == id)
@@ -310,6 +346,7 @@ mod tests {
                 width: None,
                 height: None,
                 codec: Some(Codec::H264),
+                has_content: true,
             },
         }
     }
@@ -468,6 +505,19 @@ mod tests {
             class_id: None,
             spec_id: Some(spec),
             team_id: None,
+        }
+    }
+
+    #[test]
+    fn spec_ids_map_to_their_class_css() {
+        assert_eq!(class_css_class(64), Some("wr-class-mage")); // Frost mage
+        assert_eq!(class_css_class(251), Some("wr-class-death-knight")); // Frost DK
+        assert_eq!(class_css_class(1480), Some("wr-class-demon-hunter")); // Devourer
+        assert_eq!(class_css_class(1473), Some("wr-class-evoker")); // Augmentation
+        assert_eq!(class_css_class(9999), None);
+        // Every named spec resolves to a class.
+        for (id, _) in SPEC_NAMES {
+            assert!(class_css_class(*id).is_some(), "spec {id} has no class");
         }
     }
 

@@ -98,6 +98,9 @@ struct RowModel {
     kind: String,
     source: String,
     outcome_order: u8,
+    /// The recording player's class CSS class (from spec id), for the
+    /// class-colored Details name.
+    class_css: Option<&'static str>,
     /// Union of suggestion chips across primary + POVs, for AND filtering.
     combined: BTreeSet<Chip>,
 }
@@ -208,7 +211,7 @@ fn win_loss(outcome: Outcome) -> String {
 fn affixes_label(affixes: &[u32]) -> String {
     affixes
         .iter()
-        .map(|id| id.to_string())
+        .map(|id| filters::affix_name(*id).unwrap_or_else(|| id.to_string()))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -225,9 +228,16 @@ fn build_rows(snapshot: &AppSnapshot, category: &Category) -> Vec<Rc<RowModel>> 
     let mut rows: Vec<Rc<RowModel>> = snapshot
         .correlations
         .iter()
-        .filter(|correlation| &correlation.primary.category == category)
+        .filter(|correlation| {
+            by_id
+                .get(&correlation.primary_id)
+                .is_some_and(|entry| &entry.category == category)
+        })
         .map(|correlation| {
-            let primary = &correlation.primary;
+            let primary = by_id
+                .get(&correlation.primary_id)
+                .copied()
+                .expect("correlation primary is in the snapshot");
             let povs: Vec<&LibraryEntry> = correlation
                 .local_pov_ids
                 .iter()
@@ -275,6 +285,11 @@ fn build_rows(snapshot: &AppSnapshot, category: &Category) -> Vec<Rc<RowModel>> 
                 kind,
                 source,
                 outcome_order: outcome_rank(primary.outcome),
+                class_css: primary
+                    .player
+                    .as_ref()
+                    .and_then(|player| player.spec_id)
+                    .and_then(filters::class_css_class),
                 combined,
             })
         })
@@ -282,7 +297,7 @@ fn build_rows(snapshot: &AppSnapshot, category: &Category) -> Vec<Rc<RowModel>> 
 
     // Default order: newest first, matching the legacy reverse-chronological
     // scan/correlator. An active column sort overrides this in the sort model.
-    rows.sort_by(|a, b| b.date_ms.cmp(&a.date_ms));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.date_ms));
     rows
 }
 
@@ -849,11 +864,8 @@ impl Inner {
         }
         self.bulk_bar.set_reveal_child(true);
         let rows = selected.len();
-        self.bulk_count.set_text(&if rows > 1 {
-            format!("Selection ({rows})")
-        } else {
-            "Selection".to_owned()
-        });
+        self.bulk_count
+            .set_text(&format!("{rows} recording{} selected", plural(rows)));
         // Legacy rule: unless every selected viewpoint is protected, the action
         // is Protect; only an all-protected selection unprotects.
         let all_protected = selected.iter().all(|row| row.all_protected);
@@ -1058,12 +1070,7 @@ impl Inner {
                     |r| r.encounter.clone(),
                     sort_by(|r| r.encounter.clone()),
                 ));
-                columns.push(text_column(
-                    "Result",
-                    false,
-                    |r| r.result.clone(),
-                    sort_by(|r| r.outcome_order),
-                ));
+                columns.push(result_column());
                 columns.push(text_column(
                     "Pull",
                     false,
@@ -1088,12 +1095,7 @@ impl Inner {
                     |r| r.place.clone(),
                     sort_by(|r| r.place.clone()),
                 ));
-                columns.push(text_column(
-                    "Result",
-                    false,
-                    |r| r.result.clone(),
-                    sort_by(|r| r.outcome_order),
-                ));
+                columns.push(result_column());
                 columns.push(text_column(
                     "Level",
                     false,
@@ -1104,7 +1106,7 @@ impl Inner {
                     "Affixes",
                     false,
                     |r| r.affixes.clone(),
-                    sort_by(|r| r.level),
+                    sort_by(|r| r.affixes.clone()),
                 ));
                 columns.push(self.duration_column());
                 columns.push(self.date_column());
@@ -1117,12 +1119,7 @@ impl Inner {
                     |r| r.place.clone(),
                     sort_by(|r| r.place.clone()),
                 ));
-                columns.push(text_column(
-                    "Result",
-                    false,
-                    |r| r.result.clone(),
-                    sort_by(|r| r.outcome_order),
-                ));
+                columns.push(result_column());
                 columns.push(self.duration_column());
                 columns.push(self.date_column());
                 columns.push(self.viewpoints_column());
@@ -1207,11 +1204,13 @@ impl Inner {
             } else {
                 "non-starred-symbolic"
             });
-            button.set_tooltip_text(Some(if row.all_protected {
+            let label = if row.all_protected {
                 "Unprotect"
             } else {
                 "Protect"
-            }));
+            };
+            button.set_tooltip_text(Some(label));
+            button.update_property(&[gtk4::accessible::Property::Label(label)]);
             let this = Rc::clone(&this);
             let handler = button.connect_clicked(move |_| this.toggle_protect(&row));
             unsafe { button.set_data("wr-handler", handler) };
@@ -1262,6 +1261,13 @@ impl Inner {
             let tag = title.next_sibling().and_downcast::<gtk4::Label>().unwrap();
             let row = row_of(&item.item().unwrap());
             title.set_text(&row.details);
+            if let Some(previous) = unsafe { title.steal_data::<&'static str>("wr-class") } {
+                title.remove_css_class(previous);
+            }
+            if let Some(class) = row.class_css {
+                title.add_css_class(class);
+                unsafe { title.set_data("wr-class", class) };
+            }
             match &row.tag {
                 Some(value) => {
                     tag.set_text(value);
@@ -1362,6 +1368,7 @@ impl Inner {
             button.add_css_class("flat");
             button.set_valign(gtk4::Align::Center);
             button.set_tooltip_text(Some("Create kill video"));
+            button.update_property(&[gtk4::accessible::Property::Label("Create kill video")]);
             item.downcast_ref::<gtk4::ListItem>()
                 .unwrap()
                 .set_child(Some(&button));
@@ -1502,6 +1509,38 @@ fn text_column(
     column
 }
 
+/// The Result column: same text cell as `text_column`, plus the win/loss
+/// outcome color the legacy table used (label conveys the meaning; color is
+/// reinforcement only).
+fn result_column() -> gtk4::ColumnViewColumn {
+    let factory = gtk4::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        let label = gtk4::Label::new(None);
+        label.set_xalign(0.0);
+        label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        item.downcast_ref::<gtk4::ListItem>()
+            .unwrap()
+            .set_child(Some(&label));
+    });
+    factory.connect_bind(move |_, item| {
+        let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
+        let label = item.child().and_downcast::<gtk4::Label>().unwrap();
+        let row = row_of(&item.item().unwrap());
+        label.set_text(&row.result);
+        label.remove_css_class("wr-result-win");
+        label.remove_css_class("wr-result-loss");
+        match row.outcome_order {
+            0 => label.add_css_class("wr-result-win"),
+            1 => label.add_css_class("wr-result-loss"),
+            _ => {}
+        }
+    });
+    let column = gtk4::ColumnViewColumn::new(Some("Result"), Some(factory));
+    column.set_resizable(true);
+    column.set_sorter(Some(&sort_by(|r| r.outcome_order)));
+    column
+}
+
 fn suggestion_row(chip: &Chip) -> gtk4::ListBoxRow {
     let icon = gtk4::Image::from_icon_name(chip.icon_name());
     let label = gtk4::Label::new(Some(&chip.label));
@@ -1530,6 +1569,7 @@ fn chip_pill(chip: &Chip) -> gtk4::Button {
     let button = gtk4::Button::new();
     button.set_child(Some(&content));
     button.add_css_class("wr-chip");
+    button.add_css_class(chip.css_class());
     button.set_tooltip_text(Some(&format!("Remove {}", chip.label)));
     button
 }
@@ -1598,4 +1638,133 @@ fn labelled_calendar(title: &str, calendar: &gtk4::Calendar) -> gtk4::Box {
     container.append(&heading);
     container.append(calendar);
     container
+}
+
+#[cfg(test)]
+mod release_gate_tests {
+    use super::*;
+    use std::time::Instant;
+    use warcraft_recorder::config::Config;
+    use warcraft_recorder::domain::{RecorderStatus, StorageLimit};
+    use warcraft_recorder::storage::Storage;
+
+    fn snapshot() -> AppSnapshot {
+        let root = PathBuf::from(std::env::var_os("WR015_CORPUS").expect("set WR015_CORPUS"));
+        let index = Storage::new(root.clone(), root.join(".wr015-capture")).scan();
+        assert_eq!(index.entries.len(), 2_000);
+        AppSnapshot {
+            entries: index.entries,
+            correlations: index.correlations,
+            category_counts: Vec::new(),
+            status: RecorderStatus::WaitingForWow,
+            active: None,
+            config: Config::default(),
+            setup_problems: Vec::new(),
+            advanced_logging: Vec::new(),
+            problems: Vec::new(),
+            work: None,
+            queued_jobs: 0,
+            storage_used_bytes: 0,
+            storage_limit: StorageLimit::Unlimited,
+            protected_over_limit: false,
+        }
+    }
+
+    fn measure(mut operation: impl FnMut()) -> (Vec<u128>, u128) {
+        operation();
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let started = Instant::now();
+            operation();
+            samples.push(started.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+        let median = samples[2];
+        (samples, median)
+    }
+
+    #[test]
+    #[ignore = "run manually with WR015_CORPUS after generating the WR-000 corpus"]
+    fn measure_filter_and_sort_updates() {
+        gtk4::init().expect("GTK display is required for the manual release gate");
+        let mut snapshot = snapshot();
+        snapshot.config.interface.selected_category = Category::MythicPlus;
+        let library = Library::new(Rc::new(|_| true), Rc::new(|_| {}), Rc::new(|_| {}));
+        library.apply(&snapshot);
+        assert_eq!(library.inner.store.n_items(), 200);
+
+        // Exercise the actual widgets and GtkFilterListModel/GtkSortListModel,
+        // then enumerate the resulting selection model so lazy work is paid
+        // inside each sample.
+        let force_model = || {
+            let count = library.inner.selection.n_items();
+            for position in 0..count {
+                std::hint::black_box(library.inner.selection.item(position));
+            }
+        };
+        let mut suggestion_toggle = false;
+        let (suggestion_samples, suggestion_median) = measure(|| {
+            suggestion_toggle = !suggestion_toggle;
+            library.inner.search.set_text(if suggestion_toggle {
+                "player"
+            } else {
+                "dungeon"
+            });
+            force_model();
+        });
+        let chip = library.inner.state.available.borrow()[0].clone();
+        let mut chip_toggle = false;
+        let (chip_samples, chip_median) = measure(|| {
+            chip_toggle = !chip_toggle;
+            let mut selected = library.inner.state.selected_chips.borrow_mut();
+            selected.clear();
+            if chip_toggle {
+                selected.push(chip.clone());
+            }
+            drop(selected);
+            library.inner.refilter();
+            force_model();
+        });
+        let rows = build_rows(&snapshot, &Category::MythicPlus);
+        let start = rows.last().map_or(0, |row| row.date_ms);
+        let end = rows.first().map_or(0, |row| row.date_ms);
+        let mut date_toggle = false;
+        let (date_samples, date_median) = measure(|| {
+            date_toggle = !date_toggle;
+            library
+                .inner
+                .state
+                .date_range
+                .set(date_toggle.then_some((start, end)));
+            library.inner.refilter();
+            force_model();
+        });
+        let column = library
+            .inner
+            .column_view
+            .columns()
+            .item(1)
+            .expect("details column")
+            .downcast::<gtk4::ColumnViewColumn>()
+            .expect("column type");
+        let mut descending = false;
+        let (sort_samples, sort_median) = measure(|| {
+            descending = !descending;
+            library.inner.column_view.sort_by_column(
+                Some(&column),
+                if descending {
+                    gtk4::SortType::Descending
+                } else {
+                    gtk4::SortType::Ascending
+                },
+            );
+            force_model();
+        });
+        println!(
+            "suggestion_us={suggestion_samples:?} median={suggestion_median}; \
+             chip_us={chip_samples:?} median={chip_median}; \
+             date_us={date_samples:?} median={date_median}; \
+             sort_us={sort_samples:?} median={sort_median}"
+        );
+    }
 }
