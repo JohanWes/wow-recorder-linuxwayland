@@ -29,7 +29,7 @@ WR-000 must classify every legacy feature as one of:
 - `REMOVE_UNREACHABLE`: no Linux UI or runtime path can invoke it, with file/line evidence;
 - `REMOVE_OBSOLETE`: depends on a service, platform, or game mode that no longer exists, with maintainer approval.
 
-An implementation ticket may not silently downgrade a `KEEP` feature. If its native implementation is missing from the tickets, stop and fix the relevant ticket before coding. Known `KEEP` scope includes automatic and manual recording, test recording, force-end, capture-target reselection, background recording with tray Open/Quit and current close/minimize behavior, suggestion-chip/paired-date filtering, sortable category tables, multiselect/bulk actions, tagging/protection, reveal/delete, playback speed, keyboard controls, frame stepping, marker visibility controls, drawing, clipping, and local multi-POV/kill-video behavior. The user's Update outcome is preserved outside app code: the final AppImage's updater installs the Flatpak (WR-013), and the Flatpak remote/software center owns updates thereafter; the in-app checker is not rebuilt (WR-000 records the approved `REMOVE_OBSOLETE`).
+An implementation ticket may not silently downgrade a `KEEP` feature. If its native implementation is missing from the tickets, stop and fix the relevant ticket before coding. Known `KEEP` scope includes automatic and manual recording, test recording, force-end, capture-target reselection, background recording with tray Open/Quit and current close/minimize behavior, suggestion-chip/paired-date filtering, sortable category tables, multiselect/bulk actions, tagging/protection, reveal/delete, playback speed, keyboard controls, frame stepping, marker visibility controls, drawing, clipping, and local viewpoint-selection/kill-video behavior (multi-POV grid playback was removed by maintainer decision 2026-07-22; see the WR-000 parity matrix). The user's Update outcome is preserved outside app code: the final AppImage's updater installs the Flatpak (WR-013), and the Flatpak remote/software center owns updates thereafter; the in-app checker is not rebuilt (WR-000 records the approved `REMOVE_OBSOLETE`).
 
 Cloud/account/upload/chat/pro paths are already disabled in this fork and are not to be revived. Windows, macOS, OBS/libobs, NSIS, notarization, AppImage after the migration release, telemetry, plugins, and a database are outside scope.
 
@@ -104,15 +104,17 @@ Statuses are `TODO`, `IN PROGRESS`, `BLOCKED(reason)`, and `DONE`. Start only wh
 | WR-006 | [Recorder adapter](WR-006-recorder-adapter.md) | WR-002, WR-003 | DONE |
 | WR-007 | [Storage and library index](WR-007-storage-library.md) | WR-003, WR-006 | DONE |
 | WR-008 | [Coordinator and vertical slice](WR-008-coordinator-vertical-slice.md) | WR-004, WR-005, WR-006, WR-007 | DONE |
-| WR-009 | [Native shell and UI system](WR-009-native-shell.md) | WR-008 | TODO |
-| WR-010 | [Library view and local actions](WR-010-library-view.md) | WR-007, WR-009 | TODO |
-| WR-011 | [Player, timeline, drawing, and multi-POV](WR-011-player-timeline.md) | WR-002, WR-007, WR-008, WR-009 | TODO |
+| WR-009 | [Native shell and UI system](WR-009-native-shell.md) | WR-008 | DONE |
+| WR-010 | [Library view and local actions](WR-010-library-view.md) | WR-007, WR-009 | DONE |
+| WR-011 | [Player, timeline, drawing, and viewpoints](WR-011-player-timeline.md) | WR-002, WR-007, WR-008, WR-009 | DONE |
 | WR-012 | [Settings, native choosers, and app status](WR-012-settings-portals-status.md) | WR-002, WR-003, WR-006, WR-008, WR-009 | TODO |
 | WR-014 | [Flatpak release-candidate pipeline and permanent remote](WR-014-flatpak-release.md) | WR-002, WR-010, WR-011, WR-012 | TODO |
 | WR-013 | [Migration release and Electron cutover](WR-013-electron-dead-code-cutover.md) | WR-014 | TODO |
 | WR-015 | [Parity/lean gates and stable publication](WR-015-release-gates.md) | WR-013, WR-014 | TODO |
 
 Safe parallel work: WR-004 and WR-006 after WR-003; WR-010 and WR-011 after WR-009; WR-012 when its dependencies are done. Ticket numbers do not imply execution order: the dependency table intentionally runs WR-014's release pipeline before WR-013 cutover, then WR-015 publishes stable only after final gates pass.
+
+WR-009 and WR-010 are complete. Their implementation commits are `9ddb52a7` and `5d489296`, respectively; the standard native checks pass, including the UI and vertical-slice test suites.
 
 ## Rules for implementation agents
 

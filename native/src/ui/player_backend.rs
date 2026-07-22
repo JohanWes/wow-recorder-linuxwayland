@@ -40,17 +40,6 @@ impl PlayerBackend {
         self.player.pause();
     }
 
-    pub fn position(&self) -> f64 {
-        self.player.position()
-    }
-
-    pub fn duration(&self) -> f64 {
-        self.player
-            .queue()
-            .and_then(|queue| queue.current_item())
-            .map_or(0.0, |item| item.duration())
-    }
-
     pub fn seek(&self, position_seconds: f64) {
         self.player.seek(position_seconds);
     }
@@ -73,5 +62,24 @@ impl PlayerBackend {
 
     pub fn stop(&self) {
         self.player.stop();
+    }
+
+    // WR-011 product operations missing from the WR-002 proof surface.
+
+    /// Playing or paused with media: seeks/steps are meaningful.
+    pub fn is_ready(&self) -> bool {
+        matches!(
+            self.player.state(),
+            clapper::PlayerState::Playing | clapper::PlayerState::Paused
+        )
+    }
+
+    pub fn connect_position_updated(&self, callback: impl Fn(f64) + 'static) {
+        self.player
+            .connect_position_notify(move |player| callback(player.position()));
+    }
+
+    pub fn connect_seek_done(&self, callback: impl Fn() + 'static) {
+        self.player.connect_seek_done(move |_| callback());
     }
 }

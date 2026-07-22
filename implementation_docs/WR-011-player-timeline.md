@@ -1,8 +1,14 @@
-# WR-011: Player, combat timeline, drawing, clips, and local multi-POV
+# WR-011: Player, combat timeline, drawing, clips, and viewpoint selection
 
 ## Goal
 
-Integrate the WR-002 Clapper backend into the persistent player pane and preserve current transport, timeline, drawing, clipping, multi-view playback, and kill-video editing with the least custom media code possible.
+Integrate the WR-002 Clapper backend into the persistent player pane and preserve current transport, timeline, drawing, clipping, viewpoint selection, and kill-video editing with the least custom media code possible.
+
+> **Scope change (maintainer, 2026-07-22):** multi-POV grid playback
+> (synchronized 2–4 player grid, master audio, drift correction) is removed
+> from the product — recorded as `REMOVE_OBSOLETE` in the WR-000 parity
+> matrix. The single-view viewpoint selector, POV correlation, and the
+> kill-video editor remain.
 
 ## Dependencies
 
@@ -37,15 +43,9 @@ WR-002, WR-007, WR-008, and WR-009 must be `DONE`.
 - Clip mode adds start/current/end handles constrained to `0 ≤ start < end ≤ duration`, initialized to the current baseline range. `Create` sends one command and exits mode only after accepted; progress/errors come from snapshot.
 - Drawing overlay stores a small tagged item list in normalized video coordinates. Implement exactly WR-000's exposed selection/move, freehand, line/arrow, rectangle/diamond/ellipse, text, eraser, stroke controls, undo/redo, and clear set using Cairo/Pango/GTK input; omit any tool the baseline proves hidden. Keep a simple bounded undo/redo stack for this session only. Pointer editing occurs only when enabled; playback controls receive input otherwise. Toggle-off/media change follows the baseline clear/retain behavior. No image import, files, export, collaboration, scene format, or third-party drawing library.
 
-## Multi-POV playback
+## Viewpoint selection
 
-Preserve the current local behavior for a correlated activity:
-
-1. Single-view selector lists each distinct local POV with player/spec and remembers the preferred player for subsequent rows during the current process, matching the current `preferredViewpoint` session state.
-2. Grid mode allows two to four distinct local POVs, laid out 2 columns × 1 row for two and 2 × 2 for three/four. Do not support arbitrary counts/layouts.
-3. The first selected POV is master for position, controls, timeline, and audio; other players are muted. Play/pause/seek/speed commands go directly to all active players.
-4. On entering grid mode choose the first two baseline-sorted POVs. Pause during seeks until all players report ready, then resume only if previously playing. Correct drift only when observed difference exceeds WR-000's tolerance, by seeking lagging players to master; one periodic GTK timeout is enough. Do not build clock synchronization, a media server, or background sync thread.
-5. Clip and drawing are disabled in grid mode exactly as current behavior; fullscreen remains available.
+The single-view selector lists each distinct local POV with player/spec and remembers the preferred player for subsequent rows during the current process, matching the current `preferredViewpoint` session state. Grid/synchronized multi-POV playback is removed (see the scope change above); do not build it.
 
 ## Kill-video editor
 
@@ -65,13 +65,13 @@ The editor only builds `CreateKillVideo` payloads; FFmpeg argv/work remains in W
 - All keyboard/pointer shortcuts and Reveal work; focus in search/tag/name prevents transport shortcuts.
 - Timeline markers/spans/visibility/navigation and clip boundaries match legacy sidecar goldens; created clip is playable and indexed.
 - Drawing remains aligned after resize/fullscreen and clears on media change.
-- Two/four POV grid layout, master-only audio, coordinated transport, seek pause/readiness, drift correction, and return to single POV match current behavior.
+- The viewpoint selector opens the chosen POV, retains same-activity progress, and remembers the preferred player for the session.
 - Raid Creator gating plus kill-video preview play/mute/scrub/source switching, segment editing/removal/Reset, output choices, progress, and WR-007 two/three-source Clips result match baseline.
 - No custom GStreamer pipeline/bus state machine, media HTTP server, drawing dependency, generic sync layer, or exact-time/flaky performance assertion exists.
 
 ## Tests and evidence
 
-Pure tests cover timeline hit-testing/visibility, clip bounds, normalized drawing item hit-testing/undo, POV selection/layout, and kill-video segment/output-option validation. Use one thin action-routing UI test. Manual evidence covers the real-media matrix, all controls/shortcuts, every retained drawing tool through resize/fullscreen, 2/4 POV sync, clip, and montage including Reset/FPS/resolution/audio. Do not test every shape/color combination, mock Clapper internals, or repeat WR-002 codec proof as unit tests.
+Pure tests cover timeline hit-testing/visibility, clip bounds, normalized drawing item hit-testing/undo, POV selection, and kill-video segment/output-option validation. Use one thin action-routing UI test. Manual evidence covers the real-media matrix, all controls/shortcuts, every retained drawing tool through resize/fullscreen, viewpoint switching, clip, and montage including Reset/FPS/resolution/audio. Do not test every shape/color combination, mock Clapper internals, or repeat WR-002 codec proof as unit tests.
 
 ## Complexity check
 

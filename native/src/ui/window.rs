@@ -18,6 +18,7 @@ use warcraft_recorder::coordinator::{AppSnapshot, Command, CoordinatorHandle};
 use warcraft_recorder::domain::{RecordingId, RecoveryAction};
 
 use super::library::{Library, Selection};
+use super::player::Player;
 use super::sidebar::Sidebar;
 use super::tray_backend::TrayBackend;
 use super::{ActionSink, ShellAction, category_label, install_actions, primary_menu, tray};
@@ -85,6 +86,7 @@ pub struct Shell {
     setup_banner: adw::Banner,
     problem_banner: adw::Banner,
     library: Library,
+    player: Rc<Player>,
     close_to_tray: Rc<Cell<bool>>,
     minimize_to_tray: Rc<Cell<bool>>,
     tray_available: Rc<Cell<bool>>,
@@ -157,44 +159,24 @@ impl Shell {
             });
         }
 
-        // Player placeholder above; WR-011 replaces it with the Clapper player.
-        let player_headline = gtk4::Label::new(Some("No recording selected"));
-        player_headline.add_css_class("title-2");
-        let player_hint = gtk4::Label::new(None);
-        player_hint.add_css_class("dim-label");
-        let player_text = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-        player_text.set_valign(gtk4::Align::Center);
-        player_text.append(&player_headline);
-        player_text.append(&player_hint);
-        let player_area = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        player_area.add_css_class("player-area");
-        player_area.set_hexpand(true);
-        player_area.set_vexpand(true);
-        player_area.set_height_request(240);
-        player_area.append(&player_text);
-
-        // The virtualized library table, filters, and local actions (WR-010).
-        // Selecting a row updates the player-hint placeholder until WR-011 wires
-        // the real Clapper player; the montage entry point is likewise a seam.
+        // The Clapper player pane (WR-011) above the library table (WR-010).
+        let player = Rc::new(Player::new(Rc::clone(&sink)));
+        player.install_shortcuts(window.upcast_ref());
+        player.widget.set_height_request(240);
         let on_select: Rc<dyn Fn(Option<Selection>)> = {
-            let player_hint = player_hint.clone();
-            Rc::new(move |selection| {
-                player_hint.set_label(
-                    &selection
-                        .map(|selection| format!("Selected: {}", selection.title))
-                        .unwrap_or_default(),
-                );
-            })
+            let player = Rc::clone(&player);
+            Rc::new(move |selection| player.set_selection(selection.as_ref()))
         };
-        let on_montage: Rc<dyn Fn(RecordingId)> = Rc::new(|id| {
-            tracing::info!(%id, "kill-video editor arrives with the player milestone");
-        });
+        let on_montage: Rc<dyn Fn(RecordingId)> = {
+            let player = Rc::clone(&player);
+            Rc::new(move |id| player.open_kill_video(&id))
+        };
         let library = Library::new(Rc::clone(&sink), on_select, on_montage);
 
         let paned = gtk4::Paned::new(gtk4::Orientation::Vertical);
         paned.set_wide_handle(true);
         paned.set_vexpand(true);
-        paned.set_start_child(Some(&player_area));
+        paned.set_start_child(Some(&player.widget));
         paned.set_end_child(Some(&library.widget));
         paned.set_resize_start_child(true);
         paned.set_shrink_start_child(false);
@@ -232,6 +214,7 @@ impl Shell {
             setup_banner,
             problem_banner,
             library,
+            player,
             close_to_tray: Rc::new(Cell::new(close_to_tray)),
             minimize_to_tray: Rc::new(Cell::new(minimize_to_tray)),
             tray_available: Rc::new(Cell::new(
@@ -281,6 +264,9 @@ impl Shell {
         let view = content_view(snapshot);
         self.title.set_title(&view.title);
         self.nav_page.set_title(&view.title);
+        // The player consumes the snapshot first so selection callbacks fired
+        // by the library rebuild resolve against current entries.
+        self.player.apply_snapshot(snapshot);
         self.library.apply(snapshot);
 
         self.setup_banner.set_revealed(view.setup_banner.is_some());

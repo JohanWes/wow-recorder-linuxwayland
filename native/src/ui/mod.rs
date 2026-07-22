@@ -8,10 +8,16 @@
 //! snapshot, tray-event, and coordinator-stopped receivers. No stores, no
 //! per-widget view models, no string events, no blocking work.
 
+pub mod drawing;
 pub mod filters;
+pub mod kill_video;
 pub mod library;
+pub mod multipov;
+pub mod player;
+pub mod player_backend;
 pub mod sidebar;
 pub mod status;
+pub mod timeline;
 pub mod tray;
 pub mod tray_backend;
 pub mod window;

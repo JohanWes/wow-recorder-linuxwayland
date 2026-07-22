@@ -64,6 +64,11 @@
   background-color: alpha(@accent_bg_color, 0.30);
 }
 
+/* Combat seek track: fixed dark geometry inside the black player area. */
+.wr-timeline {
+  min-height: 26px;
+}
+
 /* Setup/error detail: technical text stays selectable but quiet. */
 .problem-detail {
   font-family: monospace;

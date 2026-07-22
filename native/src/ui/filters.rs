@@ -238,7 +238,8 @@ pub fn combined_suggestions<'a>(
 // --- Factual lookup tables reused from the legacy constants -----------------
 
 /// Spec id → spec name (`src/main/constants.ts` `specializationById`).
-fn spec_name(id: u16) -> Option<String> {
+/// Public so the multi-POV selector labels viewpoints with the same table.
+pub fn spec_name(id: u16) -> Option<String> {
     SPEC_NAMES
         .iter()
         .find(|(candidate, _)| *candidate == id)
