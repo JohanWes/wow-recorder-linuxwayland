@@ -109,7 +109,7 @@ Statuses are `TODO`, `IN PROGRESS`, `BLOCKED(reason)`, and `DONE`. Start only wh
 | WR-011 | [Player, timeline, drawing, and viewpoints](WR-011-player-timeline.md) | WR-002, WR-007, WR-008, WR-009 | DONE |
 | WR-012 | [Settings, native choosers, and app status](WR-012-settings-portals-status.md) | WR-002, WR-003, WR-006, WR-008, WR-009 | DONE |
 | WR-014 | [Flatpak release-candidate pipeline and permanent remote](WR-014-flatpak-release.md) | WR-002, WR-010, WR-011, WR-012 | TODO |
-| WR-013 | [Migration release and Electron cutover](WR-013-electron-dead-code-cutover.md) | WR-014 | TODO |
+| WR-013 | [Migration release and Electron cutover](WR-013-electron-dead-code-cutover.md) | WR-014 | BLOCKED (WR-014 release candidate and publication evidence are absent) |
 | WR-015 | [Parity/lean gates and stable publication](WR-015-release-gates.md) | WR-013, WR-014 | TODO |
 
 Safe parallel work: WR-004 and WR-006 after WR-003; WR-010 and WR-011 after WR-009; WR-012 when its dependencies are done. Ticket numbers do not imply execution order: the dependency table intentionally runs WR-014's release pipeline before WR-013 cutover, then WR-015 publishes stable only after final gates pass.
