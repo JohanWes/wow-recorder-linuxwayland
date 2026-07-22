@@ -20,7 +20,8 @@
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -69,8 +70,8 @@ pub struct SkippedEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LibraryIndex {
     /// Reverse chronological, matching the baseline library ordering.
-    pub entries: Vec<LibraryEntry>,
-    pub correlations: Vec<CorrelatedActivity>,
+    pub entries: Arc<Vec<LibraryEntry>>,
+    pub correlations: Arc<Vec<CorrelatedActivity>>,
     /// Entries whose sidecar was written by the legacy application.
     pub legacy_ids: HashSet<RecordingId>,
     pub skipped: Vec<SkippedEntry>,
@@ -194,7 +195,7 @@ impl Storage {
                         index.legacy_ids.insert(entry.id.clone());
                     }
                     starts.push(loaded.correlation_start_ms);
-                    index.entries.push(entry);
+                    Arc::make_mut(&mut index.entries).push(entry);
                 }
                 Err(reason) => index.skipped.push(SkippedEntry {
                     sidecar_path: path,
@@ -218,8 +219,8 @@ impl Storage {
             .map(|position| index.entries[*position].clone())
             .collect();
         let starts: Vec<Option<i64>> = order.iter().map(|position| starts[*position]).collect();
-        index.entries = entries;
-        index.correlations = correlate(&index.entries, &starts);
+        index.correlations = Arc::new(correlate(&entries, &starts));
+        index.entries = Arc::new(entries);
         index
     }
 
@@ -238,9 +239,11 @@ impl Storage {
                 ));
             }
             let media_path = self.root.join(&sidecar.media_file);
-            require_media(&media_path)?;
+            self.check_owned(&media_path)?;
+            let has_content = media_has_content(&media_path)?;
             let start = sidecar.start_unix_ms;
-            let entry = sidecar.into_entry(media_path, path.to_path_buf());
+            let mut entry = sidecar.into_entry(media_path, path.to_path_buf());
+            entry.media.has_content = has_content;
             entry.validate().map_err(|error| error.to_string())?;
             return Ok(LoadedSidecar {
                 entry,
@@ -252,10 +255,11 @@ impl Storage {
         let legacy: LegacySidecar = serde_json::from_value(value)
             .map_err(|error| format!("invalid legacy sidecar: {error}"))?;
         let media_path = path.with_extension(MEDIA_EXTENSION);
-        require_media(&media_path)?;
+        let has_content = media_has_content(&media_path)?;
         let mtime_ms = file_modified_ms(&media_path).unwrap_or(0);
         let correlation_start_ms = legacy.start.map(|start| start as i64);
-        let entry = legacy.into_entry(media_path, path.to_path_buf(), mtime_ms)?;
+        let mut entry = legacy.into_entry(media_path, path.to_path_buf(), mtime_ms)?;
+        entry.media.has_content = has_content;
         Ok(LoadedSidecar {
             entry,
             legacy: true,
@@ -376,6 +380,8 @@ impl Storage {
     /// schema and unknown fields: only the `protected`/`tag` keys are patched so
     /// the final AppImage can still read it.
     pub fn update(&self, entry: &LibraryEntry, change: &EntryUpdate) -> io::Result<LibraryEntry> {
+        self.check_owned(&entry.sidecar_path)
+            .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
         let text = fs::read_to_string(&entry.sidecar_path)?;
         let value: Value = serde_json::from_str(&text)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
@@ -449,17 +455,24 @@ impl Storage {
     }
 
     fn check_owned(&self, path: &Path) -> Result<(), String> {
-        if !is_inside(&self.root, path) {
-            return Err(format!("{} is outside the storage root", path.display()));
+        // The library is deliberately flat. Requiring a direct child closes
+        // the intermediate-directory symlink race: a leaf swapped to a
+        // symlink is itself unlinked by deletion, never followed.
+        if path.parent() != Some(self.root.as_path()) {
+            return Err(format!(
+                "{} is not a direct child of the storage root",
+                path.display()
+            ));
         }
         match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                Err(format!("{} is a symlink", path.display()))
+                return Err(format!("{} is a symlink", path.display()));
             }
-            Ok(_) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.to_string()),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
         }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -882,8 +895,11 @@ impl LegacySidecar {
             .to_string_lossy()
             .into_owned();
         let details = self.legacy_details(&category, parent, &media_name);
-        let title = match legacy_title(&self.encounter_name, &self.zone_name, self.player.as_ref())
-        {
+        let title = match legacy_title(
+            &self.encounter_name,
+            &self.legacy_place_name(),
+            self.player.as_ref(),
+        ) {
             title if title.is_empty() => default_title(&category),
             title => title,
         };
@@ -913,6 +929,7 @@ impl LegacySidecar {
                 width: None,
                 height: None,
                 codec: self.encoder.as_deref().and_then(legacy_codec),
+                has_content: true,
             },
         };
         entry.validate().map_err(|error| error.to_string())?;
@@ -1006,6 +1023,19 @@ impl LegacySidecar {
         items
     }
 
+    /// Legacy sidecars usually store only `zoneID`/`mapID`; the legacy frontend
+    /// resolved the display name from `instanceNamesByZoneId` at render time.
+    /// Restore it the same way when the sidecar carries no name.
+    fn legacy_place_name(&self) -> Option<String> {
+        self.zone_name.clone().or_else(|| {
+            crate::activity::instance_name(
+                &legacy_flavor(self.flavour.as_deref()),
+                self.zone_id.unwrap_or(0),
+                self.map_id.unwrap_or(0),
+            )
+        })
+    }
+
     fn legacy_details(
         &self,
         category: &Category,
@@ -1020,7 +1050,7 @@ impl LegacySidecar {
                     source_title: self
                         .encounter_name
                         .clone()
-                        .or_else(|| self.zone_name.clone()),
+                        .or_else(|| self.legacy_place_name()),
                 };
             }
             other => other,
@@ -1039,7 +1069,7 @@ impl LegacySidecar {
             },
             Category::MythicPlus => ActivityDetails::Dungeon {
                 zone_id: self.zone_id,
-                dungeon_name: self.zone_name.clone(),
+                dungeon_name: self.legacy_place_name(),
                 map_id: self.map_id,
                 keystone_level: self.keystone_level.or(self.level),
                 affixes: self.affixes.clone(),
@@ -1047,7 +1077,7 @@ impl LegacySidecar {
             },
             Category::SoloShuffle => ActivityDetails::SoloRounds {
                 map_id: self.zone_id,
-                map_name: self.zone_name.clone(),
+                map_name: self.legacy_place_name(),
                 rounds_won: self.solo_shuffle_rounds_won,
                 rounds_played: self.solo_shuffle_rounds_played,
                 rounds: self
@@ -1071,7 +1101,7 @@ impl LegacySidecar {
             | Category::Skirmish
             | Category::Battlegrounds => ActivityDetails::ArenaOrBattleground {
                 map_id: self.zone_id,
-                map_name: self.zone_name.clone(),
+                map_name: self.legacy_place_name(),
                 team_mmr: self.team_mmr,
             },
             Category::Manual => ActivityDetails::Manual,
@@ -1204,24 +1234,28 @@ fn legacy_combatant(combatant: &LegacyCombatant) -> CombatantSummary {
 fn correlate(entries: &[LibraryEntry], starts: &[Option<i64>]) -> Vec<CorrelatedActivity> {
     let mut correlated: Vec<CorrelatedActivity> = Vec::new();
     let mut primary_starts: Vec<i64> = Vec::new();
+    let mut primary_categories: Vec<&Category> = Vec::new();
+    let mut primary_hashes: Vec<Option<&str>> = Vec::new();
 
     for (entry, start) in entries.iter().zip(starts.iter()) {
         let correlatable = entry.activity_hash.as_ref().zip(*start);
         let Some((hash, start)) = correlatable else {
             correlated.push(CorrelatedActivity {
-                primary: entry.clone(),
+                primary_id: entry.id.clone(),
                 local_pov_ids: Vec::new(),
             });
             primary_starts.push(entry.start_unix_ms);
+            primary_categories.push(&entry.category);
+            primary_hashes.push(entry.activity_hash.as_deref());
             continue;
         };
 
         let matched = if excluded_from_correlation(&entry.category) {
             None
         } else {
-            correlated.iter().position(|candidate| {
-                !excluded_from_correlation(&candidate.primary.category)
-                    && candidate.primary.activity_hash.as_deref() == Some(hash.as_str())
+            correlated.iter().enumerate().position(|(position, _)| {
+                !excluded_from_correlation(primary_categories[position])
+                    && primary_hashes[position] == Some(hash.as_str())
             })
         };
 
@@ -1233,10 +1267,12 @@ fn correlate(entries: &[LibraryEntry], starts: &[Option<i64>]) -> Vec<Correlated
             }
             _ => {
                 correlated.push(CorrelatedActivity {
-                    primary: entry.clone(),
+                    primary_id: entry.id.clone(),
                     local_pov_ids: Vec::new(),
                 });
                 primary_starts.push(start);
+                primary_categories.push(&entry.category);
+                primary_hashes.push(entry.activity_hash.as_deref());
             }
         }
     }
@@ -1371,10 +1407,13 @@ fn seconds_to_ms(seconds: f64) -> u64 {
     (seconds * 1000.0).round() as u64
 }
 
-fn require_media(path: &Path) -> Result<(), String> {
+fn media_has_content(path: &Path) -> Result<bool, String> {
     match fs::metadata(path) {
-        Ok(metadata) if metadata.len() > 0 => Ok(()),
-        Ok(_) => Err(format!("media file {} is empty", path.display())),
+        // WR-015's deterministic library corpus deliberately uses zero-byte
+        // placeholders because scanning must not decode media. Real outputs
+        // are still checked as nonzero by the media worker before finalizing.
+        Ok(metadata) if metadata.is_file() => Ok(metadata.len() > 0),
+        Ok(_) => Err(format!("media path {} is not a file", path.display())),
         Err(error) => Err(format!("media file {}: {error}", path.display())),
     }
 }
@@ -1426,10 +1465,6 @@ fn move_file(from: &Path, to: &Path) -> io::Result<()> {
             fs::remove_file(from)
         }
     }
-}
-
-fn is_inside(root: &Path, path: &Path) -> bool {
-    !path.components().any(|part| part == Component::ParentDir) && path.starts_with(root)
 }
 
 /// Minimal ISO-8601 UTC parser for the legacy `logStart`/`logEnd` strings
@@ -1571,7 +1606,7 @@ mod tests {
             .iter()
             .map(|correlated| {
                 serde_json::json!({
-                    "primary": correlated.primary.id.as_str(),
+                    "primary": correlated.primary_id.as_str(),
                     "local_pov_ids": correlated
                         .local_pov_ids
                         .iter()
@@ -1700,6 +1735,26 @@ mod tests {
     }
 
     #[test]
+    fn scan_accepts_zero_byte_performance_placeholders_without_decoding() {
+        let tree = TempTree::new("zero-byte-corpus");
+        let storage = tree.storage();
+        let names = install_legacy_fixtures(&tree);
+        let media = tree.library().join(&names[0]).with_extension("mp4");
+        fs::write(&media, []).expect("truncate placeholder media");
+
+        let index = storage.scan();
+        assert_eq!(index.entries.len(), names.len());
+        assert!(index.skipped.is_empty());
+        assert!(
+            index
+                .entries
+                .iter()
+                .find(|entry| entry.media_path == media)
+                .is_some_and(|entry| !entry.media.has_content)
+        );
+    }
+
+    #[test]
     fn finalize_writes_media_relative_markers_and_survives_a_rescan() {
         let tree = TempTree::new("finalize");
         let storage = tree.storage();
@@ -1723,6 +1778,7 @@ mod tests {
                         width: None,
                         height: None,
                         codec: Some(Codec::H264),
+                        has_content: true,
                     },
                 },
             )
@@ -1752,7 +1808,7 @@ mod tests {
         assert!(!artifacts.replay.expect("replay").exists());
 
         let index = storage.scan();
-        assert_eq!(index.entries, vec![entry.clone()]);
+        assert_eq!(index.entries.as_ref(), &vec![entry.clone()]);
         assert!(index.legacy_ids.is_empty());
         assert_eq!(index.correlations.len(), 1);
     }
@@ -1776,6 +1832,7 @@ mod tests {
                         width: None,
                         height: None,
                         codec: None,
+                        has_content: true,
                     },
                 },
             )
@@ -1896,6 +1953,7 @@ mod tests {
                         width: None,
                         height: None,
                         codec: Some(Codec::H264),
+                        has_content: true,
                     },
                 },
             )
@@ -1906,8 +1964,9 @@ mod tests {
         let reloaded = storage
             .scan()
             .entries
-            .into_iter()
+            .iter()
             .find(|entry| entry.id == native.id)
+            .cloned()
             .expect("rescan");
         assert_eq!(reloaded, updated);
     }
@@ -1930,7 +1989,7 @@ mod tests {
         assert_eq!(result.deleted, vec![good.id.clone()]);
         assert_eq!(result.failures.len(), 2);
         assert!(result.failures[0].1.contains("media"));
-        assert!(result.failures[1].1.contains("outside the storage root"));
+        assert!(result.failures[1].1.contains("not a direct child"));
         assert!(!good.media_path.exists() && !good.sidecar_path.exists());
         assert!(outside.media_path.exists());
 
@@ -1938,6 +1997,34 @@ mod tests {
         good.media_path = PathBuf::new();
         missing.media_path = PathBuf::new();
         assert!(missing.sidecar_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deletion_refuses_a_path_through_a_symlinked_directory() {
+        use std::os::unix::fs::symlink;
+
+        let tree = TempTree::new("delete-parent-symlink");
+        let storage = tree.storage();
+        install_legacy_fixtures(&tree);
+        let mut entry = storage.scan().entries[0].clone();
+
+        let outside = tree.root.join("outside");
+        fs::create_dir(&outside).expect("outside directory");
+        let media = outside.join("escaped.mp4");
+        let sidecar = outside.join("escaped.json");
+        fs::write(&media, "outside media").expect("outside media");
+        fs::write(&sidecar, "{}").expect("outside sidecar");
+        let link = tree.library().join("linked");
+        symlink(&outside, &link).expect("directory symlink");
+        entry.media_path = link.join("escaped.mp4");
+        entry.sidecar_path = link.join("escaped.json");
+
+        let result = storage.delete(&[entry]);
+        assert!(result.deleted.is_empty());
+        assert_eq!(result.failures.len(), 1);
+        assert!(result.failures[0].1.contains("not a direct child"));
+        assert!(media.exists() && sidecar.exists());
     }
 
     #[test]
@@ -1960,7 +2047,7 @@ mod tests {
         // Give every media file a real size, then force eviction with a
         // one-GiB limit by pretending the library is larger: use padded files.
         let big = 400 * 1024;
-        for entry in &entries {
+        for entry in entries.iter() {
             fs::write(&entry.media_path, vec![0u8; big]).expect("pad");
         }
         let entries = storage.scan().entries;

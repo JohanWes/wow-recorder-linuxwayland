@@ -2712,22 +2712,27 @@ fn arena_zone_name(flavor: &GameFlavor, zone_id: u32) -> Option<String> {
 }
 
 /// Legacy `instanceNamesByZoneId` (battlegrounds, arenas, dungeons) with the
-/// classic MoP challenge-mode fallback and `Unknown Dungeon` default.
-fn dungeon_name(flavor: &GameFlavor, zone_id: u32, map_id: u32) -> String {
+/// classic MoP challenge-mode fallback, without a default. Public to the crate
+/// because legacy sidecars store only ids; storage restores display names
+/// through this same table, exactly as the legacy frontend did.
+pub(crate) fn instance_name(flavor: &GameFlavor, zone_id: u32, map_id: u32) -> Option<String> {
     let merged = retail_battleground_name(zone_id)
         .or_else(|| classic_battleground_name(zone_id))
         .or_else(|| lookup(RETAIL_ARENAS, zone_id))
         .or_else(|| lookup(CLASSIC_ARENAS, zone_id))
         .or_else(|| lookup(DUNGEONS_BY_ZONE_ID, zone_id));
     if let Some(name) = merged {
-        return name.to_string();
+        return Some(name.to_string());
     }
-    if *flavor == GameFlavor::Classic
-        && let Some(name) = mop_challenge_mode_name(map_id)
-    {
-        return name.to_string();
+    if *flavor == GameFlavor::Classic {
+        return mop_challenge_mode_name(map_id).map(str::to_string);
     }
-    "Unknown Dungeon".to_string()
+    None
+}
+
+/// `instance_name` with the legacy `Unknown Dungeon` default.
+fn dungeon_name(flavor: &GameFlavor, zone_id: u32, map_id: u32) -> String {
+    instance_name(flavor, zone_id, map_id).unwrap_or_else(|| "Unknown Dungeon".to_string())
 }
 
 fn mop_challenge_mode_name(map_id: u32) -> Option<&'static str> {

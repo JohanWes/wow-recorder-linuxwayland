@@ -41,6 +41,8 @@ struct Inner {
     sink: ActionSink,
 
     stack: gtk4::Stack,
+    placeholder: adw::StatusPage,
+    empty_reveal: gtk4::Button,
     error_bar: gtk4::Box,
     timeline: Timeline,
     drawing: drawing::Overlay,
@@ -59,13 +61,14 @@ struct Inner {
     /// The one Clapper backend; `None` only when Clapper failed to start.
     backend: Option<PlayerBackend>,
 
-    entries: RefCell<Arc<[LibraryEntry]>>,
+    entries: RefCell<Arc<Vec<LibraryEntry>>>,
     prefs: Cell<MarkerPrefs>,
     /// POVs of the selected activity and the id currently loaded.
     povs: RefCell<Vec<multipov::Pov>>,
     active_id: RefCell<Option<RecordingId>>,
     preferred_player: RefCell<Option<String>>,
 
+    media_usable: Cell<bool>,
     playing: Cell<bool>,
     speed_index: Cell<usize>,
     muted: Cell<bool>,
@@ -86,6 +89,10 @@ impl Player {
         let placeholder = adw::StatusPage::new();
         placeholder.set_title("No recording selected");
         placeholder.set_description(Some("Select a recording below to review it."));
+        let empty_reveal = gtk4::Button::with_label("Reveal in folder");
+        empty_reveal.set_halign(gtk4::Align::Center);
+        empty_reveal.set_visible(false);
+        placeholder.set_child(Some(&empty_reveal));
 
         let backend = PlayerBackend::new()
             .map_err(|error| tracing::warn!(error, "player backend unavailable"))
@@ -188,6 +195,8 @@ impl Player {
         let inner = Rc::new(Inner {
             sink,
             stack,
+            placeholder,
+            empty_reveal,
             error_bar,
             timeline,
             drawing,
@@ -203,7 +212,7 @@ impl Player {
             marker_button,
             reveal_button,
             backend,
-            entries: RefCell::new(Arc::from(Vec::new())),
+            entries: RefCell::new(Arc::new(Vec::new())),
             prefs: Cell::new(MarkerPrefs {
                 deaths: DeathMarkerVisibility::Own,
                 encounters: MarkerVisibility::Visible,
@@ -212,6 +221,7 @@ impl Player {
             povs: RefCell::new(Vec::new()),
             active_id: RefCell::new(None),
             preferred_player: RefCell::new(None),
+            media_usable: Cell::new(false),
             playing: Cell::new(false),
             speed_index: Cell::new(2),
             muted: Cell::new(false),
@@ -224,12 +234,30 @@ impl Player {
             updating: Cell::new(false),
         });
 
+        // UI-BRIEF pointer contract: double click on the video toggles
+        // fullscreen. Capture phase so Clapper's internal gestures never eat
+        // the second press; the first press propagates untouched.
+        let double_click = gtk4::GestureClick::new();
+        double_click.set_button(gtk4::gdk::BUTTON_PRIMARY);
+        double_click.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        {
+            let this = Rc::clone(&inner);
+            double_click.connect_pressed(move |gesture, n_press, _, _| {
+                if n_press == 2 {
+                    gesture.set_state(gtk4::EventSequenceState::Claimed);
+                    this.toggle_fullscreen();
+                }
+            });
+        }
+        video_overlay.add_controller(double_click);
+
         inner.connect_backend();
         inner.connect_controls(
             &clip_create,
             &clip_cancel,
             &fullscreen_button,
             &error_reveal,
+            &inner.empty_reveal,
         );
 
         Self { widget, inner }
@@ -314,6 +342,7 @@ impl Inner {
         clip_cancel: &gtk4::Button,
         fullscreen_button: &gtk4::Button,
         error_reveal: &gtk4::Button,
+        empty_reveal: &gtk4::Button,
     ) {
         let this = Rc::clone(self);
         self.play_button
@@ -354,6 +383,8 @@ impl Inner {
         self.reveal_button.connect_clicked(move |_| this.reveal());
         let this = Rc::clone(self);
         error_reveal.connect_clicked(move |_| this.reveal());
+        let this = Rc::clone(self);
+        empty_reveal.connect_clicked(move |_| this.reveal());
         let this = Rc::clone(self);
         fullscreen_button.connect_clicked(move |_| this.toggle_fullscreen());
         let this = Rc::clone(self);
@@ -427,11 +458,29 @@ impl Inner {
             .to_string();
         self.duration_ms.set(entry.duration_ms);
         self.fps.set(entry.media.fps);
+        let has_content = entry.media.has_content;
         let is_clip = entry.category == Category::Clip;
         drop(entries);
-        *self.active_id.borrow_mut() = Some(id.clone());
+        let replacing_media = self.active_id.replace(Some(id.clone())).is_some();
 
         self.error_bar.set_visible(false);
+        self.empty_reveal.set_visible(false);
+        self.set_media_usable(false, is_clip);
+        if !has_content {
+            if replacing_media && let Some(backend) = &self.backend {
+                backend.stop();
+            }
+            self.playing.set(false);
+            self.play_button
+                .set_icon_name("media-playback-start-symbolic");
+            self.placeholder.set_title("Recording unavailable");
+            self.placeholder
+                .set_description(Some("The media file is empty."));
+            self.empty_reveal.set_visible(true);
+            self.stack.set_visible_child_name("placeholder");
+            self.refresh_timeline();
+            return;
+        }
         let Some(backend) = &self.backend else {
             self.error_bar.set_visible(true);
             return;
@@ -445,6 +494,7 @@ impl Inner {
         backend.set_speed(SPEEDS[self.speed_index.get()]);
         backend.set_volume(self.volume_scale.value());
         backend.set_muted(self.muted.get());
+        self.set_media_usable(true, is_clip);
         backend.play();
         self.playing.set(true);
         self.play_button
@@ -455,8 +505,6 @@ impl Inner {
         } else {
             self.position_seconds.set(0.0);
         }
-        // Clips cannot be re-clipped (legacy: the clip button is unavailable).
-        self.clip_button.set_sensitive(!is_clip);
         self.stack.set_visible_child_name("video");
         self.refresh_timeline();
         self.watch_for_failure();
@@ -470,6 +518,8 @@ impl Inner {
         gtk4::glib::timeout_add_local_once(std::time::Duration::from_secs(4), move || {
             let ready = this.backend.as_ref().is_some_and(PlayerBackend::is_ready);
             if !ready && this.active_id.borrow().is_some() {
+                let is_clip = this.active_entry_is_clip();
+                this.set_media_usable(false, is_clip);
                 this.error_bar.set_visible(true);
             }
         });
@@ -485,6 +535,11 @@ impl Inner {
         *self.active_id.borrow_mut() = None;
         self.povs.borrow_mut().clear();
         self.playing.set(false);
+        self.set_media_usable(false, false);
+        self.placeholder.set_title("No recording selected");
+        self.placeholder
+            .set_description(Some("Select a recording below to review it."));
+        self.empty_reveal.set_visible(false);
         self.stack.set_visible_child_name("placeholder");
         self.timeline.set_entry(None, self.prefs.get());
         self.rebuild_pov_selector();
@@ -492,7 +547,29 @@ impl Inner {
 
     // -- transport -----------------------------------------------------------
 
+    fn set_media_usable(&self, usable: bool, is_clip: bool) {
+        self.media_usable.set(usable);
+        self.play_button.set_sensitive(usable);
+        self.speed_button.set_sensitive(usable);
+        self.mute_button.set_sensitive(usable);
+        self.volume_scale.set_sensitive(usable);
+        self.drawing_toggle.set_sensitive(usable);
+        self.clip_button.set_sensitive(usable && !is_clip);
+    }
+
+    fn active_entry_is_clip(&self) -> bool {
+        let active = self.active_id.borrow();
+        let entries = self.entries.borrow();
+        active
+            .as_ref()
+            .and_then(|id| entries.iter().find(|entry| &entry.id == id))
+            .is_some_and(|entry| entry.category == Category::Clip)
+    }
+
     fn toggle_playing(&self) {
+        if !self.media_usable.get() {
+            return;
+        }
         let playing = !self.playing.get();
         self.playing.set(playing);
         if let Some(backend) = &self.backend {
@@ -532,6 +609,9 @@ impl Inner {
 
     /// Asynchronous seeking: keep only the newest target while one is pending.
     fn request_seek(self: &Rc<Self>, seconds: f64) {
+        if !self.media_usable.get() {
+            return;
+        }
         let seconds = seconds.clamp(0.0, self.duration_ms.get() as f64 / 1_000.0);
         self.position_seconds.set(seconds);
         self.timeline.set_position((seconds * 1_000.0) as u64);
@@ -572,6 +652,9 @@ impl Inner {
     }
 
     fn handle_key(self: &Rc<Self>, keyval: gtk4::gdk::Key) -> gtk4::glib::Propagation {
+        if !self.media_usable.get() {
+            return gtk4::glib::Propagation::Proceed;
+        }
         let position = self.position_seconds.get();
         match keyval {
             gtk4::gdk::Key::space | gtk4::gdk::Key::k | gtk4::gdk::Key::K => {
@@ -596,6 +679,13 @@ impl Inner {
                     && let Some(backend) = &self.backend
                 {
                     backend.advance_frame();
+                }
+            }
+            gtk4::gdk::Key::Escape => {
+                // Escape only leaves fullscreen; it is not claimed otherwise.
+                match self.stack.root().and_downcast::<gtk4::Window>() {
+                    Some(window) if window.is_fullscreen() => window.set_fullscreened(false),
+                    _ => return gtk4::glib::Propagation::Proceed,
                 }
             }
             _ => return gtk4::glib::Propagation::Proceed,
@@ -634,7 +724,7 @@ impl Inner {
     // -- clip mode -----------------------------------------------------------
 
     fn enter_clip_mode(&self) {
-        if self.duration_ms.get() == 0 {
+        if !self.media_usable.get() || self.duration_ms.get() == 0 {
             return;
         }
         self.clip_mode.set(true);
@@ -655,6 +745,9 @@ impl Inner {
     }
 
     fn create_clip(&self) {
+        if !self.media_usable.get() {
+            return;
+        }
         let (Some(range), Some(source)) = (self.timeline.clip(), self.active_id.borrow().clone())
         else {
             return;

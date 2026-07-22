@@ -119,6 +119,22 @@ impl Shell {
             .height_request(480)
             .build();
 
+        // Mirror the system theme onto the window so project CSS can darken
+        // the class/outcome colors for light-theme contrast (WCAG AA).
+        let style_manager = adw::StyleManager::default();
+        let sync_light = {
+            let window = window.clone();
+            move |style: &adw::StyleManager| {
+                if style.is_dark() {
+                    window.remove_css_class("wr-light");
+                } else {
+                    window.add_css_class("wr-light");
+                }
+            }
+        };
+        sync_light(&style_manager);
+        style_manager.connect_dark_notify(sync_light);
+
         let busy_banner = adw::Banner::new("The app is busy — try again in a moment.");
         let settings_cell: Rc<RefCell<Option<Rc<Settings>>>> = Rc::new(RefCell::new(None));
         let latest_snapshot: Rc<RefCell<Option<AppSnapshot>>> = Rc::new(RefCell::new(None));
@@ -208,9 +224,13 @@ impl Shell {
         banner_box.append(&busy_banner);
         // The WR-000-approved Manual-category start/stop entry (WR-012).
         let manual_bar = ManualBar::new(Rc::clone(&sink));
+        // One container for everything above the paned, so fullscreen can hide
+        // it without fighting the banners'/manual bar's own visibility logic.
+        let chrome = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        chrome.append(&banner_box);
+        chrome.append(&manual_bar.widget);
         let content_body = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        content_body.append(&banner_box);
-        content_body.append(&manual_bar.widget);
+        content_body.append(&chrome);
         content_body.append(&paned);
 
         let toolbar_view = adw::ToolbarView::new();
@@ -223,6 +243,26 @@ impl Shell {
         split.set_sidebar(Some(&sidebar_page));
         split.set_content(Some(&nav_page));
         window.set_content(Some(&split));
+
+        // VLC-style fullscreen: while the window is fullscreened only the
+        // player pane (video, timeline, controls) stays visible; the sidebar,
+        // header, banners, and library return on exit.
+        {
+            let split = split.clone();
+            let toolbar_view = toolbar_view.clone();
+            let chrome = chrome.clone();
+            let library_widget = library.widget.clone();
+            window.connect_fullscreened_notify(move |window| {
+                let fullscreen = window.is_fullscreen();
+                if fullscreen {
+                    split.set_show_content(true);
+                }
+                split.set_collapsed(fullscreen);
+                toolbar_view.set_reveal_top_bars(!fullscreen);
+                chrome.set_visible(!fullscreen);
+                library_widget.set_visible(!fullscreen);
+            });
+        }
 
         let shell = Self {
             window: window.clone(),
@@ -572,6 +612,7 @@ pub(crate) mod tests {
                 width: Some(1920),
                 height: Some(1080),
                 codec: Some(Codec::H264),
+                has_content: true,
             },
         }
     }
@@ -592,8 +633,8 @@ pub(crate) mod tests {
             }
         }
         AppSnapshot {
-            entries: Arc::from(entries),
-            correlations: Arc::<[CorrelatedActivity]>::from(Vec::new()),
+            entries: Arc::new(entries),
+            correlations: Arc::new(Vec::<CorrelatedActivity>::new()),
             category_counts,
             status,
             active: None,
