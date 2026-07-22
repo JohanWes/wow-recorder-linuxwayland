@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use clapper_gtk::prelude::AvExt;
+use gtk4::glib::prelude::Cast;
 
 /// The concrete Clapper objects used by Warcraft Recorder's player UI.
 #[derive(Clone)]
@@ -8,6 +9,9 @@ pub struct PlayerBackend {
     video: clapper_gtk::Video,
     player: clapper::Player,
 }
+
+#[derive(Clone)]
+pub struct VideoStreamToken(clapper::VideoStream);
 
 impl PlayerBackend {
     pub fn new() -> Result<Self, &'static str> {
@@ -62,6 +66,40 @@ impl PlayerBackend {
 
     pub fn stop(&self) {
         self.player.stop();
+    }
+
+    pub fn video_stream_token(&self) -> Option<VideoStreamToken> {
+        self.current_video_stream().map(VideoStreamToken)
+    }
+
+    /// Dimensions reported by a newly decoded active video stream.
+    pub fn video_dimensions(
+        &self,
+        expected_uri: &str,
+        previous_stream: Option<&VideoStreamToken>,
+    ) -> Option<(u32, u32)> {
+        if !self.is_ready() {
+            return None;
+        }
+        let current_uri = self.player.queue()?.current_item()?.uri()?;
+        if current_uri.as_str() != expected_uri {
+            return None;
+        }
+        let stream = self.current_video_stream()?;
+        if previous_stream.is_some_and(|previous| previous.0 == stream) {
+            return None;
+        }
+        let width = u32::try_from(stream.width()).ok()?;
+        let height = u32::try_from(stream.height()).ok()?;
+        (width > 0 && height > 0).then_some((width, height))
+    }
+
+    fn current_video_stream(&self) -> Option<clapper::VideoStream> {
+        self.player
+            .video_streams()?
+            .current_stream()?
+            .downcast::<clapper::VideoStream>()
+            .ok()
     }
 
     // WR-011 product operations missing from the WR-002 proof surface.

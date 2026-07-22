@@ -37,6 +37,7 @@ Use libadwaita's spacing, typography, focus, disabled states, and adaptive behav
 
 - Use `AdwNavigationSplitView` for sidebar/content and a vertical `GtkPaned` inside the content.
 - The player and table remain visible together on normal desktop sizes. Keep the divider position while the process runs, matching the current app; do not add persistent layout state.
+- On initial selection, viewpoint changes, window-width changes, and return from fullscreen, fit the player pane to the decoded video's aspect ratio so playback uses the available width without cropping, stretching, or black side bars, including for legacy sidecars without stored dimensions. The divider remains manually adjustable between automatic fits.
 - On narrow windows, libadwaita may collapse the sidebar; do not invent a mobile-specific layout.
 - Do not add a speculative Home, Dashboard, or Recent destination. Selecting a category opens its newest matching recording by default, as today.
 - Category order and visibility come from WR-000. `hide_empty_categories` hides only categories with zero entries; Manual and Clips follow the current behavior recorded there.

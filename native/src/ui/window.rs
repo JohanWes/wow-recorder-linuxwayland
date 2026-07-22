@@ -82,6 +82,31 @@ fn now_unix_ms() -> i64 {
         .map_or(0, |duration| duration.as_millis() as i64)
 }
 
+/// Viewport height that shows `video_width`x`video_height` without side bars.
+fn fitted_video_height(viewport_width: i32, video_width: u32, video_height: u32) -> i32 {
+    if viewport_width <= 0 || video_width == 0 || video_height == 0 {
+        return 0;
+    }
+    ((i64::from(viewport_width) * i64::from(video_height) + i64::from(video_width) - 1)
+        / i64::from(video_width))
+    .min(i64::from(i32::MAX)) as i32
+}
+
+/// Nudge the pane by the viewport's own error instead of predicting a height.
+/// Working off the real allocation self-corrects whatever the chrome, sidebar,
+/// or a fullscreen transition changed underneath us, and settles in one pass.
+fn fit_player_pane(paned: &gtk4::Paned, player: &Player, dimensions: (u32, u32)) {
+    let (width, height) = player.viewport_size();
+    let desired = fitted_video_height(width, dimensions.0, dimensions.1);
+    if desired <= 0 || desired == height {
+        return;
+    }
+    let position = (paned.position() + desired - height)
+        .max(0)
+        .min(paned.max_position());
+    paned.set_position(position);
+}
+
 pub struct Shell {
     window: adw::ApplicationWindow,
     sidebar: Sidebar,
@@ -209,10 +234,51 @@ impl Shell {
         paned.set_shrink_start_child(false);
         paned.set_resize_end_child(true);
         paned.set_shrink_end_child(false);
-        paned.connect_realize(|paned| {
-            let paned = paned.clone();
-            gtk4::glib::idle_add_local_once(move || paned.set_position(400));
-        });
+
+        // Match the pane to the active recording instead of leaving Clapper
+        // centered inside a fixed-height viewport with black side bars.
+        let video_dimensions = Rc::new(Cell::new(None::<(u32, u32)>));
+        {
+            // Only the starting split for an empty player; once a video is
+            // playing the viewport probe drives the position from real
+            // allocations, and realize fires mid-transition with stale ones.
+            let video_dimensions = Rc::clone(&video_dimensions);
+            paned.connect_realize(move |paned| {
+                if video_dimensions.get().is_none() {
+                    paned.set_position(400);
+                }
+            });
+        }
+        {
+            let weak_paned = paned.downgrade();
+            let weak_player = Rc::downgrade(&player);
+            let video_dimensions = Rc::clone(&video_dimensions);
+            player.connect_video_dimensions(move |width, height| {
+                let dimensions = (width, height);
+                video_dimensions.set(Some(dimensions));
+                if let (Some(paned), Some(player)) = (weak_paned.upgrade(), weak_player.upgrade()) {
+                    fit_player_pane(&paned, &player, dimensions);
+                }
+            });
+        }
+        {
+            let weak_paned = paned.downgrade();
+            let weak_player = Rc::downgrade(&player);
+            let video_dimensions = Rc::clone(&video_dimensions);
+            player.connect_viewport_resize(move || {
+                if let (Some(dimensions), Some(paned), Some(player)) = (
+                    video_dimensions.get(),
+                    weak_paned.upgrade(),
+                    weak_player.upgrade(),
+                ) {
+                    // Fullscreen hides the library, so the pane position no
+                    // longer drives the viewport; let the video letterbox.
+                    if paned.end_child().is_some_and(|child| child.is_visible()) {
+                        fit_player_pane(&paned, &player, dimensions);
+                    }
+                }
+            });
+        }
 
         let banner_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         banner_box.append(&setup_banner);
@@ -683,6 +749,14 @@ pub(crate) mod tests {
             content_view(&snapshot).player_hint.as_deref(),
             Some("Newest: Newest")
         );
+    }
+
+    #[test]
+    fn player_fit_uses_the_video_aspect_ratio() {
+        assert_eq!(fitted_video_height(1_620, 3_440, 1_440), 679);
+        assert_eq!(fitted_video_height(1_600, 1_920, 1_080), 900);
+        assert_eq!(fitted_video_height(0, 1_920, 1_080), 0);
+        assert_eq!(fitted_video_height(1_600, 0, 0), 0);
     }
 
     #[test]

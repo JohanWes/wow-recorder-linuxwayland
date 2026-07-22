@@ -25,12 +25,13 @@ use warcraft_recorder::domain::{
 
 use super::library::Selection;
 use super::multipov;
-use super::player_backend::PlayerBackend;
+use super::player_backend::{PlayerBackend, VideoStreamToken};
 use super::timeline::{self, MarkerPrefs, Timeline};
 use super::{ActionSink, ShellAction, drawing};
 
 const SPEEDS: [f64; 4] = [0.25, 0.5, 1.0, 2.0];
 const SEEK_STEP_SECONDS: f64 = 5.0;
+type VideoDimensionsHandler = Rc<dyn Fn(u32, u32)>;
 
 pub struct Player {
     pub widget: gtk4::Box,
@@ -41,6 +42,8 @@ struct Inner {
     sink: ActionSink,
 
     stack: gtk4::Stack,
+    video_overlay: gtk4::Overlay,
+    size_probe: gtk4::DrawingArea,
     placeholder: adw::StatusPage,
     empty_reveal: gtk4::Button,
     error_bar: gtk4::Box,
@@ -57,6 +60,10 @@ struct Inner {
     drawing_toggle: gtk4::ToggleButton,
     marker_button: gtk4::MenuButton,
     reveal_button: gtk4::Button,
+
+    /// Lets the shell size the paned player to the selected video's aspect
+    /// ratio without making the player own window layout.
+    video_dimensions_handler: RefCell<Option<VideoDimensionsHandler>>,
 
     /// The one Clapper backend; `None` only when Clapper failed to start.
     backend: Option<PlayerBackend>,
@@ -105,6 +112,13 @@ impl Player {
         }
         video_overlay.add_overlay(&drawing.area);
         video_overlay.set_vexpand(true);
+        // The drawing area is hidden until drawing is enabled, and GTK4 gives
+        // plain widgets no allocation signal, so this always-allocated probe is
+        // what tells the shell the video viewport was re-laid out. It paints
+        // nothing and takes no input.
+        let size_probe = gtk4::DrawingArea::new();
+        size_probe.set_can_target(false);
+        video_overlay.add_overlay(&size_probe);
 
         // One recovery row for playback failure; the library stays usable.
         let error_label = gtk4::Label::new(Some("This recording could not be played."));
@@ -195,6 +209,8 @@ impl Player {
         let inner = Rc::new(Inner {
             sink,
             stack,
+            video_overlay: video_overlay.clone(),
+            size_probe,
             placeholder,
             empty_reveal,
             error_bar,
@@ -211,6 +227,7 @@ impl Player {
             drawing_toggle,
             marker_button,
             reveal_button,
+            video_dimensions_handler: RefCell::new(None),
             backend,
             entries: RefCell::new(Arc::new(Vec::new())),
             prefs: Cell::new(MarkerPrefs {
@@ -305,6 +322,28 @@ impl Player {
     /// Table selection changed. `None` shows the placeholder.
     pub fn set_selection(&self, selection: Option<&Selection>) {
         self.inner.set_selection(selection);
+    }
+
+    /// Ask the shell to fit its player pane whenever the active POV changes.
+    pub fn connect_video_dimensions(&self, handler: impl Fn(u32, u32) + 'static) {
+        *self.inner.video_dimensions_handler.borrow_mut() = Some(Rc::new(handler));
+    }
+
+    /// Observe real player viewport allocations. Unlike `width-request`, this
+    /// fires for every relayout: window resize, chrome shown/hidden, and the
+    /// fullscreen transitions.
+    pub fn connect_viewport_resize(&self, handler: impl Fn() + 'static) {
+        self.inner
+            .size_probe
+            .connect_resize(move |_, _, _| handler());
+    }
+
+    /// Allocated size of the region the video is drawn into.
+    pub fn viewport_size(&self) -> (i32, i32) {
+        (
+            self.inner.video_overlay.width(),
+            self.inner.video_overlay.height(),
+        )
     }
 }
 
@@ -447,6 +486,7 @@ impl Inner {
             .to_string();
         self.duration_ms.set(entry.duration_ms);
         self.fps.set(entry.media.fps);
+        let dimensions = entry.media.width.zip(entry.media.height);
         let has_content = entry.media.has_content;
         let is_clip = entry.category == Category::Clip;
         drop(entries);
@@ -474,6 +514,7 @@ impl Inner {
             self.error_bar.set_visible(true);
             return;
         };
+        let previous_video_stream = backend.video_stream_token();
         backend.stop();
         if let Err(error) = backend.open_uri(&uri) {
             tracing::warn!(error, "player failed to load media");
@@ -495,8 +536,49 @@ impl Inner {
             self.position_seconds.set(0.0);
         }
         self.stack.set_visible_child_name("video");
+        self.report_video_dimensions(dimensions);
+        self.watch_for_video_dimensions(id.clone(), uri, previous_video_stream);
         self.refresh_timeline();
         self.watch_for_failure();
+    }
+
+    fn report_video_dimensions(&self, dimensions: Option<(u32, u32)>) -> bool {
+        let Some((width, height)) = dimensions.filter(|(width, height)| *width > 0 && *height > 0)
+        else {
+            return false;
+        };
+        if let Some(handler) = self.video_dimensions_handler.borrow().as_ref() {
+            handler(width, height);
+        }
+        true
+    }
+
+    /// Legacy sidecars do not contain media dimensions. Wait briefly for
+    /// Clapper's decoder to expose the authoritative active-stream size.
+    fn watch_for_video_dimensions(
+        self: &Rc<Self>,
+        id: RecordingId,
+        expected_uri: String,
+        previous_stream: Option<VideoStreamToken>,
+    ) {
+        let this = Rc::clone(self);
+        let attempts = Rc::new(Cell::new(0_u8));
+        gtk4::glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            if this.active_id.borrow().as_ref() != Some(&id) {
+                return gtk4::glib::ControlFlow::Break;
+            }
+            if this.report_video_dimensions(this.backend.as_ref().and_then(|backend| {
+                backend.video_dimensions(&expected_uri, previous_stream.as_ref())
+            })) {
+                return gtk4::glib::ControlFlow::Break;
+            }
+            attempts.set(attempts.get().saturating_add(1));
+            if attempts.get() >= 100 {
+                gtk4::glib::ControlFlow::Break
+            } else {
+                gtk4::glib::ControlFlow::Continue
+            }
+        });
     }
 
     /// Playback failure has no supported error signal in the bindings; if the
