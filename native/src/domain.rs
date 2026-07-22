@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
+pub const BLOODLUST_DURATION_MS: u64 = 40_000;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RecordingId(String);
@@ -250,6 +252,7 @@ impl ActivityDetails {
 #[serde(rename_all = "snake_case")]
 pub enum TimelineKind {
     Death,
+    Bloodlust,
     Encounter,
     Trash,
     Round,

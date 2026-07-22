@@ -19,7 +19,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,9 +29,13 @@ use serde_json::Value;
 
 use crate::activity::RecordingDraft;
 use crate::domain::{
-    ActivityDetails, Category, Codec, CombatantSummary, CorrelatedActivity, GameFlavor,
-    LibraryEntry, MediaFacts, Outcome, PlayerSummary, RecordingId, RoundSummary, StorageLimit,
-    TimelineItem, TimelineKind, TimelineShape,
+    ActivityDetails, BLOODLUST_DURATION_MS, Category, Codec, CombatantSummary, CorrelatedActivity,
+    GameFlavor, LibraryEntry, MediaFacts, Outcome, PlayerSummary, RecordingId, RoundSummary,
+    StorageLimit, TimelineItem, TimelineKind, TimelineShape,
+};
+use crate::parser::{
+    CombatEvent, ParseTimeContext, PlayerObservationKind, is_bloodlust_spell, parse_line,
+    parse_timestamp,
 };
 use crate::recorder::CaptureArtifacts;
 
@@ -109,6 +113,21 @@ pub struct RecoveryReport {
     pub failures: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TimelineEnrichmentReport {
+    pub enriched: usize,
+    pub failures: Vec<String>,
+}
+
+struct LegacyEnrichmentTarget {
+    sidecar_path: PathBuf,
+    value: Value,
+    start_ms: i64,
+    end_ms: i64,
+    casts: Vec<LegacyBloodlust>,
+    covered: bool,
+}
+
 pub struct Storage {
     root: PathBuf,
     replay_dir: PathBuf,
@@ -146,6 +165,125 @@ impl Storage {
     /// The path the UI reveals in a file manager.
     pub fn reveal_path(entry: &LibraryEntry) -> &Path {
         &entry.media_path
+    }
+
+    /// Add Bloodlust timestamps to legacy sidecars from their original retail
+    /// combat log. Each historical log is streamed at most once and only when
+    /// an un-enriched recording falls within that log session. The added key is
+    /// retained by the Electron reader as unknown metadata and makes future
+    /// scans independent of the large source log.
+    pub fn enrich_legacy_bloodlust(
+        &self,
+        retail_log_dirs: &[PathBuf],
+        context: ParseTimeContext,
+    ) -> TimelineEnrichmentReport {
+        let mut report = TimelineEnrichmentReport::default();
+        let mut targets = self.legacy_enrichment_targets(&mut report.failures);
+        if targets.is_empty() {
+            return report;
+        }
+
+        let mut log_paths = Vec::new();
+        for directory in retail_log_dirs {
+            match historical_log_paths(directory) {
+                Ok(found) => log_paths.extend(found),
+                Err(error) => report
+                    .failures
+                    .push(format!("{}: {error}", directory.display())),
+            }
+        }
+        log_paths.sort();
+        log_paths.dedup();
+        for log_path in log_paths {
+            if let Err(error) = collect_bloodlust_casts(&log_path, context, &mut targets) {
+                report
+                    .failures
+                    .push(format!("{}: {error}", log_path.display()));
+            }
+        }
+
+        for target in targets.iter_mut().filter(|target| target.covered) {
+            target.casts.sort_by_key(|cast| cast.timestamp_ms);
+            let Value::Object(object) = &mut target.value else {
+                continue;
+            };
+            let encoded = serde_json::to_value(&target.casts).expect("serializable timeline");
+            object.insert("bloodlustTimeline".to_owned(), encoded);
+            let json = match pretty_json(&target.value) {
+                Ok(json) => json,
+                Err(error) => {
+                    report.failures.push(format!(
+                        "{}: could not encode enrichment: {error}",
+                        target.sidecar_path.display()
+                    ));
+                    continue;
+                }
+            };
+            let temp = temp_sibling(&target.sidecar_path);
+            match write_atomic(&temp, Some(&target.sidecar_path), json.as_bytes()) {
+                Ok(()) => report.enriched += 1,
+                Err(error) => report.failures.push(format!(
+                    "{}: could not save enrichment: {error}",
+                    target.sidecar_path.display()
+                )),
+            }
+        }
+        report
+    }
+
+    fn legacy_enrichment_targets(&self, failures: &mut Vec<String>) -> Vec<LegacyEnrichmentTarget> {
+        let Ok(read_dir) = fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        let mut targets = Vec::new();
+        for path in read_dir.filter_map(Result::ok).map(|entry| entry.path()) {
+            if path.extension().and_then(|value| value.to_str()) != Some(SIDECAR_EXTENSION) {
+                continue;
+            }
+            let result = (|| -> Result<Option<LegacyEnrichmentTarget>, String> {
+                let text = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+                let value: Value =
+                    serde_json::from_str(&text).map_err(|error| error.to_string())?;
+                if value.get("schema_version").is_some()
+                    || value.get("bloodlustTimeline").is_some()
+                    || value.get("category").and_then(Value::as_str) != Some("Mythic+")
+                    || !matches!(
+                        value.get("flavour").and_then(Value::as_str),
+                        None | Some("Retail")
+                    )
+                {
+                    return Ok(None);
+                }
+                let start_ms = value
+                    .get("start")
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite())
+                    .map(|value| value as i64);
+                let duration_ms = value
+                    .get("duration")
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .map(seconds_to_ms);
+                let (Some(start_ms), Some(duration_ms)) = (start_ms, duration_ms) else {
+                    return Ok(None);
+                };
+                Ok(Some(LegacyEnrichmentTarget {
+                    sidecar_path: path.clone(),
+                    value,
+                    start_ms,
+                    end_ms: start_ms.saturating_add(duration_ms as i64),
+                    casts: Vec::new(),
+                    covered: false,
+                }))
+            })();
+            match result {
+                Ok(Some(target)) => targets.push(target),
+                Ok(None) => {}
+                Err(error) => failures.push(format!("{}: {error}", path.display())),
+            }
+        }
+        targets.sort_by_key(|target| target.start_ms);
+        targets
     }
 
     // -----------------------------------------------------------------------
@@ -788,6 +926,8 @@ struct LegacySidecar {
     map_id: Option<u32>,
     #[serde(rename = "challengeModeTimeline", default)]
     challenge_mode_timeline: Vec<LegacySegment>,
+    #[serde(rename = "bloodlustTimeline", default)]
+    bloodlust_timeline: Vec<LegacyBloodlust>,
     #[serde(rename = "soloShuffleTimeline", default)]
     solo_shuffle_timeline: Vec<LegacyRound>,
     /// Pre-cloud keystone level.
@@ -863,6 +1003,18 @@ struct LegacyRound {
     #[serde(default)]
     result: bool,
     duration: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LegacyBloodlust {
+    /// Milliseconds since Unix epoch while enriching, converted to a relative
+    /// offset before the legacy sidecar enters the domain.
+    #[serde(rename = "timestampMs")]
+    timestamp_ms: i64,
+    #[serde(rename = "spellId")]
+    spell_id: u32,
+    #[serde(rename = "spellName")]
+    spell_name: String,
 }
 
 impl LegacySidecar {
@@ -982,6 +1134,29 @@ impl LegacySidecar {
             let end_ms = start_ms.saturating_add(length_ms).min(duration_ms);
             if let Ok(item) = TimelineItem::span(kind, start_ms, end_ms, None, None, None) {
                 items.push(item);
+            }
+        }
+
+        if let Some(activity_start_ms) = self.start.filter(|value| value.is_finite()) {
+            let activity_start_ms = activity_start_ms as i64;
+            for cast in &self.bloodlust_timeline {
+                let start_ms = cast.timestamp_ms.saturating_sub(activity_start_ms).max(0) as u64;
+                if start_ms > duration_ms {
+                    continue;
+                }
+                let end_ms = start_ms
+                    .saturating_add(BLOODLUST_DURATION_MS)
+                    .min(duration_ms);
+                if let Ok(item) = TimelineItem::span(
+                    TimelineKind::Bloodlust,
+                    start_ms,
+                    end_ms,
+                    Some(cast.spell_name.clone()),
+                    None,
+                    None,
+                ) {
+                    items.push(item);
+                }
             }
         }
 
@@ -1290,6 +1465,129 @@ fn excluded_from_correlation(category: &Category) -> bool {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+fn historical_log_paths(source: &Path) -> io::Result<Vec<PathBuf>> {
+    if source.is_file() {
+        return Ok(vec![source.to_owned()]);
+    }
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("WoWCombatLog") && name.ends_with(".txt") {
+            paths.push(entry.path());
+        }
+    }
+    Ok(paths)
+}
+
+fn collect_bloodlust_casts(
+    path: &Path,
+    context: ParseTimeContext,
+    targets: &mut [LegacyEnrichmentTarget],
+) -> io::Result<()> {
+    let naive_context = ParseTimeContext::new(context.year, 0);
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut line = String::new();
+    let mut starts = Vec::new();
+    let mut casts = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        if !line.contains("CHALLENGE_MODE_START") && !line.contains("SPELL_CAST_SUCCESS") {
+            continue;
+        }
+        let Ok(Some(event)) = parse_line(GameFlavor::Retail, naive_context, line.trim_end()) else {
+            continue;
+        };
+        match event.event {
+            CombatEvent::ChallengeStarted { .. } => starts.push(event.occurred_at_ms),
+            CombatEvent::PlayerObserved {
+                kind: PlayerObservationKind::CastSucceeded,
+                spell_id,
+                spell_name,
+                ..
+            } if is_bloodlust_spell(spell_id) => {
+                casts.push((event.occurred_at_ms, spell_id, spell_name));
+            }
+            _ => {}
+        }
+    }
+    let Some(last_naive_ms) = last_log_timestamp(path, naive_context)? else {
+        return Ok(());
+    };
+
+    for target in targets.iter_mut().filter(|target| !target.covered) {
+        let Some(offset_ms) = starts
+            .iter()
+            .filter_map(|start| {
+                rounded_timezone_offset(*start - target.start_ms, context.utc_offset_minutes)
+            })
+            .min_by_key(|offset| {
+                (offset / (60 * 1_000) - i64::from(context.utc_offset_minutes)).abs()
+            })
+        else {
+            continue;
+        };
+        if last_naive_ms.saturating_sub(offset_ms) < target.end_ms {
+            continue;
+        }
+        target.covered = true;
+        for (cast_naive_ms, spell_id, spell_name) in &casts {
+            let cast_ms = cast_naive_ms.saturating_sub(offset_ms);
+            if cast_ms >= target.start_ms
+                && cast_ms < target.end_ms
+                && !target
+                    .casts
+                    .iter()
+                    .any(|cast| cast.timestamp_ms == cast_ms && cast.spell_id == *spell_id)
+            {
+                target.casts.push(LegacyBloodlust {
+                    timestamp_ms: cast_ms,
+                    spell_id: *spell_id,
+                    spell_name: spell_name.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rounded_timezone_offset(delta_ms: i64, expected_offset_minutes: i32) -> Option<i64> {
+    const QUARTER_HOUR_MS: i64 = 15 * 60 * 1_000;
+    const MIN_OFFSET_MS: i64 = -12 * 60 * 60 * 1_000;
+    const MAX_OFFSET_MS: i64 = 14 * 60 * 60 * 1_000;
+    let rounded =
+        ((delta_ms as f64 / QUARTER_HOUR_MS as f64).round() as i64).saturating_mul(QUARTER_HOUR_MS);
+    let expected = i64::from(expected_offset_minutes) * 60 * 1_000;
+    (MIN_OFFSET_MS..=MAX_OFFSET_MS)
+        .contains(&rounded)
+        .then_some(rounded)
+        .filter(|rounded| delta_ms.saturating_sub(*rounded).abs() <= 2_000)
+        // Historical daylight-saving changes stay close to the configured
+        // local offset; a larger difference means this is another run's start.
+        .filter(|rounded| rounded.saturating_sub(expected).abs() <= 2 * 60 * 60 * 1_000)
+}
+
+fn last_log_timestamp(path: &Path, context: ParseTimeContext) -> io::Result<Option<i64>> {
+    const TAIL_BYTES: u64 = 1024 * 1024;
+    let mut file = File::open(path)?;
+    let length = file.metadata()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(TAIL_BYTES)))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(text.lines().rev().find_map(|line| {
+        let timestamp = line.split_once("  ")?.0;
+        parse_timestamp(timestamp, context).ok()
+    }))
+}
+
 /// Convert timeline offsets relative to the activity start into media offsets.
 /// Markers that fall before the media starts are clipped away.
 fn shift_timeline(
@@ -1516,6 +1814,134 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../tests/native/golden")
             .join(name)
+    }
+
+    #[test]
+    fn enriches_legacy_bloodlust_from_cast_success_once() {
+        let tree = TempTree::new("bloodlust-enrichment");
+        let logs = tree.root.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let sidecar = tree.library().join("run.json");
+        fs::write(tree.library().join("run.mp4"), b"media").unwrap();
+        fs::write(
+            &sidecar,
+            r#"{
+  "category": "Mythic+",
+  "duration": 120,
+  "start": 1784396963000,
+  "result": true,
+  "unknownLegacyKey": "preserved"
+}"#,
+        )
+        .unwrap();
+        let log = logs.join("WoWCombatLog-071826_191439.txt");
+        fs::write(
+            log,
+            concat!(
+                "7/18/2026 19:49:23.0000  CHALLENGE_MODE_START,\"Algeth'ar Academy\",2526,402,22,[9,6,3]\n",
+                "7/18/2026 19:50:00.0000  SPELL_AURA_APPLIED,Player-1-A,\"Evoker-Realm\",0x512,0x0,Player-1-B,\"Player-Realm\",0x511,0x0,390386,\"Fury of the Aspects\",0x40,BUFF\n",
+                "7/18/2026 19:50:00.0000  SPELL_CAST_SUCCESS,Player-1-A,\"Evoker-Realm\",0x512,0x0,0000000000000000,nil,0x80000000,0x80000000,390386,\"Fury of the Aspects\",0x40\n",
+                "7/18/2026 19:50:00.0000  SPELL_CAST_SUCCESS,Player-1-A,\"Evoker-Realm\",0x512,0x0,0000000000000000,nil,0x80000000,0x80000000,390386,\"Fury of the Aspects\",0x40\n",
+                "7/18/2026 19:51:24.0000  CHALLENGE_MODE_END,2526,1,3,120000,0,0\n",
+            ),
+        )
+        .unwrap();
+
+        let storage = tree.storage();
+        let context = ParseTimeContext::new(2026, 120);
+        let report = storage.enrich_legacy_bloodlust(std::slice::from_ref(&logs), context);
+        assert_eq!(report.enriched, 1);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(
+            storage
+                .enrich_legacy_bloodlust(std::slice::from_ref(&logs), context)
+                .enriched,
+            0
+        );
+
+        let value: Value = serde_json::from_str(&fs::read_to_string(&sidecar).unwrap()).unwrap();
+        assert_eq!(value["unknownLegacyKey"], "preserved");
+        assert_eq!(value["bloodlustTimeline"].as_array().unwrap().len(), 1);
+        let index = storage.scan();
+        let marker = index.entries[0]
+            .timeline
+            .iter()
+            .find(|item| item.kind() == &TimelineKind::Bloodlust)
+            .unwrap();
+        assert_eq!(marker.start_ms(), 37_000);
+        assert_eq!(marker.end_ms(), Some(77_000));
+        assert_eq!(marker.label(), Some("Fury of the Aspects"));
+    }
+
+    #[test]
+    fn incomplete_log_does_not_cache_a_false_empty_timeline() {
+        let tree = TempTree::new("bloodlust-incomplete-log");
+        let logs = tree.root.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let sidecar = tree.write(
+            "run.json",
+            r#"{"category":"Mythic+","duration":120,"start":1784396963000}"#,
+        );
+        tree.write("run.mp4", "media");
+        let log = logs.join("WoWCombatLog.txt");
+        fs::write(
+            &log,
+            concat!(
+                "7/18/2026 19:49:23.0000  CHALLENGE_MODE_START,\"Dungeon\",2526,402,22,[]\n",
+                "7/18/2026 19:50:00.0000  SPELL_CAST_SUCCESS,Player-1-A,\"Evoker-Realm\",0x512,0x0,0000000000000000,nil,0x80000000,0x80000000,390386,\"Fury of the Aspects\",0x40\n",
+            ),
+        )
+        .unwrap();
+        let storage = tree.storage();
+        let context = ParseTimeContext::new(2026, 120);
+        assert_eq!(
+            storage
+                .enrich_legacy_bloodlust(std::slice::from_ref(&logs), context)
+                .enriched,
+            0
+        );
+        let value: Value = serde_json::from_str(&fs::read_to_string(&sidecar).unwrap()).unwrap();
+        assert!(value.get("bloodlustTimeline").is_none());
+
+        let mut file = OpenOptions::new().append(true).open(&log).unwrap();
+        writeln!(
+            file,
+            "7/18/2026 19:51:24.0000  CHALLENGE_MODE_END,2526,1,3,120000,0,0"
+        )
+        .unwrap();
+        assert_eq!(
+            storage
+                .enrich_legacy_bloodlust(std::slice::from_ref(&logs), context)
+                .enriched,
+            1
+        );
+    }
+
+    #[test]
+    fn historical_dst_offset_can_differ_from_the_current_offset() {
+        assert_eq!(
+            rounded_timezone_offset(60 * 60 * 1_000, 120),
+            Some(60 * 60 * 1_000)
+        );
+        assert_eq!(rounded_timezone_offset(5 * 60 * 60 * 1_000, 120), None);
+    }
+
+    #[test]
+    fn classic_sidecars_are_not_enrichment_targets() {
+        let tree = TempTree::new("bloodlust-classic-skip");
+        let sidecar = tree.write(
+            "classic.json",
+            r#"{"category":"Mythic+","flavour":"Classic","duration":120,"start":1}"#,
+        );
+        let original = fs::read_to_string(&sidecar).unwrap();
+        let mut failures = Vec::new();
+        assert!(
+            tree.storage()
+                .legacy_enrichment_targets(&mut failures)
+                .is_empty()
+        );
+        assert!(failures.is_empty());
+        assert_eq!(fs::read_to_string(sidecar).unwrap(), original);
     }
 
     struct TempTree {

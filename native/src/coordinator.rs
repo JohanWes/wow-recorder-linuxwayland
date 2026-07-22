@@ -279,6 +279,7 @@ pub struct Coordinator {
     media_control: SyncSender<MediaControl>,
     media_events: Receiver<MediaEvent>,
     media_join: Option<JoinHandle<()>>,
+    maintenance_busy: bool,
     finalize_queue: VecDeque<MediaJob>,
     user_queue: VecDeque<MediaJob>,
     media_busy: Option<WorkKind>,
@@ -359,6 +360,7 @@ impl Coordinator {
             media_control,
             media_events,
             media_join: Some(media_join),
+            maintenance_busy: false,
             finalize_queue: VecDeque::new(),
             user_queue: VecDeque::new(),
             media_busy: None,
@@ -408,6 +410,30 @@ impl Coordinator {
         }
         self.enforce_limit();
         self.dirty = true;
+        // Make the scanned library and armed recorder available before the
+        // optional one-time historical-log pass reads large source files.
+        self.publish();
+
+        let retail_logs: Vec<PathBuf> = enabled_log_sources(&self.config)
+            .into_iter()
+            .filter(|(field, flavor, _)| *field == "retail" && *flavor == GameFlavor::Retail)
+            .map(|(_, _, source)| source)
+            .collect();
+        let context = ParseTimeContext::new(self.setup.year, self.setup.media.utc_offset_minutes);
+        if !retail_logs.is_empty() {
+            match self.media_jobs.try_send(MediaJob::EnrichLegacyBloodlust {
+                retail_log_dirs: retail_logs,
+                context,
+            }) {
+                Ok(()) => self.maintenance_busy = true,
+                Err(TrySendError::Full(_)) => {
+                    tracing::warn!("media worker was busy before legacy timeline enrichment")
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    tracing::warn!("media worker unavailable for legacy timeline enrichment")
+                }
+            }
+        }
     }
 
     /// One iteration of the coordinator loop. Returns `false` once stopped.
@@ -991,7 +1017,7 @@ impl Coordinator {
     /// Finalization is always chosen before queued user work, and only one job
     /// is in flight at a time.
     fn dispatch_media(&mut self) {
-        if self.media_busy.is_some() {
+        if self.media_busy.is_some() || self.maintenance_busy {
             return;
         }
         let Some(job) = self
@@ -1028,6 +1054,16 @@ impl Coordinator {
         while let Ok(event) = self.media_events.try_recv() {
             self.dirty = true;
             match event {
+                MediaEvent::TimelineEnriched { enriched, failures } => {
+                    self.maintenance_busy = false;
+                    if enriched != 0 {
+                        tracing::info!(sidecars = enriched, "enriched legacy Bloodlust timelines");
+                        self.rescan();
+                    }
+                    for failure in failures {
+                        tracing::warn!(%failure, "legacy Bloodlust enrichment failed");
+                    }
+                }
                 MediaEvent::Progress(progress) => self.work = Some(progress),
                 MediaEvent::Completed { .. } => {
                     self.media_busy = None;
@@ -1209,7 +1245,9 @@ impl Coordinator {
     // -----------------------------------------------------------------------
 
     fn restart_media_worker(&mut self) -> Result<(), String> {
-        let _ = self.media_control.try_send(MediaControl::Shutdown);
+        let _ = self.media_control.try_send(MediaControl::Shutdown {
+            pending_finalizations: Vec::new(),
+        });
         if let Some(join) = self.media_join.take() {
             join.join()
                 .map_err(|_| "the previous media worker panicked".to_owned())?;
@@ -1485,8 +1523,13 @@ impl Coordinator {
         self.armed = false;
         // Finalization gets the media worker's grace period; user jobs cancel.
         self.user_queue.clear();
-        self.dispatch_media();
-        let _ = self.media_control.try_send(MediaControl::Shutdown);
+        // Transfer every not-yet-submitted finalization in the shutdown
+        // message. This cannot race with the capacity-one job channel when
+        // enrichment or another media job has not been received yet.
+        let pending_finalizations = self.finalize_queue.drain(..).collect();
+        let _ = self.media_control.send(MediaControl::Shutdown {
+            pending_finalizations,
+        });
         if let Some(join) = self.media_join.take() {
             let _ = join.join();
         }
@@ -1728,6 +1771,7 @@ fn test_events(
         retail(
             CombatEvent::PlayerObserved {
                 kind: PlayerObservationKind::AuraApplied,
+                spell_id: 0,
                 guid: GUID.to_owned(),
                 name: NAME.to_owned(),
                 flags: SELF_FLAGS,

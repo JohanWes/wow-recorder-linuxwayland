@@ -60,6 +60,7 @@ pub enum CombatEvent {
     },
     PlayerObserved {
         kind: PlayerObservationKind,
+        spell_id: u32,
         guid: String,
         name: String,
         flags: u64,
@@ -90,6 +91,10 @@ pub enum CombatEvent {
 pub enum PlayerObservationKind {
     AuraApplied,
     CastSucceeded,
+}
+
+pub fn is_bloodlust_spell(spell_id: u32) -> bool {
+    matches!(spell_id, 2825 | 32182 | 80353 | 264667 | 390386)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,6 +204,7 @@ pub fn parse_line(
             } else {
                 PlayerObservationKind::CastSucceeded
             },
+            spell_id: number(&fields, 9)?,
             guid: text(&fields, 1)?.to_owned(),
             name: text(&fields, 2)?.to_owned(),
             flags: hexadecimal(&fields, 3)?,
@@ -352,7 +358,7 @@ fn split_fields(payload: &str) -> Result<Vec<String>, ()> {
     Ok(fields)
 }
 
-fn parse_timestamp(value: &str, context: ParseTimeContext) -> Result<i64, ParseFailure> {
+pub(crate) fn parse_timestamp(value: &str, context: ParseTimeContext) -> Result<i64, ParseFailure> {
     let (date, time) = value
         .split_once(' ')
         .ok_or(ParseFailure::MalformedTimestamp)?;
@@ -567,6 +573,7 @@ mod tests {
             },
             CombatEvent::PlayerObserved {
                 kind: PlayerObservationKind::AuraApplied,
+                spell_id: 123,
                 guid: "Player-0-AAAA".into(),
                 name: "Player One".into(),
                 flags: 0x511,
@@ -602,6 +609,25 @@ mod tests {
     }
 
     #[test]
+    fn retains_the_spell_id_from_a_real_bloodlust_cast() {
+        let line = "7/18/2026 21:04:49.9572  SPELL_CAST_SUCCESS,Player-1-A,\"Evoker-Realm\",0x512,0x80000000,0000000000000000,nil,0x80000000,0x80000000,390386,\"Fury of the Aspects\",0x40";
+        let parsed = parse_line(GameFlavor::Retail, CONTEXT, line)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            parsed.event,
+            CombatEvent::PlayerObserved {
+                kind: PlayerObservationKind::CastSucceeded,
+                spell_id: 390386,
+                ref spell_name,
+                ..
+            } if spell_name == "Fury of the Aspects"
+        ));
+        assert!(is_bloodlust_spell(390386));
+        assert!(!is_bloodlust_spell(390435));
+    }
+
+    #[test]
     fn classic_shapes_allow_missing_combatant_details_and_short_deaths() {
         let fixture = [
             "10/16 12:44:44.182  ZONE_CHANGE,562,\"Blade's Edge Arena\",0",
@@ -631,6 +657,7 @@ mod tests {
             },
             CombatEvent::PlayerObserved {
                 kind: PlayerObservationKind::CastSucceeded,
+                spell_id: 123,
                 guid: "Player-0-CLASSIC".into(),
                 name: "Fighter-One".into(),
                 flags: 0x511,
@@ -696,6 +723,7 @@ mod tests {
             },
             CombatEvent::PlayerObserved {
                 kind: PlayerObservationKind::CastSucceeded,
+                spell_id: 321,
                 guid: "Player-0-ERA".into(),
                 name: "Raider-One".into(),
                 flags: 0x511,

@@ -98,6 +98,13 @@ Use ClapperGtk's video widget with Warcraft Recorder's own compact control row. 
 
 The timeline is the primary distinctive visual element. It uses thin colored lanes/markers over one shared seek track: activity segments, deaths, encounter boundaries, round boundaries, and the current clip range. Hover/focus reveals a short label and timestamp. Clicking seeks. Visibility preferences only hide presentation; marker data remains stored.
 
+Use a neutral blue-grey rail/activity color so red remains reserved for actual
+failure outcomes. A Bloodlust activation is an independent purple 40-second
+span sourced from its combat-log cast event, never inferred from encounter or
+trash segments. Deaths use a white tick through the rail with a muted
+grey-purple gravestone directly below it. Keep the playhead circle fully
+inside the track at both endpoints.
+
 Drawing remains an in-player analysis overlay but drops the Excalidraw dependency. Implement the tools WR-000 proves are exposed in the current build, using one `GtkDrawingArea` plus Cairo/Pango. Known minimum is selection/move, freehand, line/arrow, rectangle, diamond, ellipse, text, eraser, stroke color/width, undo/redo, and clear when those controls are present in the baseline. Items use normalized video coordinates and are session-only; they clear when the selected recording changes and are not loaded/saved/exported.
 
 Viewpoint behavior remains local-only. Correlate entries with the same approved activity hash and start-time tolerance from WR-000. The selector shows player/spec and opens one viewpoint, remembering the preferred player for the session. Multi-POV grid/synchronized playback was removed by maintainer decision (2026-07-22, recorded in the WR-000 parity matrix); do not build it.

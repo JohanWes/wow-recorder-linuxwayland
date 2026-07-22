@@ -2,8 +2,8 @@
 
 //! Serialized media and storage jobs.
 //!
-//! One worker thread consumes `MediaJob`s in order: finalize a finished
-//! capture or cut a clip. FFmpeg is spawned
+//! One worker thread consumes `MediaJob`s in order: perform one-time legacy
+//! timeline enrichment, finalize a finished capture, or cut a clip. FFmpeg is spawned
 //! directly with `std::process::Command` — no shell, no wrapper crate, no
 //! reader thread. Every invocation writes progress to an exclusively created
 //! `-progress` file and stderr to an exclusively created log file, which the
@@ -28,6 +28,7 @@ use crate::domain::{
     ActivityDetails, Category, LibraryEntry, MediaFacts, RecordingId, TimelineItem, TimelineShape,
     WorkKind, WorkProgress,
 };
+use crate::parser::ParseTimeContext;
 use crate::process;
 use crate::recorder::CaptureArtifacts;
 use crate::storage::{CombinedMedia, Storage, now_unix_ms, sanitize_name, unique_stem};
@@ -64,6 +65,10 @@ impl Default for MediaConfig {
 }
 
 pub enum MediaJob {
+    EnrichLegacyBloodlust {
+        retail_log_dirs: Vec<PathBuf>,
+        context: ParseTimeContext,
+    },
     FinalizeRecording {
         draft: Box<RecordingDraft>,
         artifacts: CaptureArtifacts,
@@ -79,19 +84,27 @@ pub enum MediaJob {
 impl MediaJob {
     pub fn kind(&self) -> WorkKind {
         match self {
+            Self::EnrichLegacyBloodlust { .. } => {
+                unreachable!("maintenance jobs do not enter the media work queues")
+            }
             Self::FinalizeRecording { .. } => WorkKind::Finalize,
             Self::CreateClip { .. } => WorkKind::Clip,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaControl {
-    Shutdown,
+    Shutdown {
+        pending_finalizations: Vec<MediaJob>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MediaEvent {
+    TimelineEnriched {
+        enriched: usize,
+        failures: Vec<String>,
+    },
     Progress(WorkProgress),
     Completed {
         kind: WorkKind,
@@ -114,6 +127,7 @@ pub struct MediaWorker {
     control: Receiver<MediaControl>,
     events: Sender<MediaEvent>,
     shutdown_at: Option<Instant>,
+    shutdown_finalizations: std::collections::VecDeque<MediaJob>,
 }
 
 impl MediaWorker {
@@ -131,39 +145,49 @@ impl MediaWorker {
             control,
             events,
             shutdown_at: None,
+            shutdown_finalizations: std::collections::VecDeque::new(),
         }
     }
 
     /// Consume jobs until shutdown is requested or the job channel closes.
     pub fn run(mut self) {
         loop {
-            match self.jobs.recv_timeout(self.config.poll_interval) {
-                Ok(job) => {
+            if self.shutdown_at.is_some() {
+                while let Some(job) = self.shutdown_finalizations.pop_front() {
                     self.run_job(job);
-                    if self.shutdown_at.is_some() {
-                        break;
-                    }
                 }
-                Err(RecvTimeoutError::Timeout) => {
-                    if self.observe_shutdown() {
-                        break;
-                    }
-                }
+                break;
+            }
+            match self.jobs.recv_timeout(self.config.poll_interval) {
+                Ok(job) => self.run_job(job),
+                Err(RecvTimeoutError::Timeout) => self.observe_shutdown(),
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
     }
 
-    fn observe_shutdown(&mut self) -> bool {
+    fn observe_shutdown(&mut self) {
         if self.shutdown_at.is_some() {
-            return true;
+            return;
         }
         match self.control.try_recv() {
-            Ok(MediaControl::Shutdown) | Err(TryRecvError::Disconnected) => {
-                self.shutdown_at = Some(Instant::now());
-                true
+            Ok(control) => self.begin_shutdown(control),
+            Err(TryRecvError::Disconnected) => {
+                self.begin_shutdown(MediaControl::Shutdown {
+                    pending_finalizations: Vec::new(),
+                });
             }
-            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
+    fn begin_shutdown(&mut self, control: MediaControl) {
+        let MediaControl::Shutdown {
+            pending_finalizations,
+        } = control;
+        if self.shutdown_at.is_none() {
+            self.shutdown_at = Some(Instant::now());
+            self.shutdown_finalizations.extend(pending_finalizations);
         }
     }
 
@@ -172,8 +196,27 @@ impl MediaWorker {
     }
 
     fn run_job(&mut self, job: MediaJob) {
+        let job = match job {
+            MediaJob::EnrichLegacyBloodlust {
+                retail_log_dirs,
+                context,
+            } => {
+                let report = self
+                    .storage
+                    .enrich_legacy_bloodlust(&retail_log_dirs, context);
+                self.emit(MediaEvent::TimelineEnriched {
+                    enriched: report.enriched,
+                    failures: report.failures,
+                });
+                return;
+            }
+            job => job,
+        };
         let kind = job.kind();
         let outcome = match job {
+            MediaJob::EnrichLegacyBloodlust { .. } => {
+                unreachable!("maintenance job returned from the early match")
+            }
             MediaJob::FinalizeRecording {
                 draft,
                 artifacts,
@@ -536,7 +579,10 @@ impl MediaWorker {
     ) -> FfmpegOutcome {
         let mut progress = ProgressReader::new(progress_path);
         let mut out_time_ms = 0u64;
-        let mut interrupt_at: Option<Instant> = None;
+        let mut interrupt_at = self.shutdown_at.map(|shutdown_at| match kind {
+            WorkKind::Finalize => shutdown_at + self.config.finalize_grace,
+            _ => Instant::now(),
+        });
 
         loop {
             if interrupt_at.is_some() {
@@ -545,14 +591,21 @@ impl MediaWorker {
                 std::thread::sleep(self.config.poll_interval);
             } else {
                 match self.control.recv_timeout(self.config.poll_interval) {
-                    Ok(MediaControl::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
-                        if self.shutdown_at.is_none() {
-                            self.shutdown_at = Some(Instant::now());
-                        }
+                    Ok(control) => {
+                        self.begin_shutdown(control);
                         // Automatic finalization may finish inside the grace
                         // period; user jobs are cancelled immediately. The
                         // deadline is set once: a disconnected control channel
                         // must not keep pushing it into the future.
+                        interrupt_at = Some(match kind {
+                            WorkKind::Finalize => Instant::now() + self.config.finalize_grace,
+                            _ => Instant::now(),
+                        });
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        self.begin_shutdown(MediaControl::Shutdown {
+                            pending_finalizations: Vec::new(),
+                        });
                         interrupt_at = Some(match kind {
                             WorkKind::Finalize => Instant::now() + self.config.finalize_grace,
                             _ => Instant::now(),
@@ -1175,7 +1228,9 @@ mod tests {
         }
 
         fn shutdown_and_join(&mut self) {
-            let _ = self.control.send(MediaControl::Shutdown);
+            let _ = self.control.send(MediaControl::Shutdown {
+                pending_finalizations: Vec::new(),
+            });
             if let Some(worker) = self.worker.take() {
                 worker.join().expect("join worker");
             }
@@ -1189,7 +1244,9 @@ mod tests {
                 std::sync::mpsc::channel().0,
             ));
             if let Some(worker) = self.worker.take() {
-                let _ = self.control.try_send(MediaControl::Shutdown);
+                let _ = self.control.try_send(MediaControl::Shutdown {
+                    pending_finalizations: Vec::new(),
+                });
                 let _ = worker.join();
             }
             let _ = fs::remove_dir_all(&self.root);
@@ -1544,6 +1601,27 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_processes_finalization_carried_outside_the_full_job_channel() {
+        let mut harness =
+            Harness::with_finalize_grace("shutdown-pending-finalize", Duration::from_secs(5));
+        let pending = finalize_job(&harness, true);
+
+        harness
+            .control
+            .send(MediaControl::Shutdown {
+                pending_finalizations: vec![pending],
+            })
+            .expect("shutdown");
+
+        let MediaEvent::Completed { kind, entry } = harness.outcome() else {
+            panic!("pending finalization did not complete during shutdown");
+        };
+        assert_eq!(kind, WorkKind::Finalize);
+        assert!(entry.media_path.exists());
+        harness.worker.take().expect("worker").join().expect("join");
+    }
+
+    #[test]
     fn a_failing_trim_falls_back_to_the_regular_recording_alone() {
         let mut harness = Harness::new("finalize-fallback");
         harness.set_mode("fail");
@@ -1584,7 +1662,9 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
         harness
             .control
-            .send(MediaControl::Shutdown)
+            .send(MediaControl::Shutdown {
+                pending_finalizations: Vec::new(),
+            })
             .expect("shutdown");
         let event = harness.outcome();
         assert_eq!(
@@ -1666,7 +1746,9 @@ mod tests {
 
         harness
             .control
-            .send(MediaControl::Shutdown)
+            .send(MediaControl::Shutdown {
+                pending_finalizations: Vec::new(),
+            })
             .expect("shutdown");
         let event = harness.outcome();
         assert_eq!(

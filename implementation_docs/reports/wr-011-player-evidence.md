@@ -5,6 +5,23 @@ mute/volume, speed, seek/frame shortcuts, drawing, and clip creation while
 preserving Reveal. A previously loaded backend item can no longer receive
 actions after an unusable corpus entry is selected.
 
+Bloodlust addendum (2026-07-22): real July 18/20 combat logs prove that one
+`SPELL_CAST_SUCCESS` identifies each activation, while `SPELL_AURA_APPLIED`
+fans out across the party and can be removed/reapplied repeatedly. The parser
+now retains spell IDs, the activity engine records one 40-second Bloodlust
+span for the known player abilities, and the legacy-library startup path
+streams each matching historical log once to add exact `bloodlustTimeline`
+timestamps to otherwise timestamp-free legacy sidecars. The enrichment is
+restricted to retail Mythic+ data, derives the historical UTC offset from the
+matching `CHALLENGE_MODE_START`, proves the log covers the recording end,
+deduplicates casts, remains retryable while a log is incomplete, is atomic,
+preserves unknown legacy JSON fields, and is skipped on later starts.
+The pass runs on the existing serial storage/media worker; live log polling,
+recorder control, commands, and initial library readiness remain responsive,
+and its typed completion event triggers the coordinator rescan.
+The timeline draws these spans purple independently of Mythic+ segments and
+uses the legacy-inspired gravestone silhouette for deaths.
+
 Status: **code complete and verified on host** (fmt/clippy/tests/release).
 In-Flatpak manual acceptance with real media follows the same WR-000
 source-traced, owner-executed deferral used by WR-009/WR-010 (see "Known
@@ -41,8 +58,8 @@ pane therefore owns exactly one Clapper backend.
   `advance_frame` while paused; all ignored while an editable widget has
   focus), asynchronous newest-target-only seeking, one playback-failure
   recovery row (Reveal in folder), and the kill-video entry point.
-- `ui/timeline.rs` — the one custom `GtkDrawingArea` seek track: activity
-  spans, death diamonds, encounter/round marks in outcome colors, elapsed
+- `ui/timeline.rs` — the one custom `GtkDrawingArea` seek track: activity and
+  purple Bloodlust spans, death gravestones, encounter/round marks in outcome colors, elapsed
   track, playhead, clip start/end handles, hover/keyboard-focus tooltip with
   label+timestamp, click/drag seeking, Left/Right nudge. Pure functions for
   visibility filtering, ms↔px mapping, hover hit-testing, and clip-handle
@@ -86,8 +103,12 @@ pane therefore owns exactly one Clapper backend.
   seek (`request_seek`/`on_seek_done`), no queue or callback framework.
 - Timeline markers/spans/visibility/navigation and clip bounds → pure tests
   (`timeline::tests`): visibility for own/all deaths, encounters, rounds,
-  clip-category suppression; px↔ms round trip; nearest-item hover; initial
+  always-independent Bloodlust presentation, clip-category suppression; px↔ms round trip; nearest-item hover; initial
   and clamped clip handles.
+- Bloodlust capture/enrichment → parser test uses the real Fury of the Aspects
+  cast shape and rejects Exhaustion; activity test asserts one 40-second span;
+  storage test proves aura fan-out is ignored, exact log-relative placement,
+  atomic/idempotent enrichment, and unknown-key preservation.
 - Drawing aligned after resize/fullscreen (normalized coordinates, redrawn at
   widget size) and cleared on media change → `Doc` tests for topmost
   hit-testing, undo/redo/clear round trip, move translation, erase.

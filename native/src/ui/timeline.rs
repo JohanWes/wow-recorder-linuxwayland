@@ -81,6 +81,7 @@ pub fn visible_items(entry: &LibraryEntry, prefs: MarkerPrefs) -> Vec<&TimelineI
                     _ => false,
                 },
             },
+            TimelineKind::Bloodlust => true,
             TimelineKind::Encounter | TimelineKind::Trash => {
                 prefs.encounters == MarkerVisibility::Visible
             }
@@ -153,7 +154,7 @@ pub fn format_mm_ss(ms: u64) -> String {
 // Widget
 // ---------------------------------------------------------------------------
 
-const TRACK_HEIGHT: i32 = 26;
+const TRACK_HEIGHT: i32 = 34;
 const HANDLE_RADIUS: f64 = 5.0;
 
 /// Which handle a pointer press grabbed in clip mode.
@@ -184,9 +185,10 @@ struct State {
 struct OwnedItem {
     span: bool,
     death: bool,
+    bloodlust: bool,
     start_ms: u64,
     end_ms: u64,
-    win: bool,
+    outcome: Option<Outcome>,
 }
 
 impl Timeline {
@@ -229,9 +231,10 @@ impl Timeline {
                 items.push(OwnedItem {
                     span: item.shape() == TimelineShape::Span,
                     death: item.kind() == &TimelineKind::Death,
+                    bloodlust: item.kind() == &TimelineKind::Bloodlust,
                     start_ms: item.start_ms(),
                     end_ms: item.end_ms().unwrap_or(item.start_ms()),
-                    win: matches!(item.outcome(), Some(Outcome::Win | Outcome::Complete)),
+                    outcome: item.outcome(),
                 });
                 labels.push((
                     item.start_ms(),
@@ -270,8 +273,8 @@ impl Timeline {
             let duration = state.duration_ms.get();
             let mid = height / 2.0;
 
-            // Rail: the muted activity track (legacy #5A2F27 tone).
-            cr.set_source_rgba(0.35, 0.19, 0.15, 1.0);
+            // Neutral rail keeps red available for actual failure outcomes.
+            cr.set_source_rgba(0.18, 0.20, 0.23, 1.0);
             rounded_bar(cr, 0.0, mid - 3.0, width, 6.0);
             let _ = cr.fill();
             if duration == 0 {
@@ -282,10 +285,20 @@ impl Timeline {
             for item in state.items.borrow().iter().filter(|item| item.span) {
                 let start = ms_to_x(item.start_ms, duration, width);
                 let end = ms_to_x(item.end_ms, duration, width).max(start + 2.0);
-                if item.win {
-                    cr.set_source_rgba(0.12, 1.0, 0.0, 0.55);
+                if item.bloodlust {
+                    cr.set_source_rgba(0.45, 0.16, 0.68, 0.9);
                 } else {
-                    cr.set_source_rgba(1.0, 0.0, 0.0, 0.55);
+                    match item.outcome {
+                        Some(Outcome::Win | Outcome::Complete) => {
+                            cr.set_source_rgba(0.12, 1.0, 0.0, 0.55);
+                        }
+                        Some(Outcome::Loss | Outcome::Abandoned) => {
+                            cr.set_source_rgba(1.0, 0.0, 0.0, 0.55);
+                        }
+                        Some(Outcome::Unknown) | None => {
+                            cr.set_source_rgba(0.30, 0.38, 0.46, 0.9);
+                        }
+                    }
                 }
                 rounded_bar(cr, start, mid - 3.0, end - start, 6.0);
                 let _ = cr.fill();
@@ -297,22 +310,23 @@ impl Timeline {
             rounded_bar(cr, 0.0, mid - 1.5, played, 3.0);
             let _ = cr.fill();
 
-            // Point markers: deaths as diamonds, other points as ticks.
+            // Point markers: deaths as gravestones, other points as ticks.
             for item in state.items.borrow().iter().filter(|item| !item.span) {
-                let x = ms_to_x(item.start_ms, duration, width);
-                if item.win {
-                    cr.set_source_rgba(0.12, 1.0, 0.0, 1.0);
-                } else {
-                    cr.set_source_rgba(1.0, 0.0, 0.0, 1.0);
-                }
+                let x = marker_x(ms_to_x(item.start_ms, duration, width), width);
                 if item.death {
-                    cr.move_to(x, mid - 6.0);
-                    cr.line_to(x + 4.0, mid);
-                    cr.line_to(x, mid + 6.0);
-                    cr.line_to(x - 4.0, mid);
-                    cr.close_path();
-                    let _ = cr.fill();
+                    draw_death_marker(cr, x, mid);
                 } else {
+                    match item.outcome {
+                        Some(Outcome::Win | Outcome::Complete) => {
+                            cr.set_source_rgba(0.12, 1.0, 0.0, 1.0);
+                        }
+                        Some(Outcome::Loss | Outcome::Abandoned) => {
+                            cr.set_source_rgba(1.0, 0.0, 0.0, 1.0);
+                        }
+                        Some(Outcome::Unknown) | None => {
+                            cr.set_source_rgba(0.65, 0.72, 0.80, 1.0);
+                        }
+                    }
                     cr.rectangle(x - 1.0, mid - 7.0, 2.0, 14.0);
                     let _ = cr.fill();
                 }
@@ -334,7 +348,13 @@ impl Timeline {
 
             // Playhead.
             cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
-            cr.arc(played, mid, 5.0, 0.0, std::f64::consts::TAU);
+            cr.arc(
+                marker_x(played, width),
+                mid,
+                5.0,
+                0.0,
+                std::f64::consts::TAU,
+            );
             let _ = cr.fill();
         });
     }
@@ -421,6 +441,42 @@ impl Timeline {
         });
         self.widget.add_controller(key);
     }
+}
+
+fn draw_death_marker(cr: &gtk4::cairo::Context, x: f64, mid: f64) {
+    // Legacy layout: a white event tick above the rail and the muted
+    // grey-purple gravestone below it.
+    cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+    cr.rectangle(x - 1.0, mid - 4.0, 2.0, 8.0);
+    let _ = cr.fill();
+
+    let stone_mid = mid + 10.0;
+    cr.set_source_rgba(0.40, 0.35, 0.45, 1.0);
+    cr.move_to(x - 4.0, stone_mid + 6.0);
+    cr.line_to(x - 4.0, stone_mid - 1.0);
+    cr.curve_to(
+        x - 4.0,
+        stone_mid - 6.0,
+        x + 4.0,
+        stone_mid - 6.0,
+        x + 4.0,
+        stone_mid - 1.0,
+    );
+    cr.line_to(x + 4.0, stone_mid + 6.0);
+    cr.close_path();
+    let _ = cr.fill_preserve();
+    cr.set_source_rgba(0.15, 0.08, 0.08, 1.0);
+    cr.set_line_width(1.0);
+    let _ = cr.stroke();
+    cr.move_to(x - 2.0, stone_mid - 1.0);
+    cr.line_to(x + 2.0, stone_mid - 1.0);
+    cr.move_to(x, stone_mid - 3.0);
+    cr.line_to(x, stone_mid + 2.0);
+    let _ = cr.stroke();
+}
+
+fn marker_x(x: f64, width: f64) -> f64 {
+    x.clamp(5.0, (width - 5.0).max(5.0))
 }
 
 /// Route a pointer x according to the active grab: seek or move a handle.
@@ -530,6 +586,15 @@ mod tests {
                 death("Bob", 2_000),
                 TimelineItem::span(TimelineKind::Encounter, 0, 10_000, None, None, None).unwrap(),
                 TimelineItem::span(TimelineKind::Round, 0, 5_000, None, None, None).unwrap(),
+                TimelineItem::span(
+                    TimelineKind::Bloodlust,
+                    3_000,
+                    43_000,
+                    Some("Fury of the Aspects".to_owned()),
+                    None,
+                    None,
+                )
+                .unwrap(),
             ],
         );
         let all = MarkerPrefs {
@@ -537,7 +602,7 @@ mod tests {
             encounters: MarkerVisibility::Visible,
             rounds: MarkerVisibility::Visible,
         };
-        assert_eq!(visible_items(&entry, all).len(), 4);
+        assert_eq!(visible_items(&entry, all).len(), 5);
 
         let own_only = MarkerPrefs {
             deaths: DeathMarkerVisibility::Own,
@@ -545,10 +610,11 @@ mod tests {
             rounds: MarkerVisibility::Hidden,
         };
         let visible = visible_items(&entry, own_only);
-        assert_eq!(visible.len(), 1);
+        assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].label(), Some("Alice"));
+        assert_eq!(visible[1].kind(), &TimelineKind::Bloodlust);
         // Filtering is presentation only.
-        assert_eq!(entry.timeline.len(), 4);
+        assert_eq!(entry.timeline.len(), 5);
 
         // Clips never draw markers.
         let clip = entry_with(Category::Clip, vec![death("Alice", 1_000)]);

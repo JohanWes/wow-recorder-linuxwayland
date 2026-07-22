@@ -29,10 +29,10 @@ use std::collections::HashMap;
 
 use crate::config::ActivitySettings;
 use crate::domain::{
-    ActivityDetails, Category, CombatantSummary, GameFlavor, Outcome, PlayerSummary,
-    RaidDifficulty, RecordingId, RoundSummary, TimelineItem, TimelineKind,
+    ActivityDetails, BLOODLUST_DURATION_MS, Category, CombatantSummary, GameFlavor, Outcome,
+    PlayerSummary, RaidDifficulty, RecordingId, RoundSummary, TimelineItem, TimelineKind,
 };
-use crate::parser::{CombatEvent, ParsedEvent, PlayerObservationKind};
+use crate::parser::{CombatEvent, ParsedEvent, PlayerObservationKind, is_bloodlust_spell};
 
 const RAID_DEFAULT_OVERRUN_MS: u64 = 3_000;
 const PVP_DEFAULT_OVERRUN_MS: u64 = 3_000;
@@ -486,6 +486,7 @@ fn handle_event(
         } => handle_combatant_info(state, rules, guid, *team_id, *spec_id),
         CombatEvent::PlayerObserved {
             kind,
+            spell_id,
             guid,
             name,
             flags,
@@ -497,6 +498,7 @@ fn handle_event(
             state,
             rules,
             *kind,
+            *spell_id,
             guid,
             name,
             *flags,
@@ -505,6 +507,7 @@ fn handle_event(
             *target_flags,
             spell_name,
             at_ms,
+            actions,
         ),
         CombatEvent::UnitDied {
             guid,
@@ -1562,6 +1565,7 @@ fn handle_player_observed(
     state: &mut FlavorState,
     rules: Rules,
     kind: PlayerObservationKind,
+    spell_id: u32,
     guid: &str,
     name: &str,
     flags: u64,
@@ -1570,10 +1574,30 @@ fn handle_player_observed(
     target_flags: u64,
     spell_name: &str,
     at_ms: i64,
+    actions: &mut Vec<ActivityAction>,
 ) {
     let Some(active) = state.active.as_mut() else {
         return;
     };
+    if kind == PlayerObservationKind::CastSucceeded && is_bloodlust_spell(spell_id) {
+        let start_ms = relative_ms(active.started_at_ms, at_ms);
+        let duplicate = active
+            .timeline
+            .iter()
+            .any(|item| item.kind() == &TimelineKind::Bloodlust && item.start_ms() == start_ms);
+        if !duplicate {
+            let item = TimelineItem::span(
+                TimelineKind::Bloodlust,
+                start_ms,
+                start_ms.saturating_add(BLOODLUST_DURATION_MS),
+                Some(spell_name.to_owned()),
+                None,
+                None,
+            )
+            .expect("bloodlust duration is positive");
+            push_timeline(active, item, actions);
+        }
+    }
     match rules {
         Rules::Retail => {
             if kind == PlayerObservationKind::CastSucceeded
@@ -2961,6 +2985,15 @@ mod tests {
         cast_at(guid, name, flags, EMPTY_GUID, "nil", 0, spell)
     }
 
+    fn bloodlust_cast(guid: &str, name: &str, flags: u64) -> CombatEvent {
+        let mut event = cast(guid, name, flags, "Fury of the Aspects");
+        let CombatEvent::PlayerObserved { spell_id, .. } = &mut event else {
+            unreachable!();
+        };
+        *spell_id = 390386;
+        event
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn cast_at(
         guid: &str,
@@ -2973,6 +3006,7 @@ mod tests {
     ) -> CombatEvent {
         CombatEvent::PlayerObserved {
             kind: PlayerObservationKind::CastSucceeded,
+            spell_id: 0,
             guid: guid.to_string(),
             name: name.to_string(),
             flags,
@@ -2997,6 +3031,61 @@ mod tests {
             .iter()
             .filter(|action| matches!(action, ActivityAction::Begin { .. }))
             .count()
+    }
+
+    #[test]
+    fn bloodlust_cast_adds_one_40_second_span_to_the_active_recording() {
+        let mut engine = ActivityEngine::new();
+        let config = ActivitySettings::default();
+        let start = 100_000;
+        let begin = handle(
+            &mut engine,
+            GameFlavor::Retail,
+            start,
+            CombatEvent::ChallengeStarted {
+                name: "The Stonevault".to_owned(),
+                zone_id: 2286,
+                map_id: 377,
+                level: 10,
+                affixes: vec![],
+            },
+            &config,
+        );
+        let ActivityAction::Begin { draft, .. } = &begin[0] else {
+            panic!("expected recording start");
+        };
+        let id = draft.id.clone();
+
+        let actions = handle(
+            &mut engine,
+            GameFlavor::Retail,
+            start + 12_345,
+            bloodlust_cast("Player-1-A", "Evoker-Realm", FRIENDLY_FLAGS),
+            &config,
+        );
+        assert_eq!(
+            actions,
+            vec![ActivityAction::Update {
+                id,
+                item: TimelineItem::span(
+                    TimelineKind::Bloodlust,
+                    12_345,
+                    52_345,
+                    Some("Fury of the Aspects".to_owned()),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            }]
+        );
+        let duplicate = handle(
+            &mut engine,
+            GameFlavor::Retail,
+            start + 12_345,
+            bloodlust_cast("Player-1-A", "Evoker-Realm", FRIENDLY_FLAGS),
+            &config,
+        );
+        assert!(duplicate.is_empty());
     }
 
     /// Retail raid kill: Begin at encounter start, death marker, Complete(Win)
