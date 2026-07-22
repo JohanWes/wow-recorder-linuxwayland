@@ -234,22 +234,25 @@ impl Player {
             updating: Cell::new(false),
         });
 
-        // UI-BRIEF pointer contract: double click on the video toggles
-        // fullscreen. Capture phase so Clapper's internal gestures never eat
-        // the second press; the first press propagates untouched.
-        let double_click = gtk4::GestureClick::new();
-        double_click.set_button(gtk4::gdk::BUTTON_PRIMARY);
-        double_click.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        // Handle primary presses before Clapper's click recognizer. Letting
+        // that recognizer see a first press makes it wait for the double-click
+        // interval before toggling playback. Every press therefore follows the
+        // same direct transport path as Space; the second press also toggles
+        // fullscreen per the UI-BRIEF pointer contract.
+        let video_click = gtk4::GestureClick::new();
+        video_click.set_button(gtk4::gdk::BUTTON_PRIMARY);
+        video_click.set_propagation_phase(gtk4::PropagationPhase::Capture);
         {
             let this = Rc::clone(&inner);
-            double_click.connect_pressed(move |gesture, n_press, _, _| {
+            video_click.connect_pressed(move |gesture, n_press, _, _| {
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
+                this.toggle_playing();
                 if n_press == 2 {
-                    gesture.set_state(gtk4::EventSequenceState::Claimed);
                     this.toggle_fullscreen();
                 }
             });
         }
-        video_overlay.add_controller(double_click);
+        video_overlay.add_controller(video_click);
 
         inner.connect_backend();
         inner.connect_controls(
