@@ -35,6 +35,9 @@ use crate::storage::{CombinedMedia, Storage, now_unix_ms, sanitize_name, unique_
 
 /// Bytes of the per-job stderr log read back for diagnostics.
 const LOG_TAIL_BYTES: u64 = 8 * 1024;
+/// Presenting transcode progress more often is visually indistinguishable but
+/// makes every GTK snapshot repeat work unrelated to the progress label.
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug)]
 pub struct MediaConfig {
@@ -579,6 +582,7 @@ impl MediaWorker {
     ) -> FfmpegOutcome {
         let mut progress = ProgressReader::new(progress_path);
         let mut out_time_ms = 0u64;
+        let mut last_progress_emit = Instant::now() - PROGRESS_EMIT_INTERVAL;
         let mut interrupt_at = self.shutdown_at.map(|shutdown_at| match kind {
             WorkKind::Finalize => shutdown_at + self.config.finalize_grace,
             _ => Instant::now(),
@@ -617,11 +621,14 @@ impl MediaWorker {
 
             if let Some(latest) = progress.read() {
                 out_time_ms = latest;
-                self.emit(MediaEvent::Progress(WorkProgress {
-                    kind,
-                    completed: latest,
-                    total: total_ms,
-                }));
+                if last_progress_emit.elapsed() >= PROGRESS_EMIT_INTERVAL {
+                    self.emit(MediaEvent::Progress(WorkProgress {
+                        kind,
+                        completed: latest,
+                        total: total_ms,
+                    }));
+                    last_progress_emit = Instant::now();
+                }
             }
 
             match child.try_wait() {

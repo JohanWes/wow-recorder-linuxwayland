@@ -19,6 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gtk4::glib::BoxedAnyObject;
 use gtk4::prelude::*;
@@ -401,6 +402,11 @@ struct State {
     /// A protect/tag/delete is in flight; the bulk bar stays disabled until the
     /// authoritative snapshot arrives.
     mutation_pending: Cell<bool>,
+    /// The authoritative index objects used to build the current rows.  Status
+    /// and progress snapshots reuse these Arcs, so retaining them lets the GTK
+    /// thread avoid rebuilding row metadata for unrelated updates.
+    entries: RefCell<Option<Arc<Vec<LibraryEntry>>>>,
+    correlations: RefCell<Option<Arc<Vec<warcraft_recorder::domain::CorrelatedActivity>>>>,
 }
 
 pub struct Library {
@@ -565,6 +571,8 @@ impl Library {
                 category: RefCell::new(None),
                 signature: Cell::new(0),
                 mutation_pending: Cell::new(false),
+                entries: RefCell::new(None),
+                correlations: RefCell::new(None),
             },
         });
 
@@ -981,6 +989,29 @@ impl Inner {
             *self.state.category.borrow_mut() = Some(category.clone());
             self.reset_for_category(&category);
         }
+
+        let index_changed = self
+            .state
+            .entries
+            .borrow()
+            .as_ref()
+            .is_none_or(|entries| !Arc::ptr_eq(entries, &snapshot.entries))
+            || self
+                .state
+                .correlations
+                .borrow()
+                .as_ref()
+                .is_none_or(|correlations| !Arc::ptr_eq(correlations, &snapshot.correlations));
+        if !category_changed && !index_changed {
+            // Progress, recorder-state, and active-timeline snapshots do not
+            // change the library.  In particular, do not rebuild suggestion
+            // sets or touch the virtualized store while FFmpeg reports work.
+            self.state.mutation_pending.set(false);
+            self.update_bulk_bar(&self.selected_rows());
+            return;
+        }
+        *self.state.entries.borrow_mut() = Some(Arc::clone(&snapshot.entries));
+        *self.state.correlations.borrow_mut() = Some(Arc::clone(&snapshot.correlations));
 
         let rows = build_rows(snapshot, &category);
         let signature = rows_signature(&rows);

@@ -1523,7 +1523,25 @@ fn collect_bloodlust_casts(
     };
 
     for target in targets.iter_mut().filter(|target| !target.covered) {
+        // A valid start can only be within two hours of the configured local
+        // UTC offset (and two seconds of the rounded timestamp).  Restricting
+        // the search to that tiny, time-ordered window avoids walking every
+        // historical dungeon start for every legacy sidecar.
+        let expected_offset_ms = i64::from(context.utc_offset_minutes) * 60 * 1_000;
+        let window_ms = 2 * 60 * 60 * 1_000 + 2_000;
+        let first_start = target
+            .start_ms
+            .saturating_add(expected_offset_ms)
+            .saturating_sub(window_ms);
+        let last_start = target
+            .start_ms
+            .saturating_add(expected_offset_ms)
+            .saturating_add(window_ms);
+        let starts_start = starts.partition_point(|start| *start < first_start);
+        let starts_end = starts.partition_point(|start| *start <= last_start);
         let Some(offset_ms) = starts
+            .get(starts_start..starts_end)
+            .unwrap_or_default()
             .iter()
             .filter_map(|start| {
                 rounded_timezone_offset(*start - target.start_ms, context.utc_offset_minutes)
@@ -1538,14 +1556,18 @@ fn collect_bloodlust_casts(
             continue;
         }
         target.covered = true;
-        for (cast_naive_ms, spell_id, spell_name) in &casts {
+        let first_cast = target.start_ms.saturating_add(offset_ms);
+        let last_cast = target.end_ms.saturating_add(offset_ms);
+        let casts_start = casts.partition_point(|(cast_ms, _, _)| *cast_ms < first_cast);
+        let casts_end = casts.partition_point(|(cast_ms, _, _)| *cast_ms < last_cast);
+        for (cast_naive_ms, spell_id, spell_name) in
+            casts.get(casts_start..casts_end).unwrap_or_default()
+        {
             let cast_ms = cast_naive_ms.saturating_sub(offset_ms);
-            if cast_ms >= target.start_ms
-                && cast_ms < target.end_ms
-                && !target
-                    .casts
-                    .iter()
-                    .any(|cast| cast.timestamp_ms == cast_ms && cast.spell_id == *spell_id)
+            if !target
+                .casts
+                .iter()
+                .any(|cast| cast.timestamp_ms == cast_ms && cast.spell_id == *spell_id)
             {
                 target.casts.push(LegacyBloodlust {
                     timestamp_ms: cast_ms,

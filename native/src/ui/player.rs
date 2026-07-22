@@ -262,6 +262,9 @@ impl Player {
             &error_reveal,
             &inner.empty_reveal,
         );
+        // The common default preferences do not differ on the first snapshot,
+        // so install the initial menu here rather than relying on an update.
+        inner.rebuild_marker_menu();
 
         Self { widget, inner }
     }
@@ -294,8 +297,8 @@ impl Player {
         };
         if inner.prefs.replace(prefs) != prefs {
             inner.refresh_timeline();
+            inner.rebuild_marker_menu();
         }
-        inner.rebuild_marker_menu();
         inner.updating.set(false);
     }
 
