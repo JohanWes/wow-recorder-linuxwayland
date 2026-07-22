@@ -13,8 +13,10 @@ pub mod filters;
 pub mod kill_video;
 pub mod library;
 pub mod multipov;
+pub mod operational_actions;
 pub mod player;
 pub mod player_backend;
+pub mod settings;
 pub mod sidebar;
 pub mod status;
 pub mod timeline;
@@ -61,6 +63,8 @@ pub enum ShellAction {
     /// Maps `RecoveryAction::Retry`; the shell retries arming capture.
     Retry,
     OpenSettings,
+    /// Opens the test-recording category chooser (WR-012).
+    TestRecording,
     OpenLogs,
     About,
     Quit,
@@ -240,38 +244,20 @@ pub fn install_actions(application: &adw::Application, sink: ActionSink) {
         ("settings", ShellAction::OpenSettings),
         ("about", ShellAction::About),
         ("open-logs", ShellAction::OpenLogs),
+        ("test-recording", ShellAction::TestRecording),
     ] {
         let sink = Rc::clone(&sink);
         simple_action(application, name, move || {
             sink(action.clone());
         });
     }
-
-    let test_action =
-        gtk4::gio::SimpleAction::new("test-recording", Some(&String::static_variant_type()));
-    test_action.connect_activate(move |_, parameter| {
-        let slug = parameter.and_then(|parameter| parameter.get::<String>());
-        if let Some((category, _, _)) = TEST_CATEGORIES
-            .iter()
-            .find(|(_, _, candidate)| slug.as_deref() == Some(*candidate))
-        {
-            sink(ShellAction::Command(Command::RunTest {
-                category: category.clone(),
-            }));
-        }
-    });
-    application.add_action(&test_action);
 }
 
 /// The window primary menu: Test recording, Open logs, About. There is no
 /// update UI; the Flatpak remote and software center own updates.
 pub fn primary_menu() -> gtk4::gio::Menu {
     let menu = gtk4::gio::Menu::new();
-    let test_menu = gtk4::gio::Menu::new();
-    for (_, label, slug) in TEST_CATEGORIES {
-        test_menu.append(Some(label), Some(&format!("app.test-recording::{slug}")));
-    }
-    menu.append_submenu(Some("Test recording"), &test_menu);
+    menu.append(Some("Test recording…"), Some("app.test-recording"));
     menu.append(Some("Open logs"), Some("app.open-logs"));
     menu.append(Some("About Warcraft Recorder"), Some("app.about"));
     menu

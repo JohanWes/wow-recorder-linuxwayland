@@ -19,7 +19,7 @@ WR-002, WR-003, WR-006, WR-008, and WR-009 must be `DONE`.
 
 ## Settings window
 
-Implement one current `AdwPreferencesDialog` with the four pages and ordering in UI-BRIEF. Every field maps one-to-one to WR-003 `Config`/WR-000; omit any proposal not in that mapping. Do not use deprecated `AdwPreferencesWindow`.
+Implement one current modal settings dialog with the four pages and ordering in UI-BRIEF. Because `AdwPreferencesDialog` exposes no Apply/Cancel actions, the smallest current equivalent is used (rule 8): one `AdwDialog` hosting an `AdwViewSwitcher` over four `AdwPreferencesPage`s with Cancel/Apply in its header bar. Every field maps one-to-one to WR-003 `Config`/WR-000; omit any proposal not in that mapping. Do not use deprecated `AdwPreferencesWindow`.
 
 ### Capture
 

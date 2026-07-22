@@ -107,7 +107,7 @@ Statuses are `TODO`, `IN PROGRESS`, `BLOCKED(reason)`, and `DONE`. Start only wh
 | WR-009 | [Native shell and UI system](WR-009-native-shell.md) | WR-008 | DONE |
 | WR-010 | [Library view and local actions](WR-010-library-view.md) | WR-007, WR-009 | DONE |
 | WR-011 | [Player, timeline, drawing, and viewpoints](WR-011-player-timeline.md) | WR-002, WR-007, WR-008, WR-009 | DONE |
-| WR-012 | [Settings, native choosers, and app status](WR-012-settings-portals-status.md) | WR-002, WR-003, WR-006, WR-008, WR-009 | TODO |
+| WR-012 | [Settings, native choosers, and app status](WR-012-settings-portals-status.md) | WR-002, WR-003, WR-006, WR-008, WR-009 | DONE |
 | WR-014 | [Flatpak release-candidate pipeline and permanent remote](WR-014-flatpak-release.md) | WR-002, WR-010, WR-011, WR-012 | TODO |
 | WR-013 | [Migration release and Electron cutover](WR-013-electron-dead-code-cutover.md) | WR-014 | TODO |
 | WR-015 | [Parity/lean gates and stable publication](WR-015-release-gates.md) | WR-013, WR-014 | TODO |

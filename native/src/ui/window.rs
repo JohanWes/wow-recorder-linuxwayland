@@ -17,8 +17,12 @@ use libadwaita::prelude::*;
 use warcraft_recorder::coordinator::{AppSnapshot, Command, CoordinatorHandle};
 use warcraft_recorder::domain::{RecordingId, RecoveryAction};
 
+use warcraft_recorder::domain::RecorderStatus;
+
 use super::library::{Library, Selection};
+use super::operational_actions::{ManualBar, present_test_dialog};
 use super::player::Player;
+use super::settings::Settings;
 use super::sidebar::Sidebar;
 use super::tray_backend::TrayBackend;
 use super::{ActionSink, ShellAction, category_label, install_actions, primary_menu, tray};
@@ -87,6 +91,9 @@ pub struct Shell {
     problem_banner: adw::Banner,
     library: Library,
     player: Rc<Player>,
+    manual_bar: ManualBar,
+    settings: Rc<RefCell<Option<Rc<Settings>>>>,
+    latest_snapshot: Rc<RefCell<Option<AppSnapshot>>>,
     close_to_tray: Rc<Cell<bool>>,
     minimize_to_tray: Rc<Cell<bool>>,
     tray_available: Rc<Cell<bool>>,
@@ -113,6 +120,11 @@ impl Shell {
             .build();
 
         let busy_banner = adw::Banner::new("The app is busy — try again in a moment.");
+        let settings_cell: Rc<RefCell<Option<Rc<Settings>>>> = Rc::new(RefCell::new(None));
+        let latest_snapshot: Rc<RefCell<Option<AppSnapshot>>> = Rc::new(RefCell::new(None));
+        let tray_available = Rc::new(Cell::new(
+            tray.as_ref().is_some_and(|tray| tray.is_available()),
+        ));
         let sink = make_sink(
             &window,
             application,
@@ -120,6 +132,9 @@ impl Shell {
             &busy_banner,
             data_dir,
             config_dir,
+            &settings_cell,
+            &latest_snapshot,
+            &tray_available,
         );
         install_actions(application, Rc::clone(&sink));
 
@@ -191,8 +206,11 @@ impl Shell {
         banner_box.append(&setup_banner);
         banner_box.append(&problem_banner);
         banner_box.append(&busy_banner);
+        // The WR-000-approved Manual-category start/stop entry (WR-012).
+        let manual_bar = ManualBar::new(Rc::clone(&sink));
         let content_body = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         content_body.append(&banner_box);
+        content_body.append(&manual_bar.widget);
         content_body.append(&paned);
 
         let toolbar_view = adw::ToolbarView::new();
@@ -215,11 +233,12 @@ impl Shell {
             problem_banner,
             library,
             player,
+            manual_bar,
+            settings: settings_cell,
+            latest_snapshot,
             close_to_tray: Rc::new(Cell::new(close_to_tray)),
             minimize_to_tray: Rc::new(Cell::new(minimize_to_tray)),
-            tray_available: Rc::new(Cell::new(
-                tray.as_ref().is_some_and(|tray| tray.is_available()),
-            )),
+            tray_available,
             hold_guard: Rc::new(RefCell::new(None)),
         };
         shell.connect_close_request();
@@ -241,6 +260,9 @@ impl Shell {
     pub fn set_tray_available(&self, available: bool) {
         self.tray_available.set(available);
         self.sidebar.status_card.set_tray_available(available);
+        if let Some(settings) = self.settings.borrow().as_ref() {
+            settings.set_tray_available(available);
+        }
         // If the tray vanished while the window was hidden to it, the window is
         // the only way back in — reveal it so the process can't be stranded
         // with no visible window and no tray menu (WR-009 step 11). Bind the
@@ -268,6 +290,12 @@ impl Shell {
         // by the library rebuild resolve against current entries.
         self.player.apply_snapshot(snapshot);
         self.library.apply(snapshot);
+        self.manual_bar.apply(snapshot, now_unix_ms());
+
+        *self.latest_snapshot.borrow_mut() = Some(snapshot.clone());
+        if let Some(settings) = self.settings.borrow().as_ref() {
+            settings.apply_snapshot(snapshot);
+        }
 
         self.setup_banner.set_revealed(view.setup_banner.is_some());
         if let Some(message) = &view.setup_banner {
@@ -333,6 +361,7 @@ fn hide_and_hold(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_sink(
     window: &adw::ApplicationWindow,
     application: &adw::Application,
@@ -340,6 +369,9 @@ fn make_sink(
     busy_banner: &adw::Banner,
     data_dir: &Path,
     config_dir: &Path,
+    settings_cell: &Rc<RefCell<Option<Rc<Settings>>>>,
+    latest_snapshot: &Rc<RefCell<Option<AppSnapshot>>>,
+    tray_available: &Rc<Cell<bool>>,
 ) -> ActionSink {
     let window = window.clone();
     let application = application.clone();
@@ -347,12 +379,39 @@ fn make_sink(
     let busy_banner = busy_banner.clone();
     let data_dir: PathBuf = data_dir.to_owned();
     let config_dir: PathBuf = config_dir.to_owned();
-    Rc::new(move |action| {
+    let settings_cell = Rc::clone(settings_cell);
+    let latest_snapshot = Rc::clone(latest_snapshot);
+    let tray_available = Rc::clone(tray_available);
+    // Settings and the test dialog need the sink itself; the cell breaks the
+    // construction cycle and is filled right after the closure is built.
+    let sink_cell: Rc<RefCell<Option<ActionSink>>> = Rc::new(RefCell::new(None));
+    let sink_for_dialogs = Rc::clone(&sink_cell);
+    let sink: ActionSink = Rc::new(move |action| {
         let command = match action {
             ShellAction::Command(command) => command,
             ShellAction::Retry => Command::Arm,
             ShellAction::OpenSettings => {
-                present_settings(&window);
+                let sink = sink_for_dialogs.borrow().clone();
+                if let Some(sink) = sink {
+                    open_settings(
+                        &window,
+                        sink,
+                        &settings_cell,
+                        &latest_snapshot,
+                        tray_available.get(),
+                    );
+                }
+                return true;
+            }
+            ShellAction::TestRecording => {
+                let sink = sink_for_dialogs.borrow().clone();
+                if let Some(sink) = sink {
+                    let ready = latest_snapshot
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.status == RecorderStatus::Ready);
+                    present_test_dialog(window.upcast_ref(), sink, ready);
+                }
                 return true;
             }
             ShellAction::OpenLogs => {
@@ -374,7 +433,9 @@ fn make_sink(
             });
         }
         sent
-    })
+    });
+    *sink_cell.borrow_mut() = Some(Rc::clone(&sink));
+    sink
 }
 
 fn recovery_from_label(label: &str) -> Option<RecoveryAction> {
@@ -400,18 +461,31 @@ fn recovery_shell_action(action: RecoveryAction) -> ShellAction {
     }
 }
 
-/// WR-012 owns the real settings dialog; this is the shell's placeholder.
-fn present_settings(parent: &impl IsA<gtk4::Widget>) {
-    let dialog = adw::PreferencesDialog::new();
-    dialog.set_title("Settings");
-    let page = adw::PreferencesPage::new();
-    let group = adw::PreferencesGroup::new();
-    let row = adw::ActionRow::new();
-    row.set_title("Native settings arrive with the settings milestone.");
-    group.add(&row);
-    page.add(&group);
-    dialog.add(&page);
-    dialog.present(Some(parent));
+/// Open (or re-present) the one Settings dialog against the newest snapshot.
+fn open_settings(
+    window: &adw::ApplicationWindow,
+    sink: ActionSink,
+    settings_cell: &Rc<RefCell<Option<Rc<Settings>>>>,
+    latest_snapshot: &Rc<RefCell<Option<AppSnapshot>>>,
+    tray_available: bool,
+) {
+    if let Some(settings) = settings_cell.borrow().as_ref() {
+        settings.dialog.present(Some(window));
+        return;
+    }
+    // The first snapshot arrives within one coordinator tick of startup;
+    // until then there is no config to edit.
+    let Some(snapshot) = latest_snapshot.borrow().clone() else {
+        return;
+    };
+    let settings = Settings::open(window.upcast_ref(), sink, &snapshot, tray_available);
+    {
+        let settings_cell = Rc::clone(settings_cell);
+        settings.dialog.connect_closed(move |_| {
+            settings_cell.borrow_mut().take();
+        });
+    }
+    *settings_cell.borrow_mut() = Some(settings);
 }
 
 fn present_about(parent: &impl IsA<gtk4::Widget>, application: &adw::Application) {

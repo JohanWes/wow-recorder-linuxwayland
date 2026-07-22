@@ -120,7 +120,7 @@ Do not require hover for an action. Tooltips supplement visible/accessibility la
 
 ## Settings
 
-Use one `AdwPreferencesDialog` with only pages justified by retained configuration:
+Use one modal settings dialog — an `AdwDialog` hosting an `AdwViewSwitcher` over `AdwPreferencesPage`s with Cancel/Apply header buttons, since `AdwPreferencesDialog` exposes no action buttons — with only pages justified by retained configuration:
 
 1. Capture: codec, FPS, bitrate/quality, replay buffer, extra lead-in, cursor, RAM/disk replay storage, capture-target status and Reselect.
 2. Audio: output and input device selectors populated by the recorder adapter.

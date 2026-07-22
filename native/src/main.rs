@@ -22,16 +22,16 @@ const APP_ID: &str = "io.github.JohanWes.WarcraftRecorder";
 const APP_ID: &str = "io.github.JohanWes.WarcraftRecorder.Devel";
 
 fn main() {
-    tracing_subscriber::fmt::init();
-
     let setup = match coordinator::Setup::from_environment() {
         Ok(setup) => setup,
         Err(error) => {
+            tracing_subscriber::fmt::init();
             tracing::error!(%error, "cannot resolve the configuration directory");
             eprintln!("warcraft-recorder: {error}");
             std::process::exit(1);
         }
     };
+    init_logging(&setup.data_dir);
     let options = shell_options(APP_ID, &setup);
     let coordinator = Rc::new(RefCell::new(coordinator::start(setup)));
 
@@ -77,4 +77,68 @@ fn config_dir(config_path: &std::path::Path) -> PathBuf {
     config_path
         .parent()
         .map_or_else(PathBuf::new, std::path::Path::to_owned)
+}
+
+/// App log size cap; the previous log is kept as `.old`, so on-disk logging
+/// stays bounded to two files (WR-012: stdlib rotation, no tracing-appender).
+const LOG_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// `tracing` output goes to `app.log` next to the recorder diagnostics that
+/// "Open logs" reveals; stderr is the fallback when the file cannot open.
+fn init_logging(data_dir: &std::path::Path) {
+    let path = data_dir.join("app.log");
+    let open = |path: &std::path::Path| {
+        std::fs::create_dir_all(data_dir)?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    };
+    match open(&path) {
+        Ok(file) => {
+            let writer = RotatingLog {
+                path,
+                file,
+                written: 0,
+            };
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(writer))
+                .init();
+        }
+        Err(error) => {
+            tracing_subscriber::fmt::init();
+            tracing::warn!(%error, "file logging unavailable; logging to stderr");
+        }
+    }
+}
+
+struct RotatingLog {
+    path: PathBuf,
+    file: std::fs::File,
+    /// Bytes in the current file; seeded lazily from metadata on first write.
+    written: u64,
+}
+
+impl std::io::Write for RotatingLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.written == 0 {
+            self.written = self.file.metadata().map(|meta| meta.len()).unwrap_or(0) + 1;
+        }
+        if self.written.saturating_add(buf.len() as u64) > LOG_LIMIT_BYTES {
+            let _ = std::fs::rename(&self.path, self.path.with_extension("log.old"));
+            self.file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
+            self.written = 1;
+        }
+        let count = self.file.write(buf)?;
+        self.written += count as u64;
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
 }
