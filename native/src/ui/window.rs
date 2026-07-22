@@ -350,13 +350,16 @@ impl Shell {
 
     pub fn present(&self) {
         self.hold_guard.borrow_mut().take();
+        // A window hidden while minimized keeps MINIMIZED on its toplevel, so
+        // `present` alone re-maps it still minimized. Clear it first.
+        self.window.unminimize();
         self.window.present();
     }
 
     /// Hide to the tray and hold the application while hidden. The
     /// coordinator and screen capture keep running.
     pub fn hide_to_tray(&self) {
-        hide_and_hold(&self.window, &self.hold_guard);
+        hide_and_hold(&self.window, &self.hold_guard, &self.player);
     }
 
     pub fn set_tray_available(&self, available: bool) {
@@ -418,9 +421,10 @@ impl Shell {
         let tray_available = Rc::clone(&self.tray_available);
         let close_to_tray = Rc::clone(&self.close_to_tray);
         let hold_guard = Rc::clone(&self.hold_guard);
+        let player = Rc::clone(&self.player);
         self.window.connect_close_request(move |window| {
             if tray::close_hides(tray_available.get(), close_to_tray.get()) {
-                hide_and_hold(window, &hold_guard);
+                hide_and_hold(window, &hold_guard, &player);
                 gtk4::glib::Propagation::Stop
             } else {
                 gtk4::glib::Propagation::Proceed
@@ -432,10 +436,12 @@ impl Shell {
         let tray_available = Rc::clone(&self.tray_available);
         let minimize_to_tray = Rc::clone(&self.minimize_to_tray);
         let hold_guard = Rc::clone(&self.hold_guard);
+        let player = Rc::clone(&self.player);
         self.window.connect_realize(move |window| {
             let tray_available = Rc::clone(&tray_available);
             let minimize_to_tray = Rc::clone(&minimize_to_tray);
             let hold_guard = Rc::clone(&hold_guard);
+            let player = Rc::clone(&player);
             let window = window.clone();
             let Some(toplevel) = window.surface().and_downcast::<gtk4::gdk::Toplevel>() else {
                 return;
@@ -445,7 +451,7 @@ impl Shell {
                     .state()
                     .contains(gtk4::gdk::ToplevelState::MINIMIZED);
                 if minimized && tray::minimize_hides(tray_available.get(), minimize_to_tray.get()) {
-                    hide_and_hold(&window, &hold_guard);
+                    hide_and_hold(&window, &hold_guard, &player);
                 }
             });
         });
@@ -455,7 +461,9 @@ impl Shell {
 fn hide_and_hold(
     window: &adw::ApplicationWindow,
     hold_guard: &Rc<RefCell<Option<gtk4::gio::ApplicationHoldGuard>>>,
+    player: &Player,
 ) {
+    player.pause();
     window.set_visible(false);
     let mut guard = hold_guard.borrow_mut();
     if guard.is_none() {

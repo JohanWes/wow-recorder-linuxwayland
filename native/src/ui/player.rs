@@ -319,6 +319,14 @@ impl Player {
         inner.updating.set(false);
     }
 
+    /// Pause when the window goes away to the tray; playback must not keep
+    /// running behind a hidden window.
+    pub fn pause(&self) {
+        if self.inner.playing.get() {
+            self.inner.toggle_playing();
+        }
+    }
+
     /// Table selection changed. `None` shows the placeholder.
     pub fn set_selection(&self, selection: Option<&Selection>) {
         self.inner.set_selection(selection);
