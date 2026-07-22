@@ -488,7 +488,6 @@ pub enum RecorderStatus {
 pub enum WorkKind {
     Finalize,
     Clip,
-    KillVideo,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -30,9 +30,8 @@ Rebuild/update the store from coordinator snapshots in the simplest measured-saf
 1. Implement the exact shared and category-family columns in UI-BRIEF/WR-000. One function returns column specifications for the selected category; reuse bind/format functions for truly shared fields.
 2. Shared leading cells provide selection, protection/star, and compact Details (approved spec/class image and player/title/tag). Category-specific facts remain text/icon cells, including affix images and result labels.
 3. Default sort is newest first. Each current sortable header cycles ascending/descending and shows native indication; switching category restores that category's current/default sort behavior recorded by WR-000.
-4. Raid `Creator` contains the montage button, sorted/enabled exactly as the baseline: disabled with fewer than two local correlated POVs and otherwise emits the selected correlation to WR-011's editor action. Do not add Creator/montage buttons to other category families without WR-000 evidence.
-5. Single plain click clears other selections, selects the row, and asks the player area to load the preferred/default local POV. Ctrl-click toggles; Shift-click selects the visible range. Ctrl+A and Up/Down keyboard behavior match WR-000 using GTK selection conventions. Do not add row gestures unrelated to current behavior.
-6. Virtualization must keep all results browsable by scrolling. Removing numbered pagination is an implementation change, not a feature loss; do not cap the model.
+4. Single plain click clears other selections, selects the row, and asks the player area to load the preferred/default local POV. Ctrl-click toggles; Shift-click selects the visible range. Ctrl+A and Up/Down keyboard behavior match WR-000 using GTK selection conventions. Do not add row gestures unrelated to current behavior.
+5. Virtualization must keep all results browsable by scrolling. Removing numbered pagination is an implementation change, not a feature loss; do not cap the model.
 
 ## Structured search and dates
 

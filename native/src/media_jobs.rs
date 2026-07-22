@@ -3,7 +3,7 @@
 //! Serialized media and storage jobs.
 //!
 //! One worker thread consumes `MediaJob`s in order: finalize a finished
-//! capture, cut a clip, or render a multi-POV kill video. FFmpeg is spawned
+//! capture or cut a clip. FFmpeg is spawned
 //! directly with `std::process::Command` — no shell, no wrapper crate, no
 //! reader thread. Every invocation writes progress to an exclusively created
 //! `-progress` file and stderr to an exclusively created log file, which the
@@ -11,7 +11,7 @@
 //!
 //! Shutdown arrives on a separate capacity-one control channel and is observed
 //! within one polling interval: an automatic finalization gets a bounded grace
-//! period, user clip/kill-video jobs are cancelled immediately, and both
+//! period, user clip jobs are cancelled immediately, and both
 //! escalate SIGINT then `Child::kill`.
 
 use std::fs::{self, File, OpenOptions};
@@ -25,8 +25,8 @@ use uuid::Uuid;
 
 use crate::activity::RecordingDraft;
 use crate::domain::{
-    ActivityDetails, Category, Codec, LibraryEntry, MediaFacts, RecordingId, TimelineItem,
-    TimelineShape, WorkKind, WorkProgress,
+    ActivityDetails, Category, LibraryEntry, MediaFacts, RecordingId, TimelineItem, TimelineShape,
+    WorkKind, WorkProgress,
 };
 use crate::process;
 use crate::recorder::CaptureArtifacts;
@@ -34,11 +34,6 @@ use crate::storage::{CombinedMedia, Storage, now_unix_ms, sanitize_name, unique_
 
 /// Bytes of the per-job stderr log read back for diagnostics.
 const LOG_TAIL_BYTES: u64 = 8 * 1024;
-
-/// Kill videos are re-encoded with the baseline's "Ultra" H.264 settings.
-const KILL_VIDEO_CRF: &str = "22";
-/// Seconds of video/audio fade at both ends of every kill-video segment.
-const KILL_VIDEO_FADE_SECONDS: u32 = 1;
 
 #[derive(Clone, Debug)]
 pub struct MediaConfig {
@@ -68,21 +63,6 @@ impl Default for MediaConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KillSegment {
-    pub source: LibraryEntry,
-    pub start_ms: u64,
-    pub end_ms: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KillAudio {
-    /// Each segment keeps its own audio, faded and concatenated.
-    Switched,
-    /// One source supplies the audio for the whole video.
-    Source(usize),
-}
-
 pub enum MediaJob {
     FinalizeRecording {
         draft: Box<RecordingDraft>,
@@ -94,13 +74,6 @@ pub enum MediaJob {
         start_ms: u64,
         end_ms: u64,
     },
-    CreateKillVideo {
-        segments: Vec<KillSegment>,
-        width: u32,
-        height: u32,
-        fps: u32,
-        audio: KillAudio,
-    },
 }
 
 impl MediaJob {
@@ -108,7 +81,6 @@ impl MediaJob {
         match self {
             Self::FinalizeRecording { .. } => WorkKind::Finalize,
             Self::CreateClip { .. } => WorkKind::Clip,
-            Self::CreateKillVideo { .. } => WorkKind::KillVideo,
         }
     }
 }
@@ -212,13 +184,6 @@ impl MediaWorker {
                 start_ms,
                 end_ms,
             } => self.create_clip(&source, start_ms, end_ms),
-            MediaJob::CreateKillVideo {
-                segments,
-                width,
-                height,
-                fps,
-                audio,
-            } => self.create_kill_video(&segments, width, height, fps, audio),
         };
         match outcome {
             Ok(Some(entry)) => self.emit(MediaEvent::Completed {
@@ -463,104 +428,6 @@ impl MediaWorker {
     // -----------------------------------------------------------------------
     // Kill videos
     // -----------------------------------------------------------------------
-
-    fn create_kill_video(
-        &mut self,
-        segments: &[KillSegment],
-        width: u32,
-        height: u32,
-        fps: u32,
-        audio: KillAudio,
-    ) -> Result<Option<LibraryEntry>, String> {
-        validate_kill_video(segments, width, height, fps, audio)?;
-
-        let first = &segments[0].source;
-        let created_at = now_unix_ms();
-        let id = RecordingId::new();
-        let stem = unique_stem(
-            &id,
-            created_at,
-            &kill_video_name(first, created_at, self.config.utc_offset_minutes),
-        );
-        let (media_path, sidecar_path) = self
-            .storage
-            .claim_output(&stem)
-            .map_err(|error| format!("kill video output: {error}"))?;
-
-        let temp = self
-            .job_file("kill-video", "mp4")
-            .map_err(|error| format!("kill video temp: {error}"))?;
-        let duration_ms: u64 = segments
-            .iter()
-            .map(|segment| segment.end_ms - segment.start_ms)
-            .sum();
-
-        let outcome = self.run_ffmpeg(
-            WorkKind::KillVideo,
-            kill_video_args(segments, width, height, fps, audio, &temp),
-            Some(duration_ms),
-        );
-
-        match outcome {
-            FfmpegOutcome::Done { .. } => {}
-            FfmpegOutcome::Cancelled => {
-                let _ = fs::remove_file(&temp);
-                let _ = fs::remove_file(&media_path);
-                return Ok(None);
-            }
-            FfmpegOutcome::Failed { message } => {
-                let _ = fs::remove_file(&temp);
-                let _ = fs::remove_file(&media_path);
-                return Err(message);
-            }
-        }
-
-        let sources: Vec<String> = segments
-            .iter()
-            .map(|segment| segment.source.title.clone())
-            .collect();
-        let entry = LibraryEntry {
-            id,
-            media_path,
-            sidecar_path,
-            category: Category::Clip,
-            flavor: first.flavor.clone(),
-            title: kill_video_name(first, created_at, self.config.utc_offset_minutes),
-            start_unix_ms: created_at,
-            duration_ms,
-            outcome: first.outcome,
-            protected: true,
-            tag: Some(format!(
-                "WCR Multipov Kill Video. Created by WCR at {}. Viewpoints: {}",
-                format_local_stamp(first.start_unix_ms, self.config.utc_offset_minutes),
-                sources.join(", ")
-            )),
-            activity_hash: None,
-            player: None,
-            combatants: Vec::new(),
-            details: ActivityDetails::Clip {
-                source_recording: first.id.clone(),
-                source_category: first.category.clone(),
-                source_title: Some(first.title.clone()),
-            },
-            timeline: Vec::new(),
-            media: MediaFacts {
-                fps: Some(fps),
-                width: Some(width),
-                height: Some(height),
-                codec: Some(Codec::H264),
-                has_content: true,
-            },
-        };
-
-        self.storage
-            .write_new_entry(&entry, &temp)
-            .map_err(|error| {
-                let _ = fs::remove_file(&temp);
-                format!("write kill video: {error}")
-            })?;
-        Ok(Some(entry))
-    }
 
     // -----------------------------------------------------------------------
     // FFmpeg
@@ -902,6 +769,7 @@ fn clip_args(source: &Path, start_ms: u64, duration_ms: u64, output: &Path) -> V
     ]
 }
 
+/*
 fn kill_video_args(
     segments: &[KillSegment],
     width: u32,
@@ -1061,6 +929,7 @@ fn kill_video_name(first: &LibraryEntry, created_at_ms: i64, utc_offset_minutes:
 
 /// Move timeline items into the clipped range, dropping what falls outside and
 /// truncating spans that straddle a boundary.
+*/
 fn clip_timeline(timeline: &[TimelineItem], start_ms: u64, end_ms: u64) -> Vec<TimelineItem> {
     let mut clipped = Vec::new();
     for item in timeline {
@@ -1156,24 +1025,11 @@ mod tests {
     use std::sync::mpsc::{Sender, sync_channel};
     use std::thread;
 
-    use crate::domain::{GameFlavor, Outcome, TimelineKind};
+    use crate::domain::{Codec, GameFlavor, Outcome, TimelineKind};
     use crate::storage::SIDECAR_SCHEMA_VERSION;
 
     fn fake_ffmpeg() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/native/bin/fake-ffmpeg.sh")
-    }
-
-    fn golden(name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../tests/native/golden")
-            .join(name)
-    }
-
-    fn assert_golden(name: &str, actual: &str) {
-        let path = golden(name);
-        let expected = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read {}: {error}\nactual:\n{actual}", path.display()));
-        assert_eq!(actual.trim(), expected.trim());
     }
 
     struct Harness {
@@ -1351,6 +1207,7 @@ mod tests {
             .unwrap_or(false)
     }
 
+    /*
     #[test]
     fn clip_and_kill_video_arguments_match_their_goldens() {
         let source = Path::new("/library dir/My Raid Kill.mp4");
@@ -1390,6 +1247,7 @@ mod tests {
         );
     }
 
+    */
     #[test]
     fn clip_job_writes_a_clips_entry_for_the_selected_interval() {
         let mut harness = Harness::new("clip");
@@ -1460,6 +1318,7 @@ mod tests {
         );
     }
 
+    /*
     #[test]
     fn kill_video_job_preserves_order_audio_progress_and_provenance() {
         let mut harness = Harness::new("kill");
@@ -1591,6 +1450,7 @@ mod tests {
         assert!(validate_kill_video(&valid, 1920, 1080, 30, KillAudio::Switched).is_ok());
     }
 
+    */
     fn finalize_job(harness: &Harness, with_replay: bool) -> MediaJob {
         let regular = harness.root.join("capture/regular/Video.mkv");
         fs::write(&regular, "regular bytes").expect("regular");

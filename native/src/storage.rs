@@ -1495,7 +1495,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
-/// Wall-clock milliseconds; used for generated clip and kill-video dates.
+/// Wall-clock milliseconds; used for generated clip dates.
 pub fn now_unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

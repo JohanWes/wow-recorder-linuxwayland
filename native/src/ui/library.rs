@@ -413,7 +413,6 @@ pub struct Library {
 struct Inner {
     sink: ActionSink,
     on_select: Rc<dyn Fn(Option<Selection>)>,
-    on_montage: Rc<dyn Fn(RecordingId)>,
     store: gio::ListStore,
     filter: gtk4::CustomFilter,
     filter_model: gtk4::FilterListModel,
@@ -436,11 +435,7 @@ struct Inner {
 }
 
 impl Library {
-    pub fn new(
-        sink: ActionSink,
-        on_select: Rc<dyn Fn(Option<Selection>)>,
-        on_montage: Rc<dyn Fn(RecordingId)>,
-    ) -> Self {
+    pub fn new(sink: ActionSink, on_select: Rc<dyn Fn(Option<Selection>)>) -> Self {
         let store = gio::ListStore::new::<BoxedAnyObject>();
         let filter = gtk4::CustomFilter::new(|_| true);
         let filter_model = gtk4::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
@@ -547,7 +542,6 @@ impl Library {
         let inner = Rc::new(Inner {
             sink,
             on_select,
-            on_montage,
             store,
             filter,
             filter_model,
@@ -1086,7 +1080,6 @@ impl Inner {
                 columns.push(self.duration_column());
                 columns.push(self.date_column());
                 columns.push(self.viewpoints_column());
-                columns.push(self.creator_column());
             }
             Family::Dungeon => {
                 columns.push(text_column(
@@ -1359,45 +1352,6 @@ impl Inner {
             this.confirm_delete(vec![Rc::clone(&r)]);
         });
         popover
-    }
-
-    fn creator_column(self: &Rc<Self>) -> gtk4::ColumnViewColumn {
-        let factory = gtk4::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
-            let button = gtk4::Button::from_icon_name("view-reveal-symbolic");
-            button.add_css_class("flat");
-            button.set_valign(gtk4::Align::Center);
-            button.set_tooltip_text(Some("Create kill video"));
-            button.update_property(&[gtk4::accessible::Property::Label("Create kill video")]);
-            item.downcast_ref::<gtk4::ListItem>()
-                .unwrap()
-                .set_child(Some(&button));
-        });
-        let this = Rc::clone(self);
-        factory.connect_bind(move |_, item| {
-            let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-            let button = item.child().and_downcast::<gtk4::Button>().unwrap();
-            let row = row_of(&item.item().unwrap());
-            // Enabled only with at least two correlated local POVs.
-            button.set_sensitive(row.viewpoints >= 2);
-            let this = Rc::clone(&this);
-            let id = row.id.clone();
-            let handler = button.connect_clicked(move |_| (this.on_montage)(id.clone()));
-            unsafe { button.set_data("wr-handler", handler) };
-        });
-        factory.connect_unbind(|_, item| {
-            let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-            let button = item.child().and_downcast::<gtk4::Button>().unwrap();
-            if let Some(handler) =
-                unsafe { button.steal_data::<glib::SignalHandlerId>("wr-handler") }
-            {
-                button.disconnect(handler);
-            }
-        });
-        let column = gtk4::ColumnViewColumn::new(Some("Creator"), Some(factory));
-        column.set_sorter(Some(&sort_by(|r| r.viewpoints)));
-        column.set_fixed_width(80);
-        column
     }
 }
 
@@ -1689,7 +1643,7 @@ mod release_gate_tests {
         gtk4::init().expect("GTK display is required for the manual release gate");
         let mut snapshot = snapshot();
         snapshot.config.interface.selected_category = Category::MythicPlus;
-        let library = Library::new(Rc::new(|_| true), Rc::new(|_| {}), Rc::new(|_| {}));
+        let library = Library::new(Rc::new(|_| true), Rc::new(|_| {}));
         library.apply(&snapshot);
         assert_eq!(library.inner.store.n_items(), 200);
 

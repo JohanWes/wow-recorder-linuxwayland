@@ -9,7 +9,7 @@
 //!
 //! Multi-POV grid playback (synchronized 2–4 player grid) was removed from
 //! the product by maintainer decision (2026-07-22); the viewpoint selector
-//! and the kill-video editor remain.
+//! and individual local recordings remain.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -27,7 +27,7 @@ use super::library::Selection;
 use super::multipov;
 use super::player_backend::PlayerBackend;
 use super::timeline::{self, MarkerPrefs, Timeline};
-use super::{ActionSink, ShellAction, drawing, kill_video};
+use super::{ActionSink, ShellAction, drawing};
 
 const SPEEDS: [f64; 4] = [0.25, 0.5, 1.0, 2.0];
 const SEEK_STEP_SECONDS: f64 = 5.0;
@@ -299,23 +299,6 @@ impl Player {
     /// Table selection changed. `None` shows the placeholder.
     pub fn set_selection(&self, selection: Option<&Selection>) {
         self.inner.set_selection(selection);
-    }
-
-    /// Raid Creator: open the kill-video editor for this activity.
-    pub fn open_kill_video(&self, correlated_id: &RecordingId) {
-        let inner = &self.inner;
-        let entries = inner.entries.borrow();
-        let povs = inner.povs.borrow();
-        let sources = kill_video::sources_for(&povs, &entries);
-        if sources.len() < 2 {
-            return;
-        }
-        kill_video::present(
-            inner.stack.upcast_ref(),
-            Rc::clone(&inner.sink),
-            correlated_id.clone(),
-            sources,
-        );
     }
 }
 

@@ -35,9 +35,7 @@ use crate::domain::{
     StorageLimit, WorkKind, WorkProgress,
 };
 use crate::logwatch::LogTailer;
-use crate::media_jobs::{
-    KillAudio, KillSegment, MediaConfig, MediaControl, MediaEvent, MediaJob, MediaWorker,
-};
+use crate::media_jobs::{MediaConfig, MediaControl, MediaEvent, MediaJob, MediaWorker};
 use crate::parser::{CombatEvent, ParseTimeContext, ParsedEvent, PlayerObservationKind};
 use crate::recorder::{
     CaptureConfig, Recorder, RecorderError, RecorderEvent, RecordingMode, StartRequest, Timeouts,
@@ -92,14 +90,6 @@ pub enum Command {
         ids: Vec<RecordingId>,
     },
     CreateClip(ClipRange),
-    CreateKillVideo {
-        correlated_id: RecordingId,
-        segments: Vec<ClipRange>,
-        width: u32,
-        height: u32,
-        fps: u32,
-        audio: KillAudio,
-    },
     SetSelectedCategory {
         category: Category,
     },
@@ -489,14 +479,6 @@ impl Coordinator {
             }
             Command::Delete { ids } => self.delete_entries(&ids),
             Command::CreateClip(range) => self.queue_clip(&range),
-            Command::CreateKillVideo {
-                correlated_id,
-                segments,
-                width,
-                height,
-                fps,
-                audio,
-            } => self.queue_kill_video(&correlated_id, &segments, width, height, fps, audio),
             Command::SetSelectedCategory { category } => {
                 let mut draft = self.config.clone();
                 draft.interface.selected_category = category;
@@ -1060,7 +1042,6 @@ impl Coordinator {
                         match kind {
                             WorkKind::Finalize => "A recording could not be saved.",
                             WorkKind::Clip => "The clip could not be created.",
-                            WorkKind::KillVideo => "The kill video could not be rendered.",
                         },
                         Some(message),
                         Some(RecoveryAction::OpenLogs),
@@ -1095,74 +1076,6 @@ impl Coordinator {
             source: Box::new(source),
             start_ms: range.start_ms,
             end_ms: range.end_ms,
-        });
-    }
-
-    fn queue_kill_video(
-        &mut self,
-        correlated_id: &RecordingId,
-        ranges: &[ClipRange],
-        width: u32,
-        height: u32,
-        fps: u32,
-        audio: KillAudio,
-    ) {
-        let Some(correlation) = self.index.correlations.iter().find(|correlation| {
-            &correlation.primary_id == correlated_id
-                || correlation
-                    .local_pov_ids
-                    .iter()
-                    .any(|id| id == correlated_id)
-        }) else {
-            self.push_problem(
-                "The kill-video activity is no longer in the library.",
-                Some(correlated_id.to_string()),
-                Some(RecoveryAction::Retry),
-            );
-            return;
-        };
-        let mut allowed =
-            std::collections::HashSet::with_capacity(1 + correlation.local_pov_ids.len());
-        allowed.insert(correlation.primary_id.clone());
-        allowed.extend(correlation.local_pov_ids.iter().cloned());
-        let mut segments = Vec::with_capacity(ranges.len());
-        for range in ranges {
-            if !allowed.contains(&range.source) {
-                self.push_problem(
-                    "A kill-video source is outside the selected activity.",
-                    Some(range.source.to_string()),
-                    Some(RecoveryAction::Retry),
-                );
-                return;
-            }
-            let Some(source) = self.entry(&range.source).cloned() else {
-                self.push_problem(
-                    "A kill-video source is no longer in the library.",
-                    None,
-                    Some(RecoveryAction::Retry),
-                );
-                return;
-            };
-            segments.push(KillSegment {
-                source,
-                start_ms: range.start_ms,
-                end_ms: range.end_ms,
-            });
-        }
-        if self.user_queue.len() >= MAX_MEDIA_QUEUE {
-            self.push_problem(
-                "The media work queue is full.",
-                None,
-                Some(RecoveryAction::Retry),
-            );
-            return;
-        }
-        self.user_queue.push_back(MediaJob::CreateKillVideo {
-            segments,
-            width,
-            height,
-            fps,
-            audio,
         });
     }
 

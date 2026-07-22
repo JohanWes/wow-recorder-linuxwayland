@@ -10,7 +10,6 @@
 
 pub mod drawing;
 pub mod filters;
-pub mod kill_video;
 pub mod library;
 pub mod multipov;
 pub mod operational_actions;

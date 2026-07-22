@@ -19,7 +19,7 @@ Build one Rust application using:
 - `GtkPaned` for the persistent resizable player-above-table workflow;
 - Clapper and ClapperGtk as the native GTK/GStreamer playback layer;
 - `gpu-screen-recorder` as one supervised child process for Wayland capture and replay buffering;
-- one minimal pinned FFmpeg executable, called with `std::process::Command`, for retained stream-copy clips and multi-source kill-video transforms;
+- one minimal pinned FFmpeg executable, called with `std::process::Command`, for retained stream-copy clips;
 - GLib/GIO/GTK launchers and file dialogs for native/portal-backed open and selection operations;
 - a minimal freedesktop StatusNotifierItem implementation for the current tray/background recording lifecycle on desktops with a watcher;
 - JSON sidecars plus the filesystem as the library source of truth;
@@ -29,7 +29,7 @@ Build one Rust application using:
 
 The newly authored native rewrite is licensed `GPL-3.0-or-later`. WR-002 found that the canonical Clapper Rust bindings required by this ADR are `GPL-3.0-or-later`, which cannot be combined with a GPL-2.0-only executable. The maintainer approved the native license amendment so the selected Clapper contract can proceed. This amendment does not relicense the legacy Electron code; that tree retains its existing terms and is deleted by WR-013 before the native application is published.
 
-The Rust package remains under `native/`. Core domain code is GTK-free. One coordinator thread owns mutable domain state; one serialized worker performs media finalization, clipping, and kill-video jobs. A narrowly owned tray service thread sends only bounded Open/Quit events. Typed standard-library channels connect all three to the GTK thread; `main` owns and joins the coordinator and tray handles.
+The Rust package remains under `native/`. Core domain code is GTK-free. One coordinator thread owns mutable domain state; one serialized worker performs media finalization and clipping jobs. A narrowly owned tray service thread sends only bounded Open/Quit events. Typed standard-library channels connect all three to the GTK thread; `main` owns and joins the coordinator and tray handles.
 
 ## Why Clapper instead of `gtk::Video` or a custom GStreamer pipeline
 
@@ -76,7 +76,7 @@ Capture and playback depend on native libraries, binaries, and permissions. A pi
 - Direct dependencies need license and payload review. No dependency is approved merely because it appears in an example.
 - Long filesystem/media/process work never runs on the GTK thread.
 - Domain snapshots and commands are concrete product types, not a generic message envelope.
-- Multi-POV correlation and kill-video creation remain because they are reachable for multiple local recordings. Disabled cloud paths are removed and must not shape the new model.
+- Local POV correlation remains for viewpoint selection; kill-video montage is removed. Disabled cloud paths are removed and must not shape the new model.
 - Tray Open/Quit and hide-to-background remain because current defaults rely on them to keep automatic capture running. WR-002 must prove the smallest StatusNotifierItem binding/permissions and a safe no-watcher fallback; GTK4 has no tray API.
 - English strings live next to their UI; no localization service survives.
 - Performance is measured at the baseline and final gate, not asserted through fragile timing unit tests.

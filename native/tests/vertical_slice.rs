@@ -21,7 +21,7 @@ use warcraft_recorder::config::{
 };
 use warcraft_recorder::coordinator::{AppSnapshot, ClipRange, Command, Coordinator, Setup, start};
 use warcraft_recorder::domain::{Category, Outcome, RecorderStatus, StorageLimit, TimelineKind};
-use warcraft_recorder::media_jobs::{KillAudio, MediaConfig};
+use warcraft_recorder::media_jobs::MediaConfig;
 use warcraft_recorder::recorder::Timeouts;
 use warcraft_recorder::storage::{RECOVERY_DIR, now_unix_ms};
 
@@ -480,7 +480,7 @@ fn manual_and_test_recordings_reuse_the_capture_pipeline() {
 fn finalization_precedes_queued_user_jobs() {
     let mut harness = Harness::new("queue");
 
-    // One finished recording to clip and to montage against.
+    // One finished recording to clip against.
     let start_ms = now_unix_ms() - 1_000;
     harness.log(&raid_start(start_ms));
     harness.pump(|snapshot| snapshot.active.is_some());
@@ -511,52 +511,6 @@ fn finalization_precedes_queued_user_jobs() {
         order.len() == 2
     });
     assert_eq!(order, vec![Category::Raids, Category::Clip]);
-
-    // A kill video over both raid POVs runs through the same serial worker.
-    let raids: Vec<_> = harness
-        .entries_of(&Category::Raids)
-        .into_iter()
-        .cloned()
-        .collect();
-    assert_eq!(raids.len(), 2);
-    assert!(harness.latest.correlations.iter().any(|correlation| {
-        (correlation.primary_id == raids[0].id && correlation.local_pov_ids.contains(&raids[1].id))
-            || (correlation.primary_id == raids[1].id
-                && correlation.local_pov_ids.contains(&raids[0].id))
-    }));
-    let correlated_id = harness
-        .latest
-        .correlations
-        .iter()
-        .find(|correlation| {
-            correlation.primary_id == raids[0].id || correlation.primary_id == raids[1].id
-        })
-        .expect("correlated raid activity")
-        .primary_id
-        .clone();
-    harness.send(Command::CreateKillVideo {
-        correlated_id,
-        segments: raids
-            .iter()
-            .map(|entry| ClipRange {
-                source: entry.id.clone(),
-                start_ms: 0,
-                end_ms: entry.duration_ms.min(2_000),
-            })
-            .collect(),
-        width: 1920,
-        height: 1080,
-        fps: 30,
-        audio: KillAudio::Switched,
-    });
-    harness.pump(|snapshot| {
-        snapshot
-            .entries
-            .iter()
-            .filter(|entry| entry.category == Category::Clip)
-            .count()
-            == 2
-    });
 }
 
 /// Without a replay artifact the recording still saves, and markers that fall

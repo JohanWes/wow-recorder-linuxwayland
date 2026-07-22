@@ -66,7 +66,7 @@ Required category columns, matching the current table's useful information:
 
 | Category family | Columns after selection/protection |
 |---|---|
-| Raid | Details, Encounter, Result, Pull, Difficulty, Duration, Date, Viewpoints, Creator |
+| Raid | Details, Encounter, Result, Pull, Difficulty, Duration, Date, Viewpoints |
 | Mythic+ | Details, Dungeon, Result, Level, Affixes, Duration, Date, Viewpoints |
 | Arena/Battleground/Solo Shuffle | Details, Map, Result, Duration, Date, Viewpoints |
 | Clips | Details, Type, Source activity, Duration, Date, Viewpoints |
@@ -102,7 +102,7 @@ Drawing remains an in-player analysis overlay but drops the Excalidraw dependenc
 
 Viewpoint behavior remains local-only. Correlate entries with the same approved activity hash and start-time tolerance from WR-000. The selector shows player/spec and opens one viewpoint, remembering the preferred player for the session. Multi-POV grid/synchronized playback was removed by maintainer decision (2026-07-22, recorded in the WR-000 parity matrix); do not build it.
 
-The Raid table's Creator cell enables the kill-video editor only when at least two local correlated POVs exist, matching the current entry point. The editor retains the existing controls with a simpler native surface: one playable/scrubbable preview that switches to the source under the playhead, preview mute, ordered source segments on one duration track, drag/reorder, adjustable adjacent boundaries, removal only while more than two sources remain, FPS choices (10/20/30/60), current resolution choices, single-audio-track toggle/source, Reset restoring all initial sources/settings, Render, and cancel/progress. Output naming remains automatic. It creates a Clips entry through the one media worker. No source browser, transitions, or options beyond the baseline are added.
+Kill-video/montage creation is removed. The app records and lists individual local recordings; it does not combine correlated viewpoints.
 
 ## Keyboard and pointer contract
 
@@ -140,7 +140,7 @@ Use `GtkFileDialog` folder selection and GIO/GTK file/URI launchers. No custom c
 
 - First run/setup missing: show one banner with `Open Settings`; do not populate the main area with onboarding cards.
 - Empty category: `No recordings in this category`; filtered-empty copy says the selected chips/date removed all matches. The Manual category may show its retained start action.
-- Finalization/clip/kill-video progress appears in the status card or a single compact progress row, not a notification center.
+- Finalization/clip progress appears in the status card or a single compact progress row, not a notification center.
 - Errors state the failed operation, relevant path/device when safe, and one recovery action. Expandable technical detail may include the logged error; never dump raw logs into the main UI.
 
 ## Accessibility and visual acceptance

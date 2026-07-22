@@ -15,7 +15,7 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use warcraft_recorder::coordinator::{AppSnapshot, Command, CoordinatorHandle};
-use warcraft_recorder::domain::{RecordingId, RecoveryAction};
+use warcraft_recorder::domain::RecoveryAction;
 
 use warcraft_recorder::domain::RecorderStatus;
 
@@ -198,11 +198,7 @@ impl Shell {
             let player = Rc::clone(&player);
             Rc::new(move |selection| player.set_selection(selection.as_ref()))
         };
-        let on_montage: Rc<dyn Fn(RecordingId)> = {
-            let player = Rc::clone(&player);
-            Rc::new(move |id| player.open_kill_video(&id))
-        };
-        let library = Library::new(Rc::clone(&sink), on_select, on_montage);
+        let library = Library::new(Rc::clone(&sink), on_select);
 
         let paned = gtk4::Paned::new(gtk4::Orientation::Vertical);
         paned.set_wide_handle(true);

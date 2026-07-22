@@ -29,7 +29,7 @@ WR-000 must classify every legacy feature as one of:
 - `REMOVE_UNREACHABLE`: no Linux UI or runtime path can invoke it, with file/line evidence;
 - `REMOVE_OBSOLETE`: depends on a service, platform, or game mode that no longer exists, with maintainer approval.
 
-An implementation ticket may not silently downgrade a `KEEP` feature. If its native implementation is missing from the tickets, stop and fix the relevant ticket before coding. Known `KEEP` scope includes automatic and manual recording, test recording, force-end, capture-target reselection, background recording with tray Open/Quit and current close/minimize behavior, suggestion-chip/paired-date filtering, sortable category tables, multiselect/bulk actions, tagging/protection, reveal/delete, playback speed, keyboard controls, frame stepping, marker visibility controls, drawing, clipping, and local viewpoint-selection/kill-video behavior (multi-POV grid playback was removed by maintainer decision 2026-07-22; see the WR-000 parity matrix). The user's Update outcome is preserved outside app code: the final AppImage's updater installs the Flatpak (WR-013), and the Flatpak remote/software center owns updates thereafter; the in-app checker is not rebuilt (WR-000 records the approved `REMOVE_OBSOLETE`).
+An implementation ticket may not silently downgrade a `KEEP` feature. If its native implementation is missing from the tickets, stop and fix the relevant ticket before coding. Known `KEEP` scope includes automatic and manual recording, test recording, force-end, capture-target reselection, background recording with tray Open/Quit and current close/minimize behavior, suggestion-chip/paired-date filtering, sortable category tables, multiselect/bulk actions, tagging/protection, reveal/delete, playback speed, keyboard controls, frame stepping, marker visibility controls, drawing, clipping, and local viewpoint selection. Multi-POV grid playback and kill-video montage are removed by maintainer decision; see the WR-000 parity matrix. The user's Update outcome is preserved outside app code: the final AppImage's updater installs the Flatpak (WR-013), and the Flatpak remote/software center owns updates thereafter; the in-app checker is not rebuilt (WR-000 records the approved `REMOVE_OBSOLETE`).
 
 Cloud/account/upload/chat/pro paths are already disabled in this fork and are not to be revived. Windows, macOS, OBS/libobs, NSIS, notarization, AppImage after the migration release, telemetry, plugins, and a database are outside scope.
 
@@ -55,12 +55,12 @@ Do not turn this order into compressed or obscure code. A few explicit lines are
 
 - One GTK process. The GTK main thread owns widgets only.
 - One coordinator thread owns mutable application/domain state, log polling, and recorder control.
-- One background media/storage worker serializes finalization, clipping, and kill-video work. No generic worker pool.
+- One background media/storage worker serializes finalization and clipping work. No generic worker pool.
 - One minimal StatusNotifierItem service thread is permitted solely for the retained tray/background lifecycle after WR-002 proves it; it is not a general worker. `main` owns this and the coordinator join handle, and bounded tray events are polled on GTK's thread.
 - `std::sync::mpsc`/`sync_channel` carries typed commands and snapshots. No async runtime or event-bus framework.
 - Clapper/ClapperGtk supplies playback, speed control, seeking, and forward frame stepping over GStreamer. Project code supplies product controls and the combat timeline, not a custom media state machine.
 - `gpu-screen-recorder` remains the capture engine.
-- One narrowly configured FFmpeg executable supplies the already-existing clip and local kill-video transforms through `std::process`; no Rust media-editing framework is added.
+- One narrowly configured FFmpeg executable supplies clip transforms through `std::process`; no Rust media-editing framework is added.
 - JSON sidecars remain the library source of truth; no database or generated thumbnail cache.
 
 The Rust package remains in `native/` before and after cutover. Moving it to the repository root would create churn without product value.
