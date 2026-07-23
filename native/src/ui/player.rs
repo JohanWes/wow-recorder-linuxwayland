@@ -14,6 +14,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gtk4::prelude::*;
 use libadwaita as adw;
@@ -31,6 +32,10 @@ use super::{ActionSink, ShellAction, drawing};
 
 const SPEEDS: [f64; 4] = [0.25, 0.5, 1.0, 2.0];
 const SEEK_STEP_SECONDS: f64 = 5.0;
+/// Pointer idle before fullscreen collapses the bottom bar, and how often that
+/// idle is checked. One repeating source beats re-arming a timer per motion.
+const IDLE_HIDE: Duration = Duration::from_secs(2);
+const IDLE_TICK: Duration = Duration::from_millis(250);
 type VideoDimensionsHandler = Rc<dyn Fn(u32, u32)>;
 
 pub struct Player {
@@ -60,6 +65,13 @@ struct Inner {
     drawing_toggle: gtk4::ToggleButton,
     marker_button: gtk4::MenuButton,
     reveal_button: gtk4::Button,
+
+    /// Drawing toolbar plus control row; collapsing it in fullscreen gives the
+    /// video the whole surface, which is what closes the letterbox bars.
+    bottom_bar: gtk4::Revealer,
+    fullscreen: Cell<bool>,
+    last_motion: Cell<Instant>,
+    last_pointer: Cell<(f64, f64)>,
 
     /// Lets the shell size the paned player to the selected video's aspect
     /// ratio without making the player own window layout.
@@ -200,11 +212,19 @@ impl Player {
             controls.append(widget);
         }
 
+        let bottom_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        bottom_box.append(&drawing.toolbar);
+        bottom_box.append(&controls);
+        let bottom_bar = gtk4::Revealer::new();
+        bottom_bar.set_child(Some(&bottom_box));
+        bottom_bar.set_transition_type(gtk4::RevealerTransitionType::SlideUp);
+        bottom_bar.set_transition_duration(250);
+        bottom_bar.set_reveal_child(true);
+
         let widget = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         widget.add_css_class("player-area");
         widget.append(&stack);
-        widget.append(&drawing.toolbar);
-        widget.append(&controls);
+        widget.append(&bottom_bar);
 
         let inner = Rc::new(Inner {
             sink,
@@ -227,6 +247,10 @@ impl Player {
             drawing_toggle,
             marker_button,
             reveal_button,
+            bottom_bar,
+            fullscreen: Cell::new(false),
+            last_motion: Cell::new(Instant::now()),
+            last_pointer: Cell::new((f64::NAN, f64::NAN)),
             video_dimensions_handler: RefCell::new(None),
             backend,
             entries: RefCell::new(Arc::new(Vec::new())),
@@ -300,6 +324,20 @@ impl Player {
             inner.handle_key(keyval)
         });
         window.add_controller(key);
+
+        // Capture phase so pointer movement anywhere — including over the video
+        // widget, which handles its own motion — counts as activity.
+        let inner = Rc::clone(&self.inner);
+        let motion = gtk4::EventControllerMotion::new();
+        motion.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        motion.connect_motion(move |_, x, y| inner.wake_controls(x, y));
+        window.add_controller(motion);
+    }
+
+    /// Fullscreen collapses the bottom bar and the pointer after a short idle,
+    /// and restores both on the next movement.
+    pub fn set_fullscreen(&self, fullscreen: bool) {
+        self.inner.set_fullscreen(fullscreen);
     }
 
     pub fn apply_snapshot(&self, snapshot: &AppSnapshot) {
@@ -770,6 +808,59 @@ impl Inner {
             _ => return gtk4::glib::Propagation::Proceed,
         }
         gtk4::glib::Propagation::Stop
+    }
+
+    // -- fullscreen idle -----------------------------------------------------
+
+    fn set_fullscreen(self: &Rc<Self>, fullscreen: bool) {
+        self.fullscreen.set(fullscreen);
+        self.last_motion.set(Instant::now());
+        self.reveal_bottom_bar();
+        if !fullscreen {
+            return;
+        }
+        let this = Rc::clone(self);
+        gtk4::glib::timeout_add_local(IDLE_TICK, move || {
+            if !this.fullscreen.get() {
+                return gtk4::glib::ControlFlow::Break;
+            }
+            if this.last_motion.get().elapsed() >= IDLE_HIDE {
+                this.bottom_bar.set_reveal_child(false);
+                this.set_pointer_hidden(true);
+            }
+            gtk4::glib::ControlFlow::Continue
+        });
+    }
+
+    fn wake_controls(&self, x: f64, y: f64) {
+        // Collapsing the bar relayouts everything under a pointer that never
+        // moved, and GTK re-sends motion at that same position to re-resolve
+        // hover. Treating that as activity makes the collapse undo itself.
+        if self.last_pointer.replace((x, y)) == (x, y) {
+            return;
+        }
+        self.last_motion.set(Instant::now());
+        self.reveal_bottom_bar();
+    }
+
+    fn reveal_bottom_bar(&self) {
+        if !self.bottom_bar.reveals_child() {
+            self.bottom_bar.set_reveal_child(true);
+            self.set_pointer_hidden(false);
+        }
+    }
+
+    fn set_pointer_hidden(&self, hidden: bool) {
+        let name = hidden.then_some("none");
+        if let Some(window) = self.stack.root().and_downcast::<gtk4::Window>() {
+            window.set_cursor_from_name(name);
+        }
+        // Clapper sets a cursor on its own video widget, and the innermost
+        // widget with one wins, so the window alone leaves the pointer visible
+        // over the video — which is the whole screen in fullscreen.
+        if let Some(backend) = &self.backend {
+            backend.widget().set_cursor_from_name(name);
+        }
     }
 
     fn toggle_fullscreen(&self) {

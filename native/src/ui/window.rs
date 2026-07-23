@@ -95,16 +95,37 @@ fn fitted_video_height(viewport_width: i32, video_width: u32, video_height: u32)
 /// Nudge the pane by the viewport's own error instead of predicting a height.
 /// Working off the real allocation self-corrects whatever the chrome, sidebar,
 /// or a fullscreen transition changed underneath us, and settles in one pass.
-fn fit_player_pane(paned: &gtk4::Paned, player: &Player, dimensions: (u32, u32)) {
+///
+/// A width change means the window itself resized (maximize above all), and the
+/// fit lands a frame later than the new window size, which reads as the pane
+/// jumping. Those go through `animation`. Same-width corrections stay instant so
+/// dragging the divider is not fought by a running animation.
+fn fit_player_pane(
+    paned: &gtk4::Paned,
+    player: &Player,
+    dimensions: (u32, u32),
+    animation: &adw::TimedAnimation,
+    last_width: &Cell<i32>,
+) {
+    if animation.state() == adw::AnimationState::Playing {
+        return;
+    }
     let (width, height) = player.viewport_size();
     let desired = fitted_video_height(width, dimensions.0, dimensions.1);
     if desired <= 0 || desired == height {
+        last_width.set(width);
         return;
     }
     let position = (paned.position() + desired - height)
         .max(0)
         .min(paned.max_position());
-    paned.set_position(position);
+    if last_width.replace(width) == width {
+        paned.set_position(position);
+        return;
+    }
+    animation.set_value_from(f64::from(paned.position()));
+    animation.set_value_to(f64::from(position));
+    animation.play();
 }
 
 pub struct Shell {
@@ -238,6 +259,21 @@ impl Shell {
         // Match the pane to the active recording instead of leaving Clapper
         // centered inside a fixed-height viewport with black side bars.
         let video_dimensions = Rc::new(Cell::new(None::<(u32, u32)>));
+        let last_fit_width = Rc::new(Cell::new(0));
+        let fit_animation = adw::TimedAnimation::new(
+            &paned,
+            0.0,
+            0.0,
+            200,
+            adw::CallbackAnimationTarget::new({
+                let weak_paned = paned.downgrade();
+                move |value| {
+                    if let Some(paned) = weak_paned.upgrade() {
+                        paned.set_position(value as i32);
+                    }
+                }
+            }),
+        );
         {
             // Only the starting split for an empty player; once a video is
             // playing the viewport probe drives the position from real
@@ -253,11 +289,13 @@ impl Shell {
             let weak_paned = paned.downgrade();
             let weak_player = Rc::downgrade(&player);
             let video_dimensions = Rc::clone(&video_dimensions);
+            let last_fit_width = Rc::clone(&last_fit_width);
+            let fit_animation = fit_animation.clone();
             player.connect_video_dimensions(move |width, height| {
                 let dimensions = (width, height);
                 video_dimensions.set(Some(dimensions));
                 if let (Some(paned), Some(player)) = (weak_paned.upgrade(), weak_player.upgrade()) {
-                    fit_player_pane(&paned, &player, dimensions);
+                    fit_player_pane(&paned, &player, dimensions, &fit_animation, &last_fit_width);
                 }
             });
         }
@@ -265,6 +303,8 @@ impl Shell {
             let weak_paned = paned.downgrade();
             let weak_player = Rc::downgrade(&player);
             let video_dimensions = Rc::clone(&video_dimensions);
+            let last_fit_width = Rc::clone(&last_fit_width);
+            let fit_animation = fit_animation.clone();
             player.connect_viewport_resize(move || {
                 if let (Some(dimensions), Some(paned), Some(player)) = (
                     video_dimensions.get(),
@@ -274,7 +314,13 @@ impl Shell {
                     // Fullscreen hides the library, so the pane position no
                     // longer drives the viewport; let the video letterbox.
                     if paned.end_child().is_some_and(|child| child.is_visible()) {
-                        fit_player_pane(&paned, &player, dimensions);
+                        fit_player_pane(
+                            &paned,
+                            &player,
+                            dimensions,
+                            &fit_animation,
+                            &last_fit_width,
+                        );
                     }
                 }
             });
@@ -314,6 +360,7 @@ impl Shell {
             let toolbar_view = toolbar_view.clone();
             let chrome = chrome.clone();
             let library_widget = library.widget.clone();
+            let player = Rc::clone(&player);
             window.connect_fullscreened_notify(move |window| {
                 let fullscreen = window.is_fullscreen();
                 if fullscreen {
@@ -323,6 +370,7 @@ impl Shell {
                 toolbar_view.set_reveal_top_bars(!fullscreen);
                 chrome.set_visible(!fullscreen);
                 library_widget.set_visible(!fullscreen);
+                player.set_fullscreen(fullscreen);
             });
         }
 
