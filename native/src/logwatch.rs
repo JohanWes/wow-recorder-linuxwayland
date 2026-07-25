@@ -173,18 +173,25 @@ impl LogTailer {
         if available == 0 {
             return Ok(Vec::new());
         }
-        let amount = available.min(READ_CHUNK_BYTES as u64) as usize;
         let mut file = File::open(&self.path).map_err(|source| self.io_error(source))?;
         file.seek(SeekFrom::Start(self.offset))
             .map_err(|source| self.io_error(source))?;
-        let mut bytes = vec![0_u8; amount];
-        let bytes_read = file
-            .read(&mut bytes)
-            .map_err(|source| self.io_error(source))?;
-        bytes.truncate(bytes_read);
-        let read_start = self.offset;
-        self.offset += bytes_read as u64;
-        let events = self.consume(bytes, read_start)?;
+        let mut remaining = available;
+        let mut buffer = vec![0_u8; READ_CHUNK_BYTES];
+        let mut events = Vec::new();
+        while remaining > 0 {
+            let amount = remaining.min(READ_CHUNK_BYTES as u64) as usize;
+            let bytes_read = file
+                .read(&mut buffer[..amount])
+                .map_err(|source| self.io_error(source))?;
+            if bytes_read == 0 {
+                break;
+            }
+            let read_start = self.offset;
+            self.offset += bytes_read as u64;
+            remaining -= bytes_read as u64;
+            events.extend(self.consume(buffer[..bytes_read].to_vec(), read_start)?);
+        }
         self.checkpoint = read_checkpoint(&self.path, self.offset)?;
         Ok(events)
     }
@@ -473,6 +480,18 @@ mod tests {
             assert_eq!(events.len(), 1, "split at {split}");
             fs::remove_dir_all(directory).unwrap();
         }
+    }
+
+    #[test]
+    fn one_poll_drains_the_available_file_snapshot() {
+        let directory = test_directory();
+        let path = directory.join("WoWCombatLog.txt");
+        let event_count = READ_CHUNK_BYTES / EVENT.len() + 2;
+        fs::write(&path, EVENT.repeat(event_count)).unwrap();
+        let mut tailer = LogTailer::open_replay(path, GameFlavor::Retail, CONTEXT).unwrap();
+
+        assert_eq!(tailer.poll().unwrap().len(), event_count);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

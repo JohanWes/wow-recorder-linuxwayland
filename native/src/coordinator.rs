@@ -42,9 +42,15 @@ use crate::recorder::{
 };
 use crate::storage::{EntryUpdate, LibraryIndex, Storage, now_unix_ms};
 
-/// Force-end an automatic recording after this long without new log data.
-const RETAIL_DATA_TIMEOUT_MS: i64 = 10_000;
-const CLASSIC_DATA_TIMEOUT_MS: i64 = 2_000;
+/// Force-end an automatic recording after this long without new log data. This
+/// is only a crash/alt-F4 safety net — normal activities end on explicit combat
+/// log events. WoW buffers the combat log and flushes it to disk in bursts, so
+/// the window must sit well above that flush cadence or a live activity gets
+/// force-ended inside a flush gap and discarded before its player is
+/// identified. Values match legacy `RetailLogHandler`/`ClassicLogHandler`,
+/// which pass 10 and 2 *minutes* respectively to `CombatLogWatcher`.
+const RETAIL_DATA_TIMEOUT_MS: i64 = 10 * 60_000;
+const CLASSIC_DATA_TIMEOUT_MS: i64 = 2 * 60_000;
 /// Commands handled per tick before the loop returns to polling.
 const COMMAND_BATCH: usize = 16;
 /// Bounded problem list surfaced in the snapshot.
@@ -825,7 +831,7 @@ impl Coordinator {
         }
     }
 
-    /// Retail 10 s, classic/era 2 s without new log data ends at last-data time.
+    /// Retail 10 min, classic/era 2 min without new log data ends at last-data time.
     fn check_data_timeout(&mut self, now_ms: i64) {
         let Some(active) = self.active.as_ref() else {
             return;
@@ -842,9 +848,15 @@ impl Coordinator {
         let Some((seen_wall_ms, seen_log_ms)) = self.last_event.get(&flavor).copied() else {
             return;
         };
-        if now_ms - seen_wall_ms < limit {
+        let wall_gap_ms = now_ms - seen_wall_ms;
+        if wall_gap_ms < limit {
             return;
         }
+        tracing::warn!(
+            wall_gap_ms,
+            seen_log_ms,
+            "data timeout: force-ending automatic recording (log idle on disk)"
+        );
         for action in self.engine.force_end(flavor, seen_log_ms) {
             self.apply(action);
         }

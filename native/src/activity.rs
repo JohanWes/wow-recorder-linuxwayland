@@ -20,8 +20,8 @@
 //!   reproduced as state corruption.
 //! - On a failed `Begin` (recorder error), the coordinator clears the engine's
 //!   active activity with `force_end` and drops the emitted `Abandon` action.
-//! - The coordinator drives data-timeout force ends: retail 10 s, classic/era
-//!   2 s without new log data, ending at last-data time.
+//! - The coordinator drives data-timeout force ends: retail 10 min, classic/era
+//!   2 min without new log data, ending at last-data time.
 //! - `force_end` reuses the most recent config seen by `handle` so the raid
 //!   minimum-duration discard still applies to force-ended raids.
 
