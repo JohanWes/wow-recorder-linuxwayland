@@ -1,0 +1,25 @@
+{
+  "category": "Raids",
+  "duration": 128.0,
+  "start": 1772380000000,
+  "result": true,
+  "flavour": "Classic",
+  "zoneID": 230,
+  "zoneName": "Gnomeregan",
+  "encounterID": 234,
+  "encounterName": "Mekgineer Thermaplugg",
+  "player": {
+    "_GUID": "Player-4800-CCCC0001",
+    "_name": "Eraone",
+    "_realm": "Erarealm"
+  },
+  "combatants": [
+    {
+      "_GUID": "Player-4800-CCCC0001",
+      "_name": "Eraone",
+      "_realm": "Erarealm"
+    }
+  ],
+  "overrun": 15,
+  "uniqueHash": "1020304050607080901a2b3c4d5e6f70"
+}

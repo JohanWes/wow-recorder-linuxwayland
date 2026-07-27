@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<component type="desktop-application">
+  <id>io.github.JohanWes.WarcraftRecorder.Devel</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Warcraft Recorder (Development)</name>
+  <summary>Automatically record and review World of Warcraft gameplay</summary>
+  <description>
+    <p>
+      Warcraft Recorder captures World of Warcraft activities and keeps a local
+      library for video review with combat-log metadata.
+    </p>
+    <p>This development build is for testing the native Linux rewrite.</p>
+  </description>
+  <launchable type="desktop-id">io.github.JohanWes.WarcraftRecorder.Devel.desktop</launchable>
+  <url type="homepage">https://github.com/JohanWes/wow-recorder-linuxwayland</url>
+  <url type="bugtracker">https://github.com/JohanWes/wow-recorder-linuxwayland/issues</url>
+  <developer id="io.github.johanwes">
+    <name>Warcraft Recorder contributors</name>
+  </developer>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Video</category>
+  </categories>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="1.0.0" date="2026-07-27">
+      <description>
+        <p>Initial native development package.</p>
+      </description>
+    </release>
+  </releases>
+</component>

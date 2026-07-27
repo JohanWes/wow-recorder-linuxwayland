@@ -1,0 +1,44 @@
+{
+  "category": "2v2",
+  "duration": 96.0,
+  "start": 1772340000000,
+  "result": true,
+  "flavour": "Retail",
+  "zoneID": 1552,
+  "zoneName": "Ashamane's Fall",
+  "teamMMR": 1850,
+  "deaths": [
+    {
+      "name": "Testfour",
+      "specId": 260,
+      "date": "2026-03-01T04:41:35.000Z",
+      "timestamp": 95.0,
+      "friendly": false
+    }
+  ],
+  "player": {
+    "_GUID": "Player-1000-AAAA0001",
+    "_teamID": 0,
+    "_specID": 577,
+    "_name": "Testone",
+    "_realm": "Testrealm"
+  },
+  "combatants": [
+    {
+      "_GUID": "Player-1000-AAAA0001",
+      "_teamID": 0,
+      "_specID": 577,
+      "_name": "Testone",
+      "_realm": "Testrealm"
+    },
+    {
+      "_GUID": "Player-1000-AAAA0004",
+      "_teamID": 1,
+      "_specID": 260,
+      "_name": "Testfour",
+      "_realm": "Otherrealm"
+    }
+  ],
+  "overrun": 3,
+  "uniqueHash": "aa00bb11cc22dd33ee44ff5566778899"
+}

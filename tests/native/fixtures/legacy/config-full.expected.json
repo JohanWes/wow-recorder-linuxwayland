@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "flavors": {
+    "retail": {
+      "enabled": true,
+      "log_dir": {
+        "path": "/games/wow/_retail_/Logs",
+        "authorization": "imported_inactive"
+      }
+    },
+    "retail_ptr": {
+      "enabled": true,
+      "log_dir": {
+        "path": "/games/wow/_retail_ptr_/Logs",
+        "authorization": "imported_inactive"
+      }
+    },
+    "classic": {
+      "enabled": true,
+      "log_dir": {
+        "path": "/games/wow/_classic_/Logs",
+        "authorization": "imported_inactive"
+      }
+    },
+    "classic_ptr": {
+      "enabled": true,
+      "log_dir": {
+        "path": "/games/wow/_classic_ptr_/Logs",
+        "authorization": "imported_inactive"
+      }
+    },
+    "era": {
+      "enabled": true,
+      "log_dir": {
+        "path": "/games/wow/_classic_era_/Logs",
+        "authorization": "imported_inactive"
+      }
+    }
+  },
+  "activities": {
+    "record_raids": true,
+    "record_dungeons": false,
+    "record_two_v_two": true,
+    "record_three_v_three": false,
+    "record_five_v_five": true,
+    "record_skirmish": false,
+    "record_solo_shuffle": true,
+    "record_battlegrounds": false,
+    "record_challenge_modes": true,
+    "min_keystone_level": 12,
+    "min_raid_difficulty": "heroic",
+    "min_raid_duration_seconds": 42,
+    "current_raid_only": true,
+    "raid_overrun_seconds": 22,
+    "dungeon_overrun_seconds": 9
+  },
+  "storage": {
+    "recording_dir": {
+      "path": "/portal/recordings",
+      "authorization": "imported_inactive"
+    },
+    "separate_buffer_dir": true,
+    "buffer_dir": {
+      "path": "/portal/replay-buffer",
+      "authorization": "imported_inactive"
+    },
+    "limit": {
+      "kind": "gib",
+      "gib": 75
+    }
+  },
+  "capture": {
+    "fps": 30,
+    "codec": "hevc",
+    "bitrate_kbps": 35000,
+    "replay_buffer_seconds": 240,
+    "extra_lead_in_seconds": 12,
+    "replay_storage": "disk",
+    "capture_cursor": true,
+    "audio_output": "speakers.monitor",
+    "audio_input": "microphone.input",
+    "capture_target_token": null
+  },
+  "manual": {
+    "enabled": true,
+    "sound": false
+  },
+  "interface": {
+    "hide_empty_categories": true,
+    "death_markers": "all",
+    "encounter_markers": "hidden",
+    "round_markers": "visible",
+    "selected_category": "raids",
+    "minimize_to_tray": true,
+    "close_to_tray": false,
+    "start_minimized": true,
+    "layout": {
+      "player_split": null,
+      "column_widths": {}
+    }
+  },
+  "validate_log_paths": false,
+  "first_time_setup_complete": false,
+  "migration_notice_pending": true
+}

@@ -1,0 +1,19 @@
+{
+  "category": "Battlegrounds",
+  "duration": 1210.0,
+  "start": 1772350000000,
+  "result": false,
+  "flavour": "Retail",
+  "zoneID": 30,
+  "zoneName": "Alterac Valley",
+  "deaths": [],
+  "player": {
+    "_GUID": "Player-1000-AAAA0001",
+    "_specID": 577,
+    "_name": "Testone",
+    "_realm": "Testrealm"
+  },
+  "combatants": [],
+  "overrun": 0,
+  "uniqueHash": "5566778899aabbccddeeff0011223344"
+}

@@ -1,0 +1,157 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! Process entry point. `main` starts the coordinator and the tray service,
+//! runs the GTK shell, then joins both top-level handles after the
+//! application loop returns. No child or thread is detached.
+
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, mpsc};
+
+use warcraft_recorder::config::Config;
+use warcraft_recorder::coordinator;
+
+mod ui;
+
+use ui::tray_backend::TrayBackend;
+
+#[cfg(not(feature = "development"))]
+const APP_ID: &str = "io.github.JohanWes.WarcraftRecorder";
+#[cfg(feature = "development")]
+const APP_ID: &str = "io.github.JohanWes.WarcraftRecorder.Devel";
+
+fn main() {
+    let setup = match coordinator::Setup::from_environment() {
+        Ok(setup) => setup,
+        Err(error) => {
+            tracing_subscriber::fmt::init();
+            tracing::error!(%error, "cannot resolve the configuration directory");
+            eprintln!("warcraft-recorder: {error}");
+            std::process::exit(1);
+        }
+    };
+    init_logging(&setup.data_dir);
+    let options = shell_options(APP_ID, &setup);
+
+    // One latch shared by everything that can make the shell's drain useful,
+    // so a burst of wakes costs a single queued main-loop callback.
+    let wake_pending = Arc::new(AtomicBool::new(false));
+    let wake: Arc<dyn Fn() + Send + Sync> = {
+        let pending = Arc::clone(&wake_pending);
+        Arc::new(move || ui::wake_shell(&pending))
+    };
+    let coordinator = Rc::new(RefCell::new(coordinator::start(setup, {
+        let wake = Arc::clone(&wake);
+        Box::new(move || wake())
+    })));
+
+    let (tray_events_tx, tray_events_rx) = mpsc::sync_channel(8);
+    let tray = TrayBackend::start(tray_events_tx, Arc::clone(&wake))
+        .map(Rc::new)
+        .map_err(|error| tracing::warn!(%error, "tray service unavailable"))
+        .ok();
+
+    tracing::info!(application_id = APP_ID, "starting application");
+    let code = ui::run(
+        &options,
+        Rc::clone(&coordinator),
+        tray.clone(),
+        tray_events_rx,
+    );
+
+    // The GTK loop has exited. Take the tray icon down first: the coordinator's
+    // shutdown now waits out gpu-screen-recorder's flush, and an icon that
+    // outlives the window by seconds is one the user can click for nothing.
+    if let Some(tray) = tray {
+        tray.shutdown();
+    }
+    coordinator.borrow_mut().shutdown();
+    std::process::exit(code);
+}
+
+/// The shell options that come from outside the GTK loop: paths the shell
+/// launches but never reads, plus the initial interface flags read once
+/// before the loop starts (live values arrive with the first snapshot).
+fn shell_options(app_id: &'static str, setup: &coordinator::Setup) -> ui::ShellOptions {
+    let config = Config::load(&setup.config_path).unwrap_or_default();
+    ui::ShellOptions {
+        app_id,
+        data_dir: setup.data_dir.clone(),
+        config_dir: config_dir(&setup.config_path),
+        start_minimized: config.interface.start_minimized,
+        close_to_tray: config.interface.close_to_tray,
+        minimize_to_tray: config.interface.minimize_to_tray,
+    }
+}
+
+fn config_dir(config_path: &std::path::Path) -> PathBuf {
+    config_path
+        .parent()
+        .map_or_else(PathBuf::new, std::path::Path::to_owned)
+}
+
+/// App log size cap; the previous log is kept as `.old`, so on-disk logging
+/// stays bounded to two files.
+const LOG_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// `tracing` output goes to `app.log` next to the recorder diagnostics that
+/// "Open logs" reveals; stderr is the fallback when the file cannot open.
+fn init_logging(data_dir: &std::path::Path) {
+    let path = data_dir.join("app.log");
+    let open = |path: &std::path::Path| {
+        std::fs::create_dir_all(data_dir)?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    };
+    match open(&path) {
+        Ok(file) => {
+            let writer = RotatingLog {
+                path,
+                file,
+                written: 0,
+            };
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(writer))
+                .init();
+        }
+        Err(error) => {
+            tracing_subscriber::fmt::init();
+            tracing::warn!(%error, "file logging unavailable; logging to stderr");
+        }
+    }
+}
+
+struct RotatingLog {
+    path: PathBuf,
+    file: std::fs::File,
+    /// Bytes in the current file; seeded lazily from metadata on first write.
+    written: u64,
+}
+
+impl std::io::Write for RotatingLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.written == 0 {
+            self.written = self.file.metadata().map(|meta| meta.len()).unwrap_or(0) + 1;
+        }
+        if self.written.saturating_add(buf.len() as u64) > LOG_LIMIT_BYTES {
+            let _ = std::fs::rename(&self.path, self.path.with_extension("log.old"));
+            self.file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
+            self.written = 1;
+        }
+        let count = self.file.write(buf)?;
+        self.written += count as u64;
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}

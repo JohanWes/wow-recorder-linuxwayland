@@ -1,94 +1,82 @@
 # Warcraft Recorder
 
-Warcraft Recorder (Linux/Wayland fork) watches the World of Warcraft combat log and automatically records videos for “interesting” activities (arenas, raids, dungeons, etc).
+Warcraft Recorder is a native Rust/GTK4 application for Linux/Wayland that
+tails the World of Warcraft combat log, captures activities with
+`gpu-screen-recorder`, and keeps a local video library with combat metadata,
+timeline markers, playback controls, clipping, and local POV switching.
 
-## Install
+The supported application ID is `io.github.JohanWes.WarcraftRecorder`. English
+is the only shipped language and recordings/configuration remain local.
 
-This fork publishes Linux AppImages via GitHub Releases. Every push to `main` that passes CI creates a new release.
+## Install and update
 
-### Option 1: Installer script (recommended)
+The normal install and update path is the project’s signed Flatpak remote:
 
-Run the installer. It downloads the latest AppImage, verifies the SHA256 checksum, and installs it:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/install.sh | bash
+```sh
+flatpak remote-add --user --if-not-exists warcraft-recorder \
+  https://johanwes.github.io/wow-recorder-linuxwayland/index.flatpakrepo
+flatpak install --user warcraft-recorder io.github.JohanWes.WarcraftRecorder
 ```
 
-By default it installs per-user into:
+After installation, the desktop software center or this command owns updates:
 
-- `~/.local/bin/warcraftrecorder`
-- `~/.local/share/applications/warcraftrecorder.desktop`
-- `~/.local/share/icons/hicolor/256x256/apps/warcraftrecorder.png`
-
-Run it from the terminal or launch **Warcraft Recorder** from your application menu:
-
-```bash
-warcraftrecorder
+```sh
+flatpak update --user io.github.JohanWes.WarcraftRecorder
 ```
 
-If `~/.local/bin` is not on your `PATH`, the installer will tell you how to add it.
+The permanent remote is signed and published manually once a candidate is
+approved. Until then, use the release-candidate bundle attached to the
+candidate workflow:
 
-#### Updating
-
-Re-run the same command. The installer overwrites any existing install with the latest release.
-
-#### Uninstall
-
-```bash
-rm ~/.local/bin/warcraftrecorder \
-   ~/.local/share/applications/warcraftrecorder.desktop \
-   ~/.local/share/icons/hicolor/256x256/apps/warcraftrecorder.png
+```sh
+flatpak install --user ./warcraft-recorder.flatpak
 ```
 
-### Option 2: Manual AppImage install
+A bundle is an offline test artifact and does not configure the update remote.
 
-If you prefer not to run a remote script, download the AppImage directly from the [latest release](https://github.com/JohanWes/wow-recorder-linuxwayland/releases/latest):
+Final AppImage users can migrate from the app itself: “Check for updates”
+installs the Flatpak, keeps the AppImage at
+`~/.local/share/warcraftrecorder/WarcraftRecorder-final.AppImage`, and starts
+the native app. Existing settings are imported once and left untouched, and
+recordings, tags, and protected videos stay where they are. The sandboxed app
+only needs the recording folder and the World of Warcraft log folders selected
+again, which it asks for on first start. Rollback is running that preserved
+AppImage.
 
-```bash
-curl -LO https://github.com/JohanWes/wow-recorder-linuxwayland/releases/latest/download/WarcraftRecorder.AppImage
-chmod +x WarcraftRecorder.AppImage
-./WarcraftRecorder.AppImage
+To uninstall the application while retaining user data:
+
+```sh
+flatpak uninstall --user io.github.JohanWes.WarcraftRecorder
 ```
 
-Put it anywhere in your `PATH` and rename it if you want a quick command:
+Only pass `--delete-data` when deleting the native app’s private config and
+runtime data is intentional. Recordings and legacy configuration are outside
+that private directory and are not removed by app uninstall.
 
-```bash
-mv WarcraftRecorder.AppImage ~/.local/bin/warcraftrecorder
+## Development
+
+The repository contains one Cargo package under `native/`. Build and verify
+it from the repository root:
+
+```sh
+cargo fmt --manifest-path native/Cargo.toml --check
+cargo clippy --manifest-path native/Cargo.toml --all-targets --all-features -- -D warnings
+cargo test --manifest-path native/Cargo.toml --all-targets
+cargo build --manifest-path native/Cargo.toml --release
 ```
 
-Updates are manual: download the newest AppImage and replace your existing file.
+The development Flatpak is
+`flatpak/io.github.JohanWes.WarcraftRecorder.Devel.yml`; the release manifest
+is `flatpak/io.github.JohanWes.WarcraftRecorder.yml`. Both use GNOME runtime
+50 and the locked Cargo sources. See
+[`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for the native workflow and
+[`docs/RELEASING.md`](docs/RELEASING.md) for candidate/signing steps.
 
-## Dependencies / Prerequisites (Wayland)
+## Scope and license
 
-- `gpu-screen-recorder`
-- `pipewire`
-- `xdg-desktop-portal`
-- `fuse2`
-
-You still need one portal backend for your compositor/DE (install one of):
-
-- `xdg-desktop-portal-hyprland` (Hyprland)
-- `xdg-desktop-portal-kde` (KDE)
-- `xdg-desktop-portal-gnome` (GNOME)
-- `xdg-desktop-portal-wlr` (wlroots)
-
-The app performs best-effort runtime checks and reports missing prerequisites via the in-app error indicator.
-
-## Quick Start
-
-1. Install a combat logging addon and enable Advanced Combat Logging when prompted:
-   - Retail: SimpleCombatLogger ([CurseForge](https://www.curseforge.com/wow/addons/simplecombatlogger), [Wago](https://addons.wago.io/addons/simplecombatlogger)).
-   - Classic / Classic Era: AutoCombatLogger ([CurseForge](https://www.curseforge.com/wow/addons/autocombatlogger), [Wago](https://addons.wago.io/addons/autocombatlogger)).
-2. In Warcraft Recorder settings:
-   - Choose a Storage Path for videos.
-   - Set the WoW `Logs` folder for the flavour(s) you play.
-3. Use the Test button with WoW running to validate recording end-to-end.
-
-## Building / Packaging (AppImage)
-
-Linux packaging produces an AppImage:
-
-- `npm install`
-- `npm run package:linux`
-
-Use Node 22 LTS (or Node 20 LTS) for packaging.
+This fork is Linux/Wayland-only. Cloud/account/upload/chat/pro features,
+localization catalogs, and other platform integrations are not part of the
+native application. The native rewrite is licensed under
+GPL-3.0-or-later. The capture engine is
+[`gpu-screen-recorder`](https://git.dec05eba.com/gpu-screen-recorder/); the
+original Warcraft Recorder is prior art.

@@ -1,0 +1,16 @@
+{
+  "category": "Raids",
+  "duration": 201.0,
+  "start": 1772323221000,
+  "result": true,
+  "flavour": "Retail",
+  "encounterID": 3009,
+  "encounterName": "Chrome King Gallywix",
+  "difficultyID": 16,
+  "player": {
+    "_name": "Testthree"
+  },
+  "combatants": [],
+  "overrun": 15,
+  "uniqueHash": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+}

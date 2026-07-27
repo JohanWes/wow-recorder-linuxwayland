@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<component type="desktop-application">
+  <id>io.github.JohanWes.WarcraftRecorder</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Warcraft Recorder</name>
+  <summary>Automatically record and review World of Warcraft gameplay</summary>
+  <description>
+    <p>
+      Warcraft Recorder captures World of Warcraft activities and keeps a local
+      library for video review with combat-log metadata.
+    </p>
+    <p>
+      Native Linux and Wayland releases are distributed through the project's
+      signed Flatpak remote. Recordings and configuration remain local.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.JohanWes.WarcraftRecorder.desktop</launchable>
+  <url type="homepage">https://github.com/JohanWes/wow-recorder-linuxwayland</url>
+  <url type="bugtracker">https://github.com/JohanWes/wow-recorder-linuxwayland/issues</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/data/screenshots/warcraft-recorder.png</image>
+      <caption>Native library and player view with combat recording status.</caption>
+    </screenshot>
+  </screenshots>
+  <developer id="io.github.johanwes">
+    <name>Warcraft Recorder contributors</name>
+  </developer>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Video</category>
+  </categories>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="1.0.0" date="2026-07-27">
+      <description>
+        <p>
+          First release of the native Linux/Wayland application. It replaces
+          the Electron build with lower resource use, a Wayland-native
+          interface, and Flatpak updates. Legacy settings are imported once;
+          the recording folder and World of Warcraft log folders have to be
+          selected again so the sandbox can reach them.
+        </p>
+      </description>
+    </release>
+  </releases>
+</component>

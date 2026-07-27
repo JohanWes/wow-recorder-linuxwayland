@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  One shared GResource bundle: shell CSS, category symbolic icons, the product
+  mark, and icon-license notices. File paths are relative to the sourcedirs
+  build.rs passes (the `data/` directory and `native/src/ui`). Symbolic icons
+  live under `icons/scalable/{actions,apps}` because GtkIconTheme resolves an
+  added resource path using the hicolor directory layout, not flat files.
+-->
+<gresources>
+  <gresource prefix="/io/github/JohanWes/WarcraftRecorder">
+    <file>style.css</file>
+  </gresource>
+  <gresource prefix="/io/github/JohanWes/WarcraftRecorder/icons/scalable/actions">
+    <file alias="wr-category-2v2-symbolic.svg">assets/icons/wr-category-2v2-symbolic.svg</file>
+    <file alias="wr-category-3v3-symbolic.svg">assets/icons/wr-category-3v3-symbolic.svg</file>
+    <file alias="wr-category-5v5-symbolic.svg">assets/icons/wr-category-5v5-symbolic.svg</file>
+    <file alias="wr-category-skirmish-symbolic.svg">assets/icons/wr-category-skirmish-symbolic.svg</file>
+    <file alias="wr-category-solo-shuffle-symbolic.svg">assets/icons/wr-category-solo-shuffle-symbolic.svg</file>
+    <file alias="wr-category-mythic-plus-symbolic.svg">assets/icons/wr-category-mythic-plus-symbolic.svg</file>
+    <file alias="wr-category-raids-symbolic.svg">assets/icons/wr-category-raids-symbolic.svg</file>
+    <file alias="wr-category-battlegrounds-symbolic.svg">assets/icons/wr-category-battlegrounds-symbolic.svg</file>
+    <file alias="wr-category-manual-symbolic.svg">assets/icons/wr-category-manual-symbolic.svg</file>
+    <file alias="wr-category-clips-symbolic.svg">assets/icons/wr-category-clips-symbolic.svg</file>
+  </gresource>
+  <gresource prefix="/io/github/JohanWes/WarcraftRecorder/icons/scalable/apps">
+    <file alias="warcraft-recorder.svg">icons/io.github.JohanWes.WarcraftRecorder.svg</file>
+  </gresource>
+  <gresource prefix="/io/github/JohanWes/WarcraftRecorder/licenses">
+    <file alias="lucide-ISC.txt">assets/icons/LUCIDE-LICENSE</file>
+    <file alias="fontawesome-CC-BY-4.0.txt">assets/icons/FONTAWESOME-LICENSE.txt</file>
+  </gresource>
+</gresources>

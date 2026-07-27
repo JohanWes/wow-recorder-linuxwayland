@@ -1,320 +1,133 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# curl|bash installer for the Warcraft Recorder Linux AppImage.
-# Re-running the script overwrites an existing install with the latest release.
+# Final AppImage migration helper. It performs a user-level Flatpak install,
+# retires the AppImage launchers it originally created, and starts the native
+# app. The permanent remote and the desktop software center own every update
+# after this one.
+#
+# The final AppImage's updater pipes this script into bash and may append its
+# own `--prefix <dir>` argument. Arguments are deliberately ignored: there is
+# no prefix to install into any more.
 
-REPO="${WARCRAFTRECORDER_REPO:-JohanWes/wow-recorder-linuxwayland}"
-APP_NAME="warcraftrecorder"
-DISPLAY_NAME="Warcraft Recorder"
-APPIMAGE_NAME="WarcraftRecorder.AppImage"
-CHECKSUM_NAME="${APPIMAGE_NAME}.sha256"
-ICON_NAME="warcraftrecorder.png"
-DESKTOP_NAME="warcraftrecorder.desktop"
+REMOTE_NAME="warcraft-recorder"
+REMOTE_DESCRIPTOR="${WARCRAFTRECORDER_REMOTE_DESCRIPTOR:-https://johanwes.github.io/wow-recorder-linuxwayland/index.flatpakrepo}"
+FLATHUB_DESCRIPTOR="${WARCRAFTRECORDER_FLATHUB_DESCRIPTOR:-https://dl.flathub.org/repo/flathub.flatpakrepo}"
+INSTALL_PAGE="${WARCRAFTRECORDER_INSTALL_PAGE:-https://github.com/JohanWes/wow-recorder-linuxwayland#install-and-update}"
+APP_ID="io.github.JohanWes.WarcraftRecorder"
+# Kept in step with `runtime-version` in the release manifest.
+RUNTIME_REF="org.gnome.Platform//50"
 
-PREFIX="${HOME}/.local"
-NO_DESKTOP=0
-NO_VERIFY=0
-USE_SUDO=0
-RELEASE_TAG="latest"
-
-bin_dir=""
-share_dir=""
-desktop_dir=""
-icon_dir=""
-metadata_dir=""
-SUDO=()
-INSTALLED_RELEASE_TAG=""
-
-usage() {
-  cat <<EOF
-Install ${DISPLAY_NAME} from the latest GitHub release.
-
-Usage:
-  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | bash
-  bash install.sh [OPTIONS]
-
-Options:
-  --prefix <dir>   Install prefix (default: ${PREFIX})
-  --no-desktop     Skip creating the application menu entry
-  --no-verify      Skip SHA256 checksum verification
-  --use-sudo       Use sudo for install steps when the prefix is not writable
-  --repo <o/r>     Use a different GitHub repository (default: ${REPO})
-  --tag <tag>      Install a specific release tag (default: latest)
-  -h, --help       Show this help message
-
-Environment:
-  WARCRAFTRECORDER_REPO   Default repository override (owner/repo)
-EOF
-}
+LEGACY_BIN="${WARCRAFTRECORDER_LEGACY_BIN:-${HOME}/.local/bin/warcraftrecorder}"
+LEGACY_DESKTOP="${WARCRAFTRECORDER_LEGACY_DESKTOP:-${HOME}/.local/share/applications/warcraftrecorder.desktop}"
+AUTOSTART_DIR="${WARCRAFTRECORDER_AUTOSTART_DIR:-${HOME}/.config/autostart}"
+PRESERVED_APPIMAGE="${WARCRAFTRECORDER_PRESERVED_APPIMAGE:-${HOME}/.local/share/warcraftrecorder/WarcraftRecorder-final.AppImage}"
 
 log() { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARNING: %s\n' "$*" >&2; }
-error() { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 
-run_privileged() {
-  if [ "${#SUDO[@]}" -gt 0 ]; then
-    "${SUDO[@]}" "$@"
-  else
-    "$@"
-  fi
+manual_instructions() {
+  printf '[install] Native Flatpak migration is not automatic on this system.\n' >&2
+  printf '[install] Installation page: %s\n' "$INSTALL_PAGE" >&2
+  printf '[install] Manual commands:\n' >&2
+  printf '  flatpak remote-add --user --if-not-exists flathub %s\n' "$FLATHUB_DESCRIPTOR" >&2
+  printf '  flatpak remote-add --user --if-not-exists %s %s\n' \
+    "$REMOTE_NAME" "$REMOTE_DESCRIPTOR" >&2
+  printf '  flatpak install --user %s %s\n' "$REMOTE_NAME" "$APP_ID" >&2
 }
 
-parse_args() {
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --prefix)
-        [ -n "${2:-}" ] || error "--prefix requires an argument"
-        PREFIX="$2"
-        shift 2
-        ;;
-      --no-desktop) NO_DESKTOP=1; shift ;;
-      --no-verify) NO_VERIFY=1; shift ;;
-      --use-sudo) USE_SUDO=1; shift ;;
-      --repo)
-        [ -n "${2:-}" ] || error "--repo requires an argument"
-        REPO="$2"
-        shift 2
-        ;;
-      --tag)
-        [ -n "${2:-}" ] || error "--tag requires an argument"
-        RELEASE_TAG="$2"
-        shift 2
-        ;;
-      -h|--help) usage; exit 0 ;;
-      *) error "Unknown argument: $1" ;;
-    esac
-  done
+fail_with_manual_instructions() {
+  manual_instructions
+  return 1
 }
 
-download() {
-  local url dest
-  url="$1"
-  dest="$2"
-
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --retry 3 --retry-delay 2 -o "$dest" "$url" || error "failed to download ${url}"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$dest" "$url" || error "failed to download ${url}"
-  else
-    error "curl or wget is required"
+# The project remote carries the application only. Without a remote that
+# publishes the GNOME runtime the install fails on an unresolvable dependency,
+# so make sure one is reachable before asking for the app.
+ensure_runtime_source() {
+  if flatpak info "$RUNTIME_REF" >/dev/null 2>&1; then
+    return 0
   fi
+  if flatpak remotes --columns=name | grep -qx flathub; then
+    return 0
+  fi
+  log "Adding Flathub for the GNOME runtime..."
+  flatpak remote-add --user --if-not-exists flathub "$FLATHUB_DESCRIPTOR" ||
+    warn "could not add Flathub; the runtime must come from an existing remote"
 }
 
-check_dependencies() {
-  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-    error "curl or wget is required"
-  fi
-
-  if [ "$NO_VERIFY" -eq 0 ] && ! command -v sha256sum >/dev/null 2>&1; then
-    error "sha256sum is required for verification (use --no-verify to skip)"
-  fi
-}
-
-warn_missing_fuse() {
-  # AppImage needs libfuse2 in most cases.
-  if ! ldconfig -p 2>/dev/null | grep -q 'libfuse\.so\.2' 2>/dev/null; then
-    warn "libfuse2 (fuse2) does not appear to be installed."
-    warn "The AppImage may fail to launch until you install libfuse2 / fuse2."
-  fi
-}
-
-resolve_release_urls() {
-  local release_root
-  if [ "$RELEASE_TAG" = "latest" ]; then
-    release_root="https://github.com/${REPO}/releases/latest/download"
-  else
-    release_root="https://github.com/${REPO}/releases/download/${RELEASE_TAG}"
-  fi
-  APPIMAGE_URL="${release_root}/${APPIMAGE_NAME}"
-  CHECKSUM_URL="${release_root}/${CHECKSUM_NAME}"
-  ICON_URL="https://raw.githubusercontent.com/${REPO}/main/assets/icon.png"
-}
-
-resolve_latest_release_tag() {
-  local location
-
-  [ "$RELEASE_TAG" = "latest" ] || return 0
-  command -v curl >/dev/null 2>&1 || return 0
-
-  location=$(curl -fsSI "$APPIMAGE_URL" | awk 'BEGIN { IGNORECASE=1 } /^location:/ { sub(/\r$/, "", $2); print $2; exit }') || return 0
-  INSTALLED_RELEASE_TAG=$(release_tag_from_url "$location")
-  if [ -n "$INSTALLED_RELEASE_TAG" ]; then
-    log "Resolved latest release: ${INSTALLED_RELEASE_TAG}"
-  fi
-}
-
-compute_dirs() {
-  bin_dir="${PREFIX}/bin"
-  share_dir="${PREFIX}/share"
-  desktop_dir="${share_dir}/applications"
-  icon_dir="${share_dir}/icons/hicolor/256x256/apps"
-  metadata_dir="${share_dir}/${APP_NAME}"
-}
-
-nearest_existing_parent() {
-  local path
-  path="$1"
-
-  while [ ! -e "$path" ]; do
-    path=$(dirname "$path")
-  done
-
-  printf '%s\n' "$path"
-}
-
-prefix_is_writable() {
-  local parent
-
-  if [ -d "$PREFIX" ]; then
-    [ -w "$PREFIX" ]
-    return
-  fi
-
-  parent=$(nearest_existing_parent "$PREFIX")
-  [ -d "$parent" ] && [ -w "$parent" ]
-}
-
-setup_privilege() {
-  if [ "$(id -u)" -eq 0 ] || prefix_is_writable; then
-    SUDO=()
-    return
-  fi
-
-  if [ "$USE_SUDO" -eq 0 ]; then
-    error "prefix ${PREFIX} is not writable by the current user. Use the default user install, choose a writable --prefix, or pass --use-sudo for a system install."
-  fi
-
-  if ! command -v sudo >/dev/null 2>&1; then
-    error "prefix ${PREFIX} is not writable and sudo is not available. Choose a user-writable --prefix."
-  fi
-
-  log "Prefix ${PREFIX} is not writable by the current user; using sudo for install steps."
-  sudo -v || error "sudo authentication failed"
-  SUDO=(sudo)
-}
-
-release_tag_from_url() {
-  local url tag
-  url="$1"
-
-  case "$url" in
-    */releases/download/*/*)
-      tag="${url#*/releases/download/}"
-      tag="${tag%%/*}"
-      printf '%s\n' "$tag"
-      ;;
-  esac
-}
-
-release_tag_to_install() {
-  if [ -n "$INSTALLED_RELEASE_TAG" ]; then
-    printf '%s\n' "$INSTALLED_RELEASE_TAG"
-    return
-  fi
-
-  if [ "$RELEASE_TAG" != "latest" ]; then
-    printf '%s\n' "$RELEASE_TAG"
-  fi
-}
-
-main() {
-  parse_args "$@"
-  resolve_release_urls
-  compute_dirs
-  check_dependencies
-  setup_privilege
-
-  local tmp_dir
-  tmp_dir=$(mktemp -d)
-  # shellcheck disable=SC2064
-  trap "rm -rf '${tmp_dir}'" EXIT
-
-  log "Installing ${DISPLAY_NAME} from ${REPO} release ${RELEASE_TAG}..."
-  resolve_latest_release_tag
-
-  run_privileged mkdir -p "$bin_dir" "$metadata_dir"
-  if [ "$NO_DESKTOP" -eq 0 ]; then
-    run_privileged mkdir -p "$desktop_dir" "$icon_dir"
-  fi
-
-  log "Downloading ${APPIMAGE_NAME}..."
-  download "$APPIMAGE_URL" "${tmp_dir}/${APPIMAGE_NAME}"
-
-  if [ "$NO_VERIFY" -eq 0 ]; then
-    log "Downloading ${CHECKSUM_NAME}..."
-    download "$CHECKSUM_URL" "${tmp_dir}/${CHECKSUM_NAME}"
-
-    local expected actual
-    expected=$(awk '{print $1}' "${tmp_dir}/${CHECKSUM_NAME}")
-    actual=$(sha256sum "${tmp_dir}/${APPIMAGE_NAME}" | awk '{print $1}')
-
-    if [ "$expected" != "$actual" ]; then
-      error "SHA256 mismatch: expected ${expected}, got ${actual}"
-    fi
-    log "Checksum verified (${actual})."
-  else
-    warn "skipping SHA256 verification"
-  fi
-
-  local dest_appimage dest_desktop dest_icon
-  dest_appimage="${bin_dir}/${APP_NAME}"
-  dest_desktop="${desktop_dir}/${DESKTOP_NAME}"
-  dest_icon="${icon_dir}/${ICON_NAME}"
-
-  # Remove any previous install so the overwrite is clean.
-  run_privileged rm -f "$dest_appimage"
-
-  run_privileged install -m 755 "${tmp_dir}/${APPIMAGE_NAME}" "$dest_appimage"
-  log "Installed binary: ${dest_appimage}"
-
-  local installed_tag
-  installed_tag=$(release_tag_to_install)
-  if [ -n "$installed_tag" ]; then
-    printf '%s\n' "$installed_tag" > "${tmp_dir}/release-tag"
-    run_privileged install -m 644 "${tmp_dir}/release-tag" "${metadata_dir}/release-tag"
-    log "Installed release metadata: ${metadata_dir}/release-tag"
-  fi
-
-  if [ "$NO_DESKTOP" -eq 0 ]; then
-    log "Downloading icon..."
-    download "$ICON_URL" "${tmp_dir}/${ICON_NAME}" || warn "icon download failed; desktop entry may lack an icon"
-
-    run_privileged install -m 644 "${tmp_dir}/${ICON_NAME}" "$dest_icon" 2>/dev/null || true
-    log "Installed icon: ${dest_icon}"
-
-    local tmp_desktop
-    tmp_desktop="${tmp_dir}/${DESKTOP_NAME}"
-    cat > "$tmp_desktop" <<EOF
-[Desktop Entry]
-Name=${DISPLAY_NAME}
-Comment=World of Warcraft combat log recorder
-Exec=${dest_appimage} %U
-Icon=${dest_icon}
-Type=Application
-Terminal=false
-StartupNotify=true
-Categories=AudioVideo;Video;Recorder;
-TryExec=${dest_appimage}
+# One launcher, one app: the shim and the menu entry the AppImage installer
+# created now belong to the Flatpak. The AppImage itself is kept, so a rollback
+# is still one command.
+retire_appimage_launchers() {
+  if [[ -f "$LEGACY_BIN" ]] && ! grep -q "flatpak run ${APP_ID}" "$LEGACY_BIN" 2>/dev/null; then
+    if mkdir -p "$(dirname "$PRESERVED_APPIMAGE")" &&
+      mv -f "$LEGACY_BIN" "$PRESERVED_APPIMAGE"; then
+      log "Preserved the final AppImage: ${PRESERVED_APPIMAGE}"
+      cat >"$LEGACY_BIN" <<EOF
+#!/usr/bin/env bash
+# Warcraft Recorder is a Flatpak now. The final AppImage was preserved at
+# ${PRESERVED_APPIMAGE} and can be run directly to roll back.
+exec flatpak run ${APP_ID} "\$@"
 EOF
-    run_privileged install -m 644 "$tmp_desktop" "$dest_desktop"
-    log "Installed desktop entry: ${dest_desktop}"
+      chmod 755 "$LEGACY_BIN"
+      log "Rewrote ${LEGACY_BIN} to launch the Flatpak"
+    else
+      warn "could not move ${LEGACY_BIN}; the old launcher is still in place"
+    fi
   fi
 
-  if ! command -v "$APP_NAME" >/dev/null 2>&1; then
-    case ":${PATH}:" in
-      *:"${bin_dir}":*) ;;
-      *)
-        warn "${bin_dir} is not on your PATH."
-        printf 'Add this to your ~/.bashrc or ~/.zshrc if you want to run "%s" from anywhere:\n' "$APP_NAME"
-        # shellcheck disable=SC2016
-        printf '  export PATH="%s:$PATH"\n' "$bin_dir"
-        ;;
-    esac
+  # The Flatpak installs its own menu entry; keeping the AppImage one would
+  # show two identical launchers.
+  if [[ -f "$LEGACY_DESKTOP" ]] && grep -q "$LEGACY_BIN" "$LEGACY_DESKTOP" 2>/dev/null; then
+    rm -f "$LEGACY_DESKTOP" && log "Removed the AppImage menu entry: ${LEGACY_DESKTOP}"
   fi
 
-  warn_missing_fuse
-  log "Done. Run '${APP_NAME}' or launch ${DISPLAY_NAME} from your application menu."
+  # "Run at start-up" wrote an autostart entry pointing at the AppImage. Point
+  # it at the Flatpak instead of silently launching the retired app at login.
+  local entry
+  for entry in "$AUTOSTART_DIR"/*.desktop; do
+    [[ -f "$entry" ]] || continue
+    grep -Eqi "^Exec=.*(${LEGACY_BIN}|[^[:space:]]*warcraftrecorder[^[:space:]]*\.AppImage)" \
+      "$entry" || continue
+    sed -i "s|^Exec=.*|Exec=flatpak run ${APP_ID}|" "$entry"
+    log "Repointed the start-up entry at the Flatpak: ${entry}"
+  done
 }
 
-main "$@"
+if ! command -v flatpak >/dev/null 2>&1; then
+  fail_with_manual_instructions
+fi
+
+# Keep these marker shapes compatible with the final AppImage updater's
+# legacy parser. They describe migration phases, not a new AppImage download.
+log "Downloading WarcraftRecorder.AppImage migration instructions..."
+
+ensure_runtime_source
+
+if ! flatpak remote-add --user --if-not-exists "$REMOTE_NAME" "$REMOTE_DESCRIPTOR"; then
+  fail_with_manual_instructions
+fi
+
+# `--or-update` keeps a repeated migration (or a plain update) from failing on
+# an already-installed application.
+if ! flatpak install --user --assumeyes --or-update "$REMOTE_NAME" "$APP_ID"; then
+  fail_with_manual_instructions
+fi
+
+log "Checksum verified (Flatpak remote signature verified by Flatpak)."
+log "Installed binary: Flatpak $APP_ID"
+
+retire_appimage_launchers
+
+# The AppImage updater quits itself after this script returns, so start the
+# native app here. stdio goes to /dev/null: the updater waits for this script's
+# pipes to close before it reports success.
+log "Launching the native app..."
+if command -v setsid >/dev/null 2>&1; then
+  setsid flatpak run "$APP_ID" >/dev/null 2>&1 </dev/null &
+else
+  flatpak run "$APP_ID" >/dev/null 2>&1 </dev/null &
+fi
+
+log "Done. Warcraft Recorder now updates through Flatpak; roll back by running ${PRESERVED_APPIMAGE}."

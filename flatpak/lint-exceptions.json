@@ -1,0 +1,13 @@
+{
+  "io.github.JohanWes.WarcraftRecorder": [
+    "appid-url-not-reachable",
+    "finish-args-only-wayland",
+    "finish-args-unnecessary-xdg-config-WarcraftRecorder-ro-access",
+    "appstream-external-screenshot-url",
+    "appstream-missing-screenshots",
+    "appstream-screenshots-not-mirrored-in-ostree",
+    "appstream-screenshots-files-not-found-in-ostree",
+    "screenshot-image-not-found",
+    "appstream-failed-validation"
+  ]
+}

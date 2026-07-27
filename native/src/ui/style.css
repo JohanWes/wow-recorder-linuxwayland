@@ -1,0 +1,131 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+/* Warcraft Recorder shell hooks. Everything else is libadwaita defaults. */
+
+/* Warm red/orange accent derived from the current app (App.css #bb4220). */
+@define-color accent_bg_color #bb4220;
+@define-color accent_fg_color #ffffff;
+@define-color accent_color #d96a4a;
+
+/* Player area stays black in both system themes. */
+.player-area {
+  background-color: #000000;
+  color: #ffffff;
+}
+
+/* Status card: breathing room inside the card frame. */
+.wr-status-card {
+  padding: 10px 12px;
+}
+
+/* Status card light; one circle colored by the recorder state. */
+.status-light {
+  min-width: 10px;
+  min-height: 10px;
+  border-radius: 9999px;
+}
+
+.status-light.tone-ready {
+  background-color: @green_4;
+}
+
+.status-light.tone-recording,
+.status-light.tone-error {
+  background-color: @red_3;
+}
+
+.status-light.tone-waiting,
+.status-light.tone-invalid {
+  background-color: @yellow_4;
+}
+
+.status-light.tone-overrunning {
+  background-color: @orange_3;
+}
+
+.status-light.tone-finalizing {
+  background-color: @blue_3;
+}
+
+/* Compact category rail. */
+.category-row image {
+  color: @window_fg_color;
+}
+
+.category-count {
+  color: alpha(@window_fg_color, 0.6);
+  font-size: 0.85em;
+}
+
+/* Suggestion chips in the library toolbar: compact colored pills, tinted by
+   chip grouping. */
+.wr-chip {
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background-color: alpha(@accent_bg_color, 0.18);
+  color: @window_fg_color;
+}
+
+.wr-chip.wr-chip-name { background-color: alpha(@blue_3, 0.25); }
+.wr-chip.wr-chip-spec { background-color: alpha(@purple_3, 0.25); }
+.wr-chip.wr-chip-place { background-color: alpha(@green_3, 0.25); }
+.wr-chip.wr-chip-affix { background-color: alpha(@orange_3, 0.25); }
+.wr-chip.wr-chip-result { background-color: alpha(@red_3, 0.25); }
+.wr-chip.wr-chip-difficulty { background-color: alpha(@yellow_3, 0.30); }
+
+.wr-chip:hover {
+  background-color: alpha(@accent_bg_color, 0.30);
+}
+
+/* Library outcome colors: reinforcement only, the label carries the meaning. */
+.wr-result-win { color: @success_color; font-weight: 600; }
+.wr-result-loss { color: @error_color; font-weight: 600; }
+
+/* The library scrollbar remains an overlay, so leave a modest trailing gutter
+   inside the table for the final Date column. */
+.data-table {
+  padding-right: 18px;
+}
+
+/* WoW class colors for player names (canonical palette, dark theme). */
+.wr-class-death-knight { color: #c41e3a; }
+.wr-class-demon-hunter { color: #a330c9; }
+.wr-class-druid { color: #ff7c0a; }
+.wr-class-evoker { color: #33937f; }
+.wr-class-hunter { color: #aad372; }
+.wr-class-mage { color: #3fc7eb; }
+.wr-class-monk { color: #00ff98; }
+.wr-class-paladin { color: #f48cba; }
+.wr-class-priest { color: #ffffff; }
+.wr-class-rogue { color: #fff468; }
+.wr-class-shaman { color: #0070dd; }
+.wr-class-warlock { color: #8788ee; }
+.wr-class-warrior { color: #c69b6d; }
+
+/* Darkened class variants when the system theme is light, for AA contrast.
+   The shell toggles `wr-light` on the window from AdwStyleManager. */
+window.wr-light .wr-class-death-knight { color: #a3122e; }
+window.wr-light .wr-class-demon-hunter { color: #8225a3; }
+window.wr-light .wr-class-druid { color: #b35400; }
+window.wr-light .wr-class-evoker { color: #246b5c; }
+window.wr-light .wr-class-hunter { color: #4f7d24; }
+window.wr-light .wr-class-mage { color: #0e7ca3; }
+window.wr-light .wr-class-monk { color: #008a5c; }
+window.wr-light .wr-class-paladin { color: #c2477e; }
+window.wr-light .wr-class-priest { color: #6a6a6a; }
+window.wr-light .wr-class-rogue { color: #8f7e00; }
+window.wr-light .wr-class-shaman { color: #005bb0; }
+window.wr-light .wr-class-warlock { color: #5a5bc2; }
+window.wr-light .wr-class-warrior { color: #7d5f36; }
+
+/* Combat seek track: fixed dark geometry inside the black player area. */
+.wr-timeline {
+  min-height: 26px;
+}
+
+/* Setup/error detail: technical text stays selectable but quiet. */
+.problem-detail {
+  font-family: monospace;
+  font-size: 0.85em;
+  color: alpha(@window_fg_color, 0.7);
+}

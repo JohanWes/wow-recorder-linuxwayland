@@ -1,0 +1,35 @@
+{
+  "category": "Solo Shuffle",
+  "duration": 420.0,
+  "start": 1772360000000,
+  "result": true,
+  "flavour": "Retail",
+  "zoneID": 572,
+  "zoneName": "Ruins of Lordaeron",
+  "soloShuffleRoundsWon": 4,
+  "soloShuffleRoundsPlayed": 6,
+  "soloShuffleTimeline": [
+    { "round": 1, "timestamp": 0, "result": true, "duration": 62 },
+    { "round": 2, "timestamp": 70, "result": false, "duration": 58 },
+    { "round": 3, "timestamp": 135, "result": true, "duration": 71 },
+    { "round": 4, "timestamp": 215, "result": true, "duration": 66 },
+    { "round": 5, "timestamp": 290, "result": false, "duration": 54 },
+    { "round": 6, "timestamp": 355, "result": true, "duration": 60 }
+  ],
+  "player": {
+    "_GUID": "Player-1000-AAAA0001",
+    "_specID": 577,
+    "_name": "Testone",
+    "_realm": "Testrealm"
+  },
+  "combatants": [
+    {
+      "_GUID": "Player-1000-AAAA0001",
+      "_specID": 577,
+      "_name": "Testone",
+      "_realm": "Testrealm"
+    }
+  ],
+  "overrun": 3,
+  "uniqueHash": "99887766554433221100ffeeddccbbaa"
+}

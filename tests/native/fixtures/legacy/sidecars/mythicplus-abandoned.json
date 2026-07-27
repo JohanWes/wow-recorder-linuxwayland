@@ -1,0 +1,53 @@
+{
+  "category": "Mythic+",
+  "duration": 640.0,
+  "start": 1772330000000,
+  "result": false,
+  "flavour": "Retail",
+  "zoneID": 2660,
+  "mapID": 503,
+  "keystoneLevel": 12,
+  "affixes": [9, 10, 152],
+  "upgradeLevel": 0,
+  "challengeModeTimeline": [
+    {
+      "segmentType": "Trash",
+      "logStart": "2026-03-01T01:53:20.000Z",
+      "logEnd": "2026-03-01T01:56:00.000Z",
+      "timestamp": 0
+    },
+    {
+      "segmentType": "Boss",
+      "logStart": "2026-03-01T01:56:00.000Z",
+      "logEnd": "2026-03-01T01:58:30.000Z",
+      "timestamp": 160,
+      "encounterId": 2926
+    }
+  ],
+  "deaths": [
+    {
+      "name": "Testone",
+      "specId": 577,
+      "date": "2026-03-01T01:57:10.000Z",
+      "timestamp": 230.0,
+      "friendly": true
+    }
+  ],
+  "player": {
+    "_GUID": "Player-1000-AAAA0001",
+    "_specID": 577,
+    "_name": "Testone",
+    "_realm": "Testrealm"
+  },
+  "combatants": [
+    {
+      "_GUID": "Player-1000-AAAA0001",
+      "_specID": 577,
+      "_name": "Testone",
+      "_realm": "Testrealm"
+    }
+  ],
+  "overrun": 5,
+  "uniqueHash": "112233445566778899aabbccddeeff00",
+  "encoder": "hevc"
+}
