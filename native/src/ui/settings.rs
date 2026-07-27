@@ -1311,12 +1311,17 @@ fn combo_row(
 
 /// A required folder that is unset, or one whose authorization did not
 /// survive the move into the sandbox, is the only thing standing between a
-/// fresh or freshly migrated install and a working recorder. A disabled
-/// flavour needs nothing, so it stays quiet.
+/// fresh or freshly migrated install and a working recorder. Rows the user
+/// does not have to fill in stay quiet: a greyed-out dependant such as the
+/// replay-buffer folder while it shares the recording folder, and the log
+/// folder of a flavour that is switched off.
 fn path_needs_attention(field: &str, config: &Config) -> bool {
     let Some(spec) = PATHS.iter().find(|spec| spec.field == field) else {
         return false;
     };
+    if !row_sensitive(field, config) {
+        return false;
+    }
     if let Some(enabled) = &spec.enabled
         && !(enabled.get)(config)
     {
@@ -1484,6 +1489,32 @@ mod tests {
         fields.sort_unstable();
         fields.dedup();
         assert_eq!(fields.len(), count, "a field is mapped to two rows");
+    }
+
+    #[test]
+    fn only_folders_the_user_must_pick_ask_for_attention() {
+        let mut config = ready_config();
+        // Both required folders are set, and the buffer folder shares the
+        // recording folder: nothing to ask for.
+        assert!(!path_needs_attention("storage.recording_dir", &config));
+        assert!(!path_needs_attention("flavors.retail", &config));
+        assert!(!path_needs_attention("storage.buffer_dir", &config));
+
+        // Turning the dependant on exposes it as unset, and only then.
+        config.storage.separate_buffer_dir = true;
+        assert!(path_needs_attention("storage.buffer_dir", &config));
+        config.storage.buffer_dir = AuthorizedPath::authorized("/buffer");
+        assert!(!path_needs_attention("storage.buffer_dir", &config));
+
+        // Unset, and imported-but-unauthorized after a migration, both ask.
+        config.storage.recording_dir = AuthorizedPath::unset();
+        assert!(path_needs_attention("storage.recording_dir", &config));
+        config.flavors.retail.log_dir = AuthorizedPath::imported("/wow/_retail_/Logs");
+        assert!(path_needs_attention("flavors.retail", &config));
+
+        // A flavour that is switched off needs no log folder.
+        config.flavors.retail.enabled = false;
+        assert!(!path_needs_attention("flavors.retail", &config));
     }
 
     #[test]

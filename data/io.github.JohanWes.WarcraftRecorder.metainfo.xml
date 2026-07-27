@@ -34,6 +34,17 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.1" date="2026-07-28">
+      <description>
+        <p>
+          The post-migration notice now stays dismissed instead of returning on
+          every start, the recording and combat-log folders are highlighted
+          until they are selected, and the advanced combat logging warning no
+          longer fires when the sandbox simply cannot read the game's
+          configuration file.
+        </p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-07-27">
       <description>
         <p>

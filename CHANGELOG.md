@@ -7,6 +7,22 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## 1.0.1 - 2026-07-28
+
+### Fixed
+- The post-migration notice stayed pending after being dismissed, so it
+  reappeared on every start: a settings save carried the draft the notice
+  itself had opened Settings on, writing the pending flag back.
+- "Advanced combat logging is off" was reported for every sandboxed install.
+  The check reads `Config.wtf` beside the Logs folder, which the folder portal
+  does not export, so an unreadable file now reads as unknown rather than off.
+- The AppImage migration left the old app running and its binary on disk.
+
+### Added
+- The recording folder and combat-log folder rows pulse until they are
+  selected, including after a migration, where the imported paths need picking
+  again before the sandbox can reach them.
+
 ## 1.0.0 - 2026-07-27
 
 ### Added
