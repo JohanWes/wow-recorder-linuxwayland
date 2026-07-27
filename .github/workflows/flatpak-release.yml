@@ -126,3 +126,39 @@ jobs:
             warcraft-recorder.flatpak.sha256
             repo
           if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v4
+      - name: Download signed candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: warcraft-recorder-flatpak-${{ github.ref_name }}
+          path: candidate
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## " v " " { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+          # Never mark this release Latest. The shipped 7.7.1 AppImage updater
+          # reads the latest tag, strips a leading "v", and would compare 1.0.0
+          # as older than 7.7.1 -- silencing its update button for good. The
+          # linux-7.7.2-<short-sha> migration release owns that slot instead.
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Warcraft Recorder $version" \
+            --notes-file notes.md \
+            --latest=false \
+            candidate/warcraft-recorder.flatpak \
+            candidate/warcraft-recorder.flatpak.sha256
