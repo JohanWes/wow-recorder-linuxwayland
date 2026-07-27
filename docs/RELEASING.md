@@ -105,12 +105,19 @@ Publish `v1.0.0` first (that tag drives the signed build), then create the
 latest one. The native application never checks GitHub, so nothing regresses
 by keeping a 7.x tag as the repository's latest release.
 
-`install.sh` then installs the Flatpak, moves the AppImage to
-`~/.local/share/warcraftrecorder/WarcraftRecorder-final.AppImage`, replaces
+`install.sh` then installs the Flatpak, deletes the AppImage, replaces
 `~/.local/bin/warcraftrecorder` with a shim that runs the Flatpak, deletes the
-AppImage menu entry, repoints any "run at start-up" entry, and launches the
-native app. Without `flatpak` on the host it changes nothing, prints manual
-instructions, and exits nonzero, which the updater shows as an error.
+AppImage menu entry and icon, repoints any "run at start-up" entry, launches
+the native app, and closes the running AppImage. Without `flatpak` on the host
+it changes nothing, prints manual instructions, and exits nonzero, which the
+updater shows as an error.
 
-A rollback is running the preserved AppImage directly: it still reads the
-untouched `config-v3.json`, recordings, and sidecars.
+That last step sweeps by executable rather than signalling one process: on a
+successful update the 7.7.1 updater relaunches itself *after* this script
+returns, so a single signal loses the race and leaves two Warcraft Recorders
+running. The sweep covers the deleted binary, the parked copy an earlier
+revision of the script left behind, and the mounted AppImage payload.
+
+A rollback is downloading the AppImage from the `linux-7.7.1-43e3ebf` release,
+which still carries it and its checksum. It reads the untouched
+`config-v3.json`, recordings, and sidecars.

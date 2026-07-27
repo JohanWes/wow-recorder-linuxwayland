@@ -2,9 +2,8 @@
 set -euo pipefail
 
 # Final AppImage migration helper. It performs a user-level Flatpak install,
-# retires the AppImage launchers it originally created, and starts the native
-# app. The permanent remote and the desktop software center own every update
-# after this one.
+# uninstalls the AppImage it replaces, and starts the native app. The permanent
+# remote and the desktop software center own every update after this one.
 #
 # The final AppImage's updater pipes this script into bash and may append its
 # own `--prefix <dir>` argument. Arguments are deliberately ignored: there is
@@ -23,8 +22,11 @@ RUNTIME_REF="org.gnome.Platform//50"
 
 LEGACY_BIN="${WARCRAFTRECORDER_LEGACY_BIN:-${HOME}/.local/bin/warcraftrecorder}"
 LEGACY_DESKTOP="${WARCRAFTRECORDER_LEGACY_DESKTOP:-${HOME}/.local/share/applications/warcraftrecorder.desktop}"
+LEGACY_ICON="${WARCRAFTRECORDER_LEGACY_ICON:-${HOME}/.local/share/icons/hicolor/256x256/apps/warcraftrecorder.png}"
 AUTOSTART_DIR="${WARCRAFTRECORDER_AUTOSTART_DIR:-${HOME}/.config/autostart}"
-PRESERVED_APPIMAGE="${WARCRAFTRECORDER_PRESERVED_APPIMAGE:-${HOME}/.local/share/warcraftrecorder/WarcraftRecorder-final.AppImage}"
+# Where an earlier revision of this script parked the AppImage instead of
+# deleting it. Still cleaned up, so a second migration finishes the job.
+RETIRED_APPIMAGE="${WARCRAFTRECORDER_RETIRED_APPIMAGE:-${HOME}/.local/share/warcraftrecorder/WarcraftRecorder-final.AppImage}"
 
 log() { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARNING: %s\n' "$*" >&2; }
@@ -59,31 +61,39 @@ ensure_runtime_source() {
     warn "could not add Flathub; the runtime must come from an existing remote"
 }
 
-# One launcher, one app: the shim and the menu entry the AppImage installer
-# created now belong to the Flatpak. The AppImage itself is kept, so a rollback
-# is still one command.
-retire_appimage_launchers() {
+# One launcher, one app. The AppImage is deleted rather than parked: leaving a
+# second, self-updating copy of Warcraft Recorder on disk is the exact thing
+# this migration exists to end. Rolling back means downloading the 7.7.1
+# release again, which still carries the AppImage and its checksum.
+remove_appimage_install() {
   if [[ -f "$LEGACY_BIN" ]] && ! grep -q "flatpak run ${APP_ID}" "$LEGACY_BIN" 2>/dev/null; then
-    if mkdir -p "$(dirname "$PRESERVED_APPIMAGE")" &&
-      mv -f "$LEGACY_BIN" "$PRESERVED_APPIMAGE"; then
-      log "Preserved the final AppImage: ${PRESERVED_APPIMAGE}"
+    if rm -f "$LEGACY_BIN"; then
+      log "Removed the AppImage: ${LEGACY_BIN}"
       cat >"$LEGACY_BIN" <<EOF
 #!/usr/bin/env bash
-# Warcraft Recorder is a Flatpak now. The final AppImage was preserved at
-# ${PRESERVED_APPIMAGE} and can be run directly to roll back.
+# Warcraft Recorder is a Flatpak now; this shim keeps the old command working.
 exec flatpak run ${APP_REF} "\$@"
 EOF
       chmod 755 "$LEGACY_BIN"
       log "Rewrote ${LEGACY_BIN} to launch the Flatpak"
     else
-      warn "could not move ${LEGACY_BIN}; the old launcher is still in place"
+      warn "could not remove ${LEGACY_BIN}; the old launcher is still in place"
     fi
   fi
 
-  # The Flatpak installs its own menu entry; keeping the AppImage one would
-  # show two identical launchers.
+  if [[ -f "$RETIRED_APPIMAGE" ]]; then
+    rm -f "$RETIRED_APPIMAGE" && log "Removed the parked AppImage: ${RETIRED_APPIMAGE}"
+    # The AppImage installer's metadata directory: the version marker it holds
+    # describes a build that is no longer on this machine.
+    rm -f "$(dirname "$RETIRED_APPIMAGE")/release-tag"
+    rmdir "$(dirname "$RETIRED_APPIMAGE")" 2>/dev/null || true
+  fi
+
+  # The Flatpak installs its own menu entry and icon; keeping the AppImage's
+  # would show two identical launchers.
   if [[ -f "$LEGACY_DESKTOP" ]] && grep -q "$LEGACY_BIN" "$LEGACY_DESKTOP" 2>/dev/null; then
     rm -f "$LEGACY_DESKTOP" && log "Removed the AppImage menu entry: ${LEGACY_DESKTOP}"
+    rm -f "$LEGACY_ICON"
   fi
 
   # "Run at start-up" wrote an autostart entry pointing at the AppImage. Point
@@ -98,37 +108,43 @@ EOF
   done
 }
 
-# The final AppImage is meant to quit once this script returns, but it does not
-# always do so, which leaves the retired Electron app running beside the native
-# one. Close the AppImage ancestor of this script, after giving the updater a
-# moment to report success on its own. Best effort: never fail the migration.
+# The 7.7.1 updater does not merely fail to quit: on a successful update it
+# relaunches itself, and that replacement starts after this script has already
+# returned. So a single signal at any one moment loses the race. Sweep by
+# executable instead, for a window wide enough to cover the relaunch. The
+# AppImage is deleted by now, so nothing legitimate can match. Best effort:
+# never fail the migration over it.
 close_running_appimage() {
-  local pid exe stat watchdog
-  pid="${PPID:-0}"
-  while [[ "$pid" =~ ^[0-9]+$ ]] && ((pid > 1)); do
-    exe="$(readlink -f "/proc/${pid}/exe" 2>/dev/null || true)"
-    if [[ "$exe" == /tmp/.mount_*/* && "$exe" == *[wW]arcraft[rR]ecorder* ]]; then
-      # Re-check the mount before signalling, so a recycled PID is left alone.
-      watchdog="sleep 8
-exe=\$(readlink -f /proc/${pid}/exe 2>/dev/null || true)
-case \"\$exe\" in
-  /tmp/.mount_*) kill ${pid} 2>/dev/null || true ;;
-esac"
-      if command -v setsid >/dev/null 2>&1; then
-        setsid sh -c "$watchdog" >/dev/null 2>&1 </dev/null &
-      else
-        sh -c "$watchdog" >/dev/null 2>&1 </dev/null &
-      fi
-      log "The retired AppImage will close once this update finishes."
-      return 0
-    fi
-    # Field 4 of /proc/PID/stat is the parent PID; comm can contain spaces and
-    # parentheses, so skip past the last ')' rather than splitting on columns.
-    stat="$(cat "/proc/${pid}/stat" 2>/dev/null || true)"
-    [[ -n "$stat" ]] || return 0
-    pid="$(printf '%s' "$stat" | sed -E 's/^[0-9]+ \(.*\) [A-Za-z] ([0-9]+).*/\1/')"
+  local watchdog
+  watchdog='
+legacy=$1
+retired=$2
+deadline=$(( $(date +%s) + 30 ))
+attempt=0
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  attempt=$((attempt + 1))
+  # Electron leaves on TERM; escalate only if ten sweeps went unanswered.
+  if [ "$attempt" -gt 10 ]; then signal=KILL; else signal=TERM; fi
+  for entry in /proc/[0-9]*; do
+    exe=$(readlink "$entry/exe" 2>/dev/null) || continue
+    # A running binary that has been deleted keeps its path plus this suffix.
+    exe=${exe% (deleted)}
+    case "$exe" in
+      "$legacy" | "$retired" | /tmp/.mount_*/warcraftrecorder) ;;
+      *) continue ;;
+    esac
+    kill "-${signal}" "${entry#/proc/}" 2>/dev/null || true
   done
-  return 0
+  sleep 1
+done'
+  if command -v setsid >/dev/null 2>&1; then
+    setsid sh -c "$watchdog" wr-migration "$LEGACY_BIN" "$RETIRED_APPIMAGE" \
+      >/dev/null 2>&1 </dev/null &
+  else
+    sh -c "$watchdog" wr-migration "$LEGACY_BIN" "$RETIRED_APPIMAGE" \
+      >/dev/null 2>&1 </dev/null &
+  fi
+  log "Closing the retired AppImage."
 }
 
 if ! command -v flatpak >/dev/null 2>&1; then
@@ -154,7 +170,7 @@ fi
 log "Checksum verified (Flatpak remote signature verified by Flatpak)."
 log "Installed binary: Flatpak $APP_ID"
 
-retire_appimage_launchers
+remove_appimage_install
 
 # Start the native app here. stdio goes to /dev/null: the updater waits for this
 # script's pipes to close before it reports success.
@@ -167,4 +183,4 @@ fi
 
 close_running_appimage
 
-log "Done. Warcraft Recorder now updates through Flatpak; roll back by running ${PRESERVED_APPIMAGE}."
+log "Done. Warcraft Recorder is now a Flatpak and updates through it."
