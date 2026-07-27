@@ -211,7 +211,7 @@ pub fn present_test_dialog(parent: &gtk4::Widget, sink: ActionSink, ready: bool)
     dialog.set_response_enabled("start", ready);
     if !ready {
         dialog.set_body(&format!(
-            "{TEST_EXPLANATION}\n\nThe recorder is not ready — a test needs an armed, idle capture."
+            "{TEST_EXPLANATION}\n\nThe recorder is not ready: a test needs an armed, idle capture."
         ));
     }
     dialog.connect_response(Some("start"), move |_, _| {
@@ -228,7 +228,6 @@ pub fn present_test_dialog(parent: &gtk4::Widget, sink: ActionSink, ready: bool)
 /// or updates the app. The same script drives the AppImage→Flatpak migration.
 const UPDATE_SCRIPT_URL: &str =
     "https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/install.sh";
-const APP_ID: &str = "io.github.JohanWes.WarcraftRecorder";
 
 fn flatpak_available() -> bool {
     std::env::var_os("PATH").is_some_and(|paths| {
@@ -243,38 +242,30 @@ fn info_dialog(parent: &gtk4::Widget, heading: &str, body: &str) {
     dialog.present(Some(parent));
 }
 
-/// "Check for updates": inside Flatpak, point at the software center; without
-/// Flatpak, warn and give the manual path; otherwise confirm and run the
-/// install script off the GTK thread.
+/// "Check for updates": inside Flatpak, updates arrive with the system's own
+/// app updates; without Flatpak, say what is missing; otherwise confirm and
+/// run the install script off the GTK thread.
 pub fn present_update_dialog(parent: &gtk4::Widget) {
     if std::path::Path::new("/.flatpak-info").exists() {
         info_dialog(
             parent,
-            "Updates are managed by Flatpak",
-            &format!(
-                "This installation updates through your software center or with:\n\n\
-                 flatpak update --user {APP_ID}"
-            ),
+            "Updates are automatic",
+            "New versions of Warcraft Recorder arrive with your usual system app updates.",
         );
         return;
     }
     if !flatpak_available() {
         info_dialog(
             parent,
-            "Flatpak is not installed",
-            "Updates install the native Flatpak build, which needs Flatpak. Install it with \
-             your distribution's package manager (for example 'sudo pacman -S flatpak' or \
-             'sudo apt install flatpak'), then check for updates again.",
+            "Flatpak is needed to update",
+            "Warcraft Recorder is distributed as a Flatpak. Install Flatpak from your \
+             distribution, then check for updates again.",
         );
         return;
     }
     let dialog = adw::AlertDialog::new(
-        Some("Check for updates"),
-        Some(
-            "This runs the Warcraft Recorder install script: it adds the project's signed \
-             Flatpak remote and installs or updates the latest release. This installation is \
-             left in place for rollback.",
-        ),
+        Some("Update Warcraft Recorder?"),
+        Some("This installs the latest version. It can take a few minutes."),
     );
     dialog.add_responses(&[("cancel", "Cancel"), ("update", "Update")]);
     dialog.set_response_appearance("update", adw::ResponseAppearance::Suggested);
@@ -314,8 +305,8 @@ fn run_update(parent: &gtk4::Widget) {
         match output {
             Ok(output) if output.status.success() => info_dialog(
                 &parent,
-                "Update finished",
-                &format!("Launch the updated app with:\n\nflatpak run {APP_ID}"),
+                "Update installed",
+                "The new version is installed and starting. You can close this one.",
             ),
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -323,11 +314,11 @@ fn run_update(parent: &gtk4::Widget) {
                 let tail: Vec<&str> = tail.into_iter().rev().collect();
                 info_dialog(
                     &parent,
-                    "The update failed",
+                    "The update did not finish",
                     &format!(
-                        "The install script did not finish.\n\n{}",
+                        "Warcraft Recorder was not updated.\n\n{}",
                         if tail.is_empty() {
-                            "No error output was produced.".to_owned()
+                            "No reason was reported.".to_owned()
                         } else {
                             tail.join("\n")
                         }
@@ -337,7 +328,7 @@ fn run_update(parent: &gtk4::Widget) {
             Err(error) => info_dialog(
                 &parent,
                 "The update could not start",
-                &format!("The install script could not be run: {error}"),
+                &format!("Warcraft Recorder could not run the update: {error}"),
             ),
         }
     });
@@ -359,6 +350,52 @@ pub fn present_reselect_dialog(parent: &gtk4::Widget, sink: ActionSink) {
     dialog.set_close_response("cancel");
     dialog.connect_response(Some("reselect"), move |_, _| {
         sink(ShellAction::Command(Command::ReselectCaptureTarget));
+    });
+    dialog.present(Some(parent));
+}
+
+/// Shown once after the one-way legacy import. The two folders the sandbox
+/// cannot reach until the user picks them are the whole point of the dialog,
+/// so they are called out in the error color rather than buried in prose.
+pub fn present_migration_notice(parent: &gtk4::Widget, sink: ActionSink) {
+    let dialog = adw::AlertDialog::new(
+        Some("Warcraft Recorder is now a native app"),
+        Some(
+            "This version was rebuilt from scratch in Rust: it starts faster, uses far less \
+             memory, and no longer carries a browser engine around.\n\n\
+             Your recordings, tags and protected videos are untouched, and your old settings \
+             were imported. The app now runs sandboxed, so it only reaches folders you pick \
+             yourself:",
+        ),
+    );
+    // The alert body is centered, so the callouts are too.
+    let actions = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    for action in [
+        "Choose your recording folder again in Settings",
+        "Choose your World of Warcraft logs folder again in Settings",
+    ] {
+        let label = gtk4::Label::new(Some(action));
+        label.set_wrap(true);
+        label.set_justify(gtk4::Justification::Center);
+        label.add_css_class("error");
+        label.add_css_class("heading");
+        actions.append(&label);
+    }
+    let closing = gtk4::Label::new(Some("Your library comes back as soon as they are set."));
+    closing.set_wrap(true);
+    closing.set_justify(gtk4::Justification::Center);
+    closing.set_margin_top(6);
+    actions.append(&closing);
+    dialog.set_extra_child(Some(&actions));
+    dialog.add_responses(&[("ok", "Later"), ("settings", "Open Settings")]);
+    dialog.set_response_appearance("settings", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("settings"));
+    dialog.set_close_response("ok");
+    dialog.connect_response(None, move |_, response| {
+        sink(ShellAction::Command(Command::DismissMigrationNotice));
+        if response == "settings" {
+            sink(ShellAction::OpenSettings);
+        }
     });
     dialog.present(Some(parent));
 }

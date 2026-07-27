@@ -172,7 +172,7 @@ pub fn view(snapshot: &AppSnapshot) -> StatusView {
             started_unix_ms,
         } => StatusView {
             title: "Overrunning".to_owned(),
-            detail: format!("{title} — recording a few seconds of aftermath."),
+            detail: format!("{title}: recording a few seconds of aftermath."),
             tone: Tone::Overrunning,
             elapsed_anchor_ms: Some(*started_unix_ms),
             show_force_end: false,
@@ -183,7 +183,7 @@ pub fn view(snapshot: &AppSnapshot) -> StatusView {
             detail: match &snapshot.work {
                 Some(work) => match work.total {
                     Some(total) if total > 0 => {
-                        format!("{title} — {}%", work.completed.saturating_mul(100) / total)
+                        format!("{title}: {}%", work.completed.saturating_mul(100) / total)
                     }
                     _ => title.clone(),
                 },
@@ -339,7 +339,7 @@ impl StatusCard {
         problems_expander.set_visible(false);
 
         let tray_note = gtk4::Label::new(Some(
-            "No system tray found — closing the window quits Warcraft Recorder.",
+            "No system tray found: closing the window quits Warcraft Recorder.",
         ));
         tray_note.set_xalign(0.0);
         tray_note.set_wrap(true);

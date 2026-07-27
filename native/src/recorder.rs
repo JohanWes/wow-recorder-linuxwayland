@@ -645,8 +645,8 @@ impl Recorder {
                     // A capture waiting to be written will never be: nothing
                     // is left to write it. Expire both waits so
                     // `poll_pending_end` resolves in this same batch, instead
-                    // of holding the coordinator's ending state — and the
-                    // recovery actions it blocks — against a dead child. The
+                    // of holding the coordinator's ending state, and the
+                    // recovery actions it blocks, against a dead child. The
                     // replay deadline matters too: a child that wrote the
                     // regular event and then died would otherwise keep the end
                     // open for the rest of its pre-roll wait.
@@ -958,7 +958,7 @@ fn parse_audio_devices(text: &str) -> AudioDevices {
         let label = if detail.is_empty() {
             value.to_string()
         } else {
-            format!("{value} — {detail}")
+            format!("{value} - {detail}")
         };
         let device = AudioDevice {
             id: value.to_string(),
@@ -999,7 +999,7 @@ fn parse_audio_devices(text: &str) -> AudioDevices {
             0,
             AudioDevice {
                 id: "default_output".to_string(),
-                label: "default_output — Default output device".to_string(),
+                label: "default_output - Default output device".to_string(),
             },
         );
     }
@@ -1011,7 +1011,7 @@ fn parse_audio_devices(text: &str) -> AudioDevices {
             0,
             AudioDevice {
                 id: "default_input".to_string(),
-                label: "default_input — Default input device".to_string(),
+                label: "default_input - Default input device".to_string(),
             },
         );
     }
@@ -1387,7 +1387,7 @@ mod tests {
             vec!["default_output", "device:x"]
         );
         assert_eq!(parsed.inputs.len(), 2);
-        assert_eq!(parsed.outputs[1].label, "device:x — Some Device");
+        assert_eq!(parsed.outputs[1].label, "device:x - Some Device");
 
         let parsed = parse_audio_devices(
             "Output devices:\ndefault_output|Default output\ndevice:alsa_output.test|Built-in output\nInput devices:\ndefault_input|Default input\ndevice:alsa_input.test|USB microphone\n",
@@ -1402,7 +1402,7 @@ mod tests {
         );
         assert_eq!(
             parsed.outputs[1].label,
-            "device:alsa_output.test — Built-in output"
+            "device:alsa_output.test - Built-in output"
         );
         assert_eq!(
             parsed
@@ -1414,7 +1414,7 @@ mod tests {
         );
         assert_eq!(
             parsed.inputs[1].label,
-            "device:alsa_input.test — USB microphone"
+            "device:alsa_input.test - USB microphone"
         );
     }
 

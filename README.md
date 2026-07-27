@@ -34,11 +34,14 @@ flatpak install --user ./warcraft-recorder.flatpak
 
 A bundle is an offline test artifact and does not configure the update remote.
 
-Existing AppImage users should keep their final AppImage until the stable
-Flatpak is announced. The migration release imports the existing legacy config
-once without changing it; the native app then writes its own config and keeps
-the existing recordings and sidecars in place. Rollback is launching that
-untouched final AppImage again.
+Final AppImage users can migrate from the app itself: “Check for updates”
+installs the Flatpak, keeps the AppImage at
+`~/.local/share/warcraftrecorder/WarcraftRecorder-final.AppImage`, and starts
+the native app. Existing settings are imported once and left untouched, and
+recordings, tags, and protected videos stay where they are. The sandboxed app
+only needs the recording folder and the World of Warcraft log folders selected
+again, which it asks for on first start. Rollback is running that preserved
+AppImage.
 
 To uninstall the application while retaining user data:
 

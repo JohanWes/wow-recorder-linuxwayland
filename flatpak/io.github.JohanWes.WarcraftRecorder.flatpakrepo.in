@@ -4,5 +4,8 @@ Url=https://johanwes.github.io/wow-recorder-linuxwayland/
 Homepage=https://github.com/JohanWes/wow-recorder-linuxwayland
 Comment=Signed native releases of Warcraft Recorder for Linux/Wayland
 Description=Automatically record and review World of Warcraft gameplay locally.
+# Where the GNOME runtime comes from, so a client that only knows this remote
+# can still resolve the application's dependencies.
+RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
 # The release job replaces this marker with the base64-encoded public key.
 GPGKey=@FLATPAK_GPG_KEY_BASE64@

@@ -41,7 +41,7 @@ use crate::recorder::{
 };
 use crate::storage::{EntryUpdate, LibraryIndex, Storage, now_unix_ms};
 
-/// Force-end an automatic recording after this long without new log data — a
+/// Force-end an automatic recording after this long without new log data: a
 /// crash/alt-F4 safety net only. WoW flushes the combat log in bursts, so the
 /// window must sit well above that cadence or a live activity gets force-ended
 /// inside a flush gap and discarded before its player is identified.
@@ -1110,8 +1110,8 @@ impl Coordinator {
         let Some(deferred) = self.deferred_begin.take() else {
             return;
         };
-        // A disarmed recorder has no child left to start the capture — that is
-        // how a mid-flush GSR crash arrives here — and `start_capture` would
+        // A disarmed recorder has no child left to start the capture (that is
+        // how a mid-flush GSR crash arrives here) and `start_capture` would
         // stack a second, baffling problem on top of the crash the user was
         // already told about. Drop the activity instead: nothing was written.
         if !self.armed {

@@ -34,9 +34,15 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
-    <release version="0.1.0" date="2026-07-22">
+    <release version="1.0.0" date="2026-07-27">
       <description>
-        <p>Release candidate for the native Linux/Wayland application.</p>
+        <p>
+          First release of the native Linux/Wayland application. It replaces
+          the Electron build with lower resource use, a Wayland-native
+          interface, and Flatpak updates. Legacy settings are imported once;
+          the recording folder and World of Warcraft log folders have to be
+          selected again so the sandbox can reach them.
+        </p>
       </description>
     </release>
   </releases>

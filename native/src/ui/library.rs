@@ -1024,7 +1024,7 @@ impl Inner {
         let category_changed = previous.as_ref() != Some(&category);
         if category_changed {
             // Categories in one family share their column set, so 2v2 to 3v3
-            // keeps its columns — and the widths the user dragged them to.
+            // keeps its columns, and the widths the user dragged them to.
             let family_changed = previous
                 .as_ref()
                 .is_none_or(|previous| family_of(previous) != family_of(&category));
@@ -1077,8 +1077,8 @@ impl Inner {
         self.state.rebuilding_store.set(false);
         self.after_filter_change();
 
-        // Re-select the surviving rows. If none survive — a fresh category, or
-        // the selection was deleted/filtered out — open the newest by default,
+        // Re-select the surviving rows. If none survive (a fresh category, or
+        // the selection was deleted/filtered out) open the newest by default,
         // matching the current app.
         let mut reselected = false;
         if !previously.is_empty() {

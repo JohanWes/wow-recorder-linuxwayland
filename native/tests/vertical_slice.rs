@@ -173,7 +173,7 @@ fn setup(root: &Path) -> Setup {
             arm_stability: Duration::from_millis(150),
             replay_event: Duration::from_millis(400),
             // Ends are asynchronous now, so this budget spans however long a
-            // test spends between the stop request and the fake hook's event —
+            // test spends between the stop request and the fake hook's event,
             // including `Config::save`'s two fsyncs. Keep it far enough above
             // that work that a loaded filesystem cannot expire it: the failure
             // mode is a dropped recording and a 20 s `pump` timeout, not a

@@ -682,8 +682,8 @@ impl Storage {
                 Err(error) => {
                     // `delete_one` unlinks the media before the sidecar and
                     // tags which stage failed. Only a sidecar failure means
-                    // the media is actually gone; a media failure — already
-                    // missing, not owned, a symlink — freed nothing, and
+                    // the media is actually gone; a media failure (already
+                    // missing, not owned, a symlink) freed nothing, and
                     // probing `exists()` cannot tell those apart. Credit the
                     // space for the real case rather than evicting more, and
                     // make the caller rescan.

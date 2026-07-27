@@ -13,7 +13,7 @@ const ICON_NAME: &str = "io.github.JohanWes.WarcraftRecorder.Devel";
 
 /// The only event carried over the bounded channel is Open; it is idempotent
 /// (present the window) so dropping it under saturation is harmless. Quit is a
-/// latched flag instead — see `RecorderTray::request_quit`.
+/// latched flag instead; see `RecorderTray::request_quit`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TrayEvent {
     Open,

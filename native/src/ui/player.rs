@@ -333,8 +333,8 @@ impl Player {
         });
         window.add_controller(key);
 
-        // Capture phase so pointer movement anywhere — including over the video
-        // widget, which handles its own motion — counts as activity.
+        // Capture phase so pointer movement anywhere, including over the video
+        // widget that handles its own motion, counts as activity.
         let inner = Rc::clone(&self.inner);
         let motion = gtk4::EventControllerMotion::new();
         motion.set_propagation_phase(gtk4::PropagationPhase::Capture);
@@ -812,7 +812,7 @@ impl Inner {
     }
 
     /// The one place playhead and clock are presented, so every path that
-    /// changes position — load, unload, scrub, seek completion, playback —
+    /// changes position (load, unload, scrub, seek completion, playback)
     /// agrees. The label only shows whole seconds, so only reformat when one
     /// actually ticks over.
     fn show_position(&self, seconds: f64) {
@@ -920,7 +920,7 @@ impl Inner {
         }
         // Clapper sets a cursor on its own video widget, and the innermost
         // widget with one wins, so the window alone leaves the pointer visible
-        // over the video — which is the whole screen in fullscreen.
+        // over the video, which is the whole screen in fullscreen.
         if let Some(backend) = &self.backend {
             backend.widget().set_cursor_from_name(name);
         }

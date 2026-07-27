@@ -320,7 +320,7 @@ pub fn run(
             {
                 shell.apply_snapshot(&snapshot);
                 if let Some(tray) = &tray {
-                    let title = format!("Warcraft Recorder — {}", status::view(&snapshot).title);
+                    let title = format!("Warcraft Recorder: {}", status::view(&snapshot).title);
                     if *last_tray_title.borrow() != title {
                         tray.update(title.clone(), ksni::Status::Active);
                         *last_tray_title.borrow_mut() = title;

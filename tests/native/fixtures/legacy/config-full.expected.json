@@ -93,8 +93,13 @@
     "selected_category": "raids",
     "minimize_to_tray": true,
     "close_to_tray": false,
-    "start_minimized": true
+    "start_minimized": true,
+    "layout": {
+      "player_split": null,
+      "column_widths": {}
+    }
   },
   "validate_log_paths": false,
-  "first_time_setup_complete": false
+  "first_time_setup_complete": false,
+  "migration_notice_pending": true
 }

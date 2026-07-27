@@ -230,7 +230,7 @@ impl Shell {
         sync_light(&style_manager);
         style_manager.connect_dark_notify(sync_light);
 
-        let busy_banner = adw::Banner::new("The app is busy — try again in a moment.");
+        let busy_banner = adw::Banner::new("The app is busy, try again in a moment.");
         let settings_cell: Rc<RefCell<Option<Rc<Settings>>>> = Rc::new(RefCell::new(None));
         let latest_snapshot: Rc<RefCell<Option<Arc<AppSnapshot>>>> = Rc::new(RefCell::new(None));
         let tray_available = Rc::new(Cell::new(
@@ -307,7 +307,7 @@ impl Shell {
         paned.set_shrink_end_child(false);
 
         // Match the pane to the active recording instead of leaving Clapper
-        // centered inside a fixed-height viewport with black side bars — until
+        // centered inside a fixed-height viewport with black side bars, until
         // the user sizes the divider, after which `PaneLayout` stands down.
         let video_dimensions = Rc::new(Cell::new(None::<(u32, u32)>));
         let programmatic = Rc::new(Cell::new(false));
@@ -488,7 +488,7 @@ impl Shell {
             settings.set_tray_available(available);
         }
         // If the tray vanished while the window was hidden, the window is the
-        // only way back in — reveal it so the process can't be stranded. Bind
+        // only way back in, so reveal it: the process cannot be stranded. Bind
         // the borrow to a local first so it is released before `present` takes
         // the guard mutably.
         let hidden = self.hold_guard.borrow().is_some();

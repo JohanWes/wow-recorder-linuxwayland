@@ -557,7 +557,7 @@ pub fn path_state(path: &AuthorizedPath) -> (String, bool) {
         (shown.to_string(), false)
     } else {
         (
-            format!("Permission required — Flatpak needs you to select this folder again: {shown}"),
+            format!("Permission required. Flatpak needs you to select this folder again: {shown}"),
             true,
         )
     }
@@ -572,7 +572,7 @@ pub fn audio_model(devices: &[AudioDevice], selected: &str) -> (Vec<AudioDevice>
         None => {
             devices.push(AudioDevice {
                 id: selected.to_owned(),
-                label: format!("{selected} — Unavailable"),
+                label: format!("{selected} - Unavailable"),
             });
             devices.len() - 1
         }
@@ -1004,7 +1004,7 @@ impl Settings {
                     self.set_feedback("Applying…", "dim-label");
                     self.apply.set_sensitive(false);
                 } else {
-                    self.set_feedback("The app is busy — try again in a moment.", "warning");
+                    self.set_feedback("The app is busy, try again in a moment.", "warning");
                 }
             }
         }
@@ -1061,9 +1061,9 @@ impl Settings {
 
         self.target_row
             .set_subtitle(if snapshot.config.capture.capture_target_token.is_some() {
-                "Selected — restored automatically from the saved portal token"
+                "Selected: restored automatically from the saved portal token"
             } else {
-                "Not selected yet — the desktop portal will ask on the next capture"
+                "Not selected yet: the desktop portal will ask on the next capture"
             });
 
         // The recorder's own capture-settings rejection, shown inline instead
@@ -1610,11 +1610,11 @@ mod tests {
         let devices = [
             AudioDevice {
                 id: "default_output".to_owned(),
-                label: "default_output — Default output device".to_owned(),
+                label: "default_output - Default output device".to_owned(),
             },
             AudioDevice {
                 id: "device:alpha".to_owned(),
-                label: "device:alpha — Speakers".to_owned(),
+                label: "device:alpha - Speakers".to_owned(),
             },
         ];
         let (model, index) = audio_model(&devices, "device:alpha");
@@ -1623,7 +1623,7 @@ mod tests {
         let (model, index) = audio_model(&devices, "device:gone");
         assert_eq!(model.len(), 3);
         assert_eq!(index, 2);
-        assert_eq!(model[2].label, "device:gone — Unavailable");
+        assert_eq!(model[2].label, "device:gone - Unavailable");
     }
 
     #[test]

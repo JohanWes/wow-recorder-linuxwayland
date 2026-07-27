@@ -7,7 +7,7 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
-## Unreleased
+## 1.0.0 - 2026-07-27
 
 ### Added
 - Native Rust/GTK4 application: combat-log watching, activity detection,
@@ -15,8 +15,13 @@ project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
   timeline, clipping, drawing overlay, and local POV switching.
 - Live keystone timers from the API when computing a Mythic+ result, with
   hardcoded timers as a fallback.
+- A one-time notice on the first launch after a legacy import: what changed,
+  what carried over, and the two folders the sandbox needs selected again.
 
 ### Changed
 - Flatpak is the only install and update path. Recordings and configuration
   stay local; legacy configuration is imported once and left untouched.
 - Cloud, account, upload, and localization features are not part of this fork.
+- `install.sh` migrates an AppImage install instead of replacing it: it
+  installs the Flatpak, preserves the AppImage for rollback, retires the
+  AppImage launchers, and starts the native app.

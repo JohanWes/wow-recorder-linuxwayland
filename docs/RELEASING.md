@@ -79,6 +79,38 @@ flatpak uninstall --user io.github.JohanWes.WarcraftRecorder
 Use `--delete-data` only when deleting the native app's private data is
 intentional. The final AppImage migration imports
 `~/.config/WarcraftRecorder/config-v3.json` once and leaves that file, the
-recording directory, replay directory, and legacy sidecars untouched. A
-rollback is simply launching the final AppImage again against those original
-paths.
+recording directory, replay directory, and legacy sidecars untouched.
+
+## Migrating the final AppImage users
+
+The shipped AppImage (7.7.1) checks `releases/latest` on this repository,
+compares the tag's version against its own, and pipes
+`main/install.sh` into bash. That binary cannot be changed any more, so the
+migration is three publications that have to be in place together:
+
+1. `install.sh` on the **main** branch is the migration helper. The updater
+   always fetches the branch tip, never a release asset.
+2. The signed repository is published at the permanent URL, so
+   `index.flatpakrepo` resolves.
+3. A GitHub release is marked **Latest** whose tag parses as a version above
+   `7.7.1`. The updater strips a leading `linux-`/`v` and a trailing commit
+   hash, so the tag must look like `linux-7.7.2-<short-sha>`. A tag such as
+   `v1.0.0` reads as *older* than 7.7.1 and the update button stays silent,
+   and `linux-7.7.2-migration` parses as `7.7.2-migration` → `7.7.0`. That
+   release carries no assets; it exists to trigger the migration and to hold
+   the announcement.
+
+Publish `v1.0.0` first (that tag drives the signed build), then create the
+`linux-7.7.2-<short-sha>` release from the same main commit and let it be the
+latest one. The native application never checks GitHub, so nothing regresses
+by keeping a 7.x tag as the repository's latest release.
+
+`install.sh` then installs the Flatpak, moves the AppImage to
+`~/.local/share/warcraftrecorder/WarcraftRecorder-final.AppImage`, replaces
+`~/.local/bin/warcraftrecorder` with a shim that runs the Flatpak, deletes the
+AppImage menu entry, repoints any "run at start-up" entry, and launches the
+native app. Without `flatpak` on the host it changes nothing, prints manual
+instructions, and exits nonzero, which the updater shows as an error.
+
+A rollback is running the preserved AppImage directly: it still reads the
+untouched `config-v3.json`, recordings, and sidecars.

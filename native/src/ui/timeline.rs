@@ -139,7 +139,7 @@ pub fn hover_label(
     best.map(|(_, (start_ms, _, label))| {
         let time = format_mm_ss(*start_ms);
         match label {
-            Some(label) => format!("{label} — {time}"),
+            Some(label) => format!("{label} - {time}"),
             None => time,
         }
     })
@@ -175,7 +175,7 @@ type SeekRequest = (u64, bool);
 /// The seek requests one pointer grab is allowed to produce.
 ///
 /// A press lands exactly where it was aimed, motion during the drag may snap
-/// to a keyframe so the picture keeps up, and the release settles precisely —
+/// to a keyframe so the picture keeps up, and the release settles precisely,
 /// but only if the drag actually moved. Emitting a second seek for a single
 /// click makes the decoder present a second frame, which reads as a flicker.
 #[derive(Clone, Copy, Default)]
@@ -714,13 +714,13 @@ mod tests {
         let x = ms_to_x(31_000, 120_000, 600.0);
         assert_eq!(
             hover_label(&items, x, 120_000, 600.0, 8.0).as_deref(),
-            Some("Alice — 0:30")
+            Some("Alice - 0:30")
         );
         // A span reports zero distance from anywhere inside it.
         let items = vec![(0, Some(120_000), Some("Round 1".to_owned()))];
         assert_eq!(
             hover_label(&items, 300.0, 120_000, 600.0, 8.0).as_deref(),
-            Some("Round 1 — 0:00")
+            Some("Round 1 - 0:00")
         );
     }
 
