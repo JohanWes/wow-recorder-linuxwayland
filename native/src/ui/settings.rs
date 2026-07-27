@@ -760,7 +760,7 @@ impl Settings {
         activities_page.add(&auto_group);
 
         let manual_group = adw::PreferencesGroup::new();
-        manual_group.set_title("Manual and test recording");
+        manual_group.set_title("Manual recording");
         manual_group.add(&switch_row(
             &ACTIVITY_EXTRA_SWITCHES[2],
             &draft,
@@ -773,15 +773,17 @@ impl Settings {
             &registry,
             &refresh,
         ));
-        let test_row = adw::ButtonRow::new();
-        test_row.set_title("Test recording…");
-        {
-            let sink = Rc::clone(&sink);
-            test_row.connect_activated(move |_| {
-                sink(ShellAction::TestRecording);
-            });
-        }
-        gated.push(test_row.clone().upcast());
+        let test_row = adw::ActionRow::new();
+        test_row.set_title("Test recording");
+        test_row.set_subtitle("Capture a short sample with a selected activity category");
+        let test_button = gtk4::Button::with_label("Test recording…");
+        test_button.set_valign(gtk4::Align::Center);
+        let test_sink = Rc::clone(&sink);
+        test_button.connect_clicked(move |_| {
+            test_sink(ShellAction::TestRecording);
+        });
+        test_row.add_suffix(&test_button);
+        test_row.set_activatable_widget(Some(&test_button));
         manual_group.add(&test_row);
         activities_page.add(&manual_group);
 

@@ -100,11 +100,7 @@ pub fn view(snapshot: &AppSnapshot) -> StatusView {
     match &snapshot.status {
         RecorderStatus::SetupRequired => StatusView {
             title: "Setup required".to_owned(),
-            detail: snapshot
-                .setup_problems
-                .first()
-                .map(|problem| problem.message.clone())
-                .unwrap_or_else(|| "Finish setup in Settings.".to_owned()),
+            detail: String::new(),
             tone: Tone::Invalid,
             elapsed_anchor_ms: None,
             show_force_end: false,
@@ -557,6 +553,22 @@ mod tests {
             assert_eq!(view.title, title);
             assert_eq!(view.tone, tone);
         }
+    }
+
+    #[test]
+    fn setup_card_does_not_repeat_the_banner_message() {
+        let mut snapshot = snapshot_with(RecorderStatus::SetupRequired);
+        assert!(view(&snapshot).detail.is_empty());
+
+        snapshot.setup_problems = vec![warcraft_recorder::config::ValidationProblem {
+            field: "storage.recording_dir",
+            message: "Choose a recording directory.".to_owned(),
+        }];
+
+        let view = view(&snapshot);
+        assert_eq!(view.title, "Setup required");
+        assert_eq!(view.tone, Tone::Invalid);
+        assert!(view.detail.is_empty());
     }
 
     #[test]

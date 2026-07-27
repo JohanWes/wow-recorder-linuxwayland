@@ -500,8 +500,44 @@ fn prompt_text(area: &gtk4::DrawingArea, state: &Rc<State>, at: (f64, f64)) {
 }
 
 fn build_toolbar(state: &Rc<State>, area: &gtk4::DrawingArea) -> gtk4::Box {
-    let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 2);
-    toolbar.add_css_class("toolbar");
+    let toolbar = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    let controls = gtk4::FlowBox::new();
+    controls.add_css_class("toolbar");
+    controls.set_selection_mode(gtk4::SelectionMode::None);
+    controls.set_homogeneous(false);
+    controls.set_column_spacing(4);
+    controls.set_row_spacing(4);
+    controls.set_min_children_per_line(1);
+    controls.set_hexpand(true);
+    controls.set_halign(gtk4::Align::Fill);
+    controls.set_focusable(false);
+    toolbar.append(&controls);
+
+    // The active tool stays visible while the complete labelled tool set lives
+    // in one compact popover. This replaces a row of nine icon-only buttons
+    // without changing the document/tool state.
+    let tool_content = adw::ButtonContent::new();
+    tool_content.set_icon_name("document-edit-symbolic");
+    tool_content.set_label("Freehand");
+    let tool_button = gtk4::MenuButton::new();
+    tool_button.set_child(Some(&tool_content));
+    tool_button.set_tooltip_text(Some("Choose drawing tool"));
+    tool_button.update_property(&[
+        gtk4::accessible::Property::Label("Freehand"),
+        gtk4::accessible::Property::Description("Drawing tool"),
+    ]);
+
+    let tool_grid = gtk4::Grid::new();
+    tool_grid.set_column_homogeneous(true);
+    tool_grid.set_column_spacing(4);
+    tool_grid.set_row_spacing(4);
+    tool_grid.set_margin_top(8);
+    tool_grid.set_margin_bottom(8);
+    tool_grid.set_margin_start(8);
+    tool_grid.set_margin_end(8);
+    let tool_popover = gtk4::Popover::new();
+    tool_popover.set_child(Some(&tool_grid));
+    tool_button.set_popover(Some(&tool_popover));
 
     let tools: [(Tool, &str, &str); 9] = [
         (Tool::Select, "Select and move", "edit-find-symbolic"),
@@ -515,9 +551,14 @@ fn build_toolbar(state: &Rc<State>, area: &gtk4::DrawingArea) -> gtk4::Box {
         (Tool::Eraser, "Eraser", "edit-clear-symbolic"),
     ];
     let mut first_button: Option<gtk4::ToggleButton> = None;
-    for (tool, label, icon) in tools {
+    for (index, (tool, label, icon)) in tools.into_iter().enumerate() {
+        let content = adw::ButtonContent::new();
+        content.set_icon_name(icon);
+        content.set_label(label);
         let button = gtk4::ToggleButton::new();
-        button.set_icon_name(icon);
+        button.set_child(Some(&content));
+        button.add_css_class("flat");
+        button.set_hexpand(true);
         button.set_tooltip_text(Some(label));
         button.update_property(&[gtk4::accessible::Property::Label(label)]);
         if let Some(first) = &first_button {
@@ -529,15 +570,35 @@ fn build_toolbar(state: &Rc<State>, area: &gtk4::DrawingArea) -> gtk4::Box {
             button.set_active(true);
         }
         let state = Rc::clone(state);
+        let selected_content = tool_content.clone();
+        let selected_button = tool_button.clone();
+        let popover = tool_popover.clone();
         button.connect_toggled(move |button| {
             if button.is_active() {
                 state.tool.set(tool);
+                selected_content.set_icon_name(icon);
+                selected_content.set_label(label);
+                selected_button.update_property(&[gtk4::accessible::Property::Label(label)]);
+                popover.popdown();
             }
         });
-        toolbar.append(&button);
+        tool_grid.attach(&button, (index % 2) as i32, (index / 2) as i32, 1, 1);
     }
+    controls.insert(&tool_button, -1);
 
-    // Stroke color and width.
+    // Stroke properties share a second named popover, keeping the color dialog
+    // and numeric width fully reachable without imposing their natural widths
+    // on the drawing toolbar.
+    let stroke_button = gtk4::MenuButton::new();
+    stroke_button.set_label("Stroke");
+    stroke_button.set_tooltip_text(Some("Stroke color and width"));
+    stroke_button.update_property(&[gtk4::accessible::Property::Label("Stroke color and width")]);
+    let stroke_content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    stroke_content.set_margin_top(8);
+    stroke_content.set_margin_bottom(8);
+    stroke_content.set_margin_start(8);
+    stroke_content.set_margin_end(8);
+
     let color = gtk4::ColorDialogButton::new(Some(gtk4::ColorDialog::new()));
     let initial = state.stroke.get().rgba;
     color.set_rgba(&gtk4::gdk::RGBA::new(
@@ -562,7 +623,13 @@ fn build_toolbar(state: &Rc<State>, area: &gtk4::DrawingArea) -> gtk4::Box {
             state.stroke.set(stroke);
         });
     }
-    toolbar.append(&color);
+    let color_label = gtk4::Label::new(Some("Color"));
+    color_label.set_hexpand(true);
+    color_label.set_xalign(0.0);
+    let color_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    color_row.append(&color_label);
+    color_row.append(&color);
+    stroke_content.append(&color_row);
 
     let width = gtk4::SpinButton::with_range(1.0, 16.0, 1.0);
     width.set_value(2.0);
@@ -576,7 +643,18 @@ fn build_toolbar(state: &Rc<State>, area: &gtk4::DrawingArea) -> gtk4::Box {
             state.stroke.set(stroke);
         });
     }
-    toolbar.append(&width);
+    let width_label = gtk4::Label::new(Some("Width"));
+    width_label.set_hexpand(true);
+    width_label.set_xalign(0.0);
+    let width_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    width_row.append(&width_label);
+    width_row.append(&width);
+    stroke_content.append(&width_row);
+
+    let stroke_popover = gtk4::Popover::new();
+    stroke_popover.set_child(Some(&stroke_content));
+    stroke_button.set_popover(Some(&stroke_popover));
+    controls.insert(&stroke_button, -1);
 
     for (label, icon, action) in [
         ("Undo", "edit-undo-symbolic", 0),
@@ -599,7 +677,7 @@ fn build_toolbar(state: &Rc<State>, area: &gtk4::DrawingArea) -> gtk4::Box {
             drop(doc);
             area.queue_draw();
         });
-        toolbar.append(&button);
+        controls.insert(&button, -1);
     }
 
     toolbar

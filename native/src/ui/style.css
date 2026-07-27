@@ -81,6 +81,22 @@
 .wr-result-win { color: @success_color; font-weight: 600; }
 .wr-result-loss { color: @error_color; font-weight: 600; }
 
+/* Tabular figures keep compact numeric columns stable while sorting. */
+.wr-numeric {
+  font-feature-settings: "tnum";
+}
+
+@define-color wr_activity_color #63788a;
+
+/* GtkColumnView contains a GtkListView whose selected items expose `row:selected`.
+   Scope the neutral playback highlight to this library and reserve warm color
+   for the thin active cue. */
+columnview.wr-recording-library > listview > row:selected {
+  background-color: alpha(@wr_activity_color, 0.22);
+  color: @window_fg_color;
+  box-shadow: inset 2px 0 @accent_color;
+}
+
 /* The library scrollbar remains an overlay, so leave a modest trailing gutter
    inside the table for the final Date column. */
 .data-table {
@@ -118,9 +134,13 @@ window.wr-light .wr-class-shaman { color: #005bb0; }
 window.wr-light .wr-class-warlock { color: #5a5bc2; }
 window.wr-light .wr-class-warrior { color: #7d5f36; }
 
+/* The fixed-dark player uses the same neutral activity hue as the active
+   library row. Timeline's complete Cairo palette lives in timeline.rs so the
+   draw path does not resolve deprecated style-context colors every frame. */
+
 /* Combat seek track: fixed dark geometry inside the black player area. */
 .wr-timeline {
-  min-height: 26px;
+  min-height: 58px;
 }
 
 /* Setup/error detail: technical text stays selectable but quiet. */

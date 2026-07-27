@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The persistent player pane: one ClapperGtk video with Warcraft Recorder's
-//! compact control row, the combat timeline, the drawing overlay, clip mode,
-//! and a single-view viewpoint selector. Volume/mute are process-shared
+//! adaptive review controls, the combat timeline, the drawing overlay, clip
+//! mode, and a single-view viewpoint selector. Volume/mute are process-shared
 //! session state; speed, position, drawings, and the clip range are
 //! session-only. All playback state lives in Clapper; this pane only issues
 //! commands and mirrors positions.
@@ -54,20 +54,24 @@ struct Inner {
     error_bar: gtk4::Box,
     timeline: Timeline,
     drawing: drawing::Overlay,
+    identity_strip: gtk4::Box,
+    identity_title: gtk4::Label,
+    identity_detail: gtk4::Label,
     time_label: gtk4::Label,
     play_button: gtk4::Button,
     speed_button: gtk4::Button,
+    audio_button: gtk4::MenuButton,
     mute_button: gtk4::Button,
     volume_scale: gtk4::Scale,
     pov_dropdown: gtk4::DropDown,
     clip_button: gtk4::Button,
-    clip_actions: gtk4::Box,
+    clip_stack: gtk4::Stack,
     drawing_toggle: gtk4::ToggleButton,
-    marker_button: gtk4::MenuButton,
+    marker_controls: gtk4::Box,
     reveal_button: gtk4::Button,
 
-    /// Drawing toolbar plus control row; collapsing it in fullscreen gives the
-    /// video the whole surface, which is what closes the letterbox bars.
+    /// Identity, drawing, and grouped control rows; collapsing the whole bar in
+    /// fullscreen gives the video the full surface and closes letterbox bars.
     bottom_bar: gtk4::Revealer,
     fullscreen: Cell<bool>,
     last_motion: Cell<Instant>,
@@ -154,71 +158,182 @@ impl Player {
         stack.set_vexpand(true);
 
         let timeline = Timeline::new();
-        let controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
-        controls.add_css_class("toolbar");
+        timeline.widget.set_sensitive(false);
 
+        // Playback essentials keep their own row so transport, time, seeking,
+        // and fullscreen never compete with review tools for horizontal space.
         let play_button = icon_button("media-playback-start-symbolic", "Play/pause");
+        play_button.set_sensitive(false);
+        let time_label = gtk4::Label::new(Some("0:00 / 0:00"));
+        time_label.add_css_class("numeric");
+        time_label.set_tooltip_text(Some("Playback position and duration"));
+        let fullscreen_button = icon_button("view-fullscreen-symbolic", "Fullscreen");
+        let primary_controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+        primary_controls.add_css_class("toolbar");
+        primary_controls.append(&play_button);
+        primary_controls.append(&time_label);
+        primary_controls.append(&timeline.widget);
+        primary_controls.append(&fullscreen_button);
+
+        // Volume is deliberately off the main row. The button mirrors mute
+        // state while the popover keeps both mute and continuous volume handy.
+        let audio_button = gtk4::MenuButton::new();
+        audio_button.set_icon_name("audio-volume-high-symbolic");
+        audio_button.set_tooltip_text(Some("Audio"));
+        audio_button.update_property(&[gtk4::accessible::Property::Label("Audio")]);
+        audio_button.set_sensitive(false);
         let mute_button = icon_button("audio-volume-high-symbolic", "Mute");
         let volume_scale = gtk4::Scale::with_range(gtk4::Orientation::Horizontal, 0.0, 1.0, 0.05);
-        volume_scale.set_size_request(90, -1);
+        volume_scale.set_hexpand(true);
         volume_scale.set_value(1.0);
         volume_scale.set_tooltip_text(Some("Volume"));
         volume_scale.update_property(&[gtk4::accessible::Property::Label("Volume")]);
-        let time_label = gtk4::Label::new(Some("0:00 / 0:00"));
-        time_label.add_css_class("numeric");
+        let audio_label = gtk4::Label::new(Some("Audio"));
+        audio_label.add_css_class("caption-heading");
+        audio_label.set_xalign(0.0);
+        let audio_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        audio_row.append(&mute_button);
+        audio_row.append(&volume_scale);
+        let audio_content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        audio_content.set_margin_top(8);
+        audio_content.set_margin_bottom(8);
+        audio_content.set_margin_start(8);
+        audio_content.set_margin_end(8);
+        audio_content.append(&audio_label);
+        audio_content.append(&audio_row);
+        let audio_popover = gtk4::Popover::new();
+        audio_popover.set_child(Some(&audio_content));
+        audio_button.set_popover(Some(&audio_popover));
+
         let speed_button = gtk4::Button::with_label("1x");
         speed_button.set_tooltip_text(Some("Playback speed"));
+        speed_button.update_property(&[gtk4::accessible::Property::Label("Playback speed")]);
+        speed_button.set_sensitive(false);
+
+        // Review gathers the marker preferences and the selected file action
+        // into one named surface instead of scattering icon-only controls.
         let marker_button = gtk4::MenuButton::new();
         marker_button.set_icon_name("view-list-symbolic");
-        marker_button.set_tooltip_text(Some("Marker visibility"));
+        marker_button.set_tooltip_text(Some("Review tools"));
+        marker_button.update_property(&[gtk4::accessible::Property::Label("Review tools")]);
+        let marker_controls = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        let markers_label = gtk4::Label::new(Some("Markers"));
+        markers_label.add_css_class("caption-heading");
+        markers_label.set_xalign(0.0);
+        let reveal_button = gtk4::Button::with_label("Reveal in folder");
+        reveal_button.add_css_class("flat");
+        reveal_button.set_tooltip_text(Some("Reveal in folder"));
+        reveal_button.update_property(&[gtk4::accessible::Property::Label("Reveal in folder")]);
+        reveal_button.set_sensitive(false);
+        let review_content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        review_content.set_margin_top(8);
+        review_content.set_margin_bottom(8);
+        review_content.set_margin_start(8);
+        review_content.set_margin_end(8);
+        review_content.append(&markers_label);
+        review_content.append(&marker_controls);
+        review_content.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
+        review_content.append(&reveal_button);
+        let review_popover = gtk4::Popover::new();
+        review_popover.set_child(Some(&review_content));
+        marker_button.set_popover(Some(&review_popover));
+
         let drawing_toggle = gtk4::ToggleButton::new();
         drawing_toggle.set_icon_name("document-edit-symbolic");
         drawing_toggle.set_tooltip_text(Some("Toggle drawing"));
         drawing_toggle.update_property(&[gtk4::accessible::Property::Label("Toggle drawing")]);
+        drawing_toggle.set_sensitive(false);
         let clip_button = icon_button("edit-cut-symbolic", "Clip");
+        clip_button.set_sensitive(false);
         let clip_create = gtk4::Button::with_label("Create clip");
         clip_create.add_css_class("suggested-action");
         let clip_cancel = gtk4::Button::with_label("Cancel");
+        let clip_set_start = gtk4::Button::with_label("Set start");
+        clip_set_start.set_tooltip_text(Some("Set clip start to the current playback position"));
+        let clip_set_end = gtk4::Button::with_label("Set end");
+        clip_set_end.set_tooltip_text(Some("Set clip end to the current playback position"));
         let clip_actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+        clip_actions.append(&clip_set_start);
+        clip_actions.append(&clip_set_end);
         clip_actions.append(&clip_create);
         clip_actions.append(&clip_cancel);
-        clip_actions.set_visible(false);
-        let reveal_button = icon_button("folder-open-symbolic", "Reveal in folder");
-        let fullscreen_button = icon_button("view-fullscreen-symbolic", "Fullscreen");
+        let clip_stack = gtk4::Stack::new();
+        clip_stack.set_transition_type(gtk4::StackTransitionType::None);
+        clip_stack.set_hhomogeneous(false);
+        clip_stack.set_vhomogeneous(false);
+        clip_stack.add_named(&clip_button, Some("start"));
+        clip_stack.add_named(&clip_actions, Some("actions"));
+        clip_stack.set_visible_child_name("start");
+
+        // FlowBox supplies the GTK-native compact presentation: these controls
+        // wrap in insertion/focus order without cloning any action or state.
+        let review_controls = gtk4::FlowBox::new();
+        review_controls.add_css_class("toolbar");
+        review_controls.set_selection_mode(gtk4::SelectionMode::None);
+        review_controls.set_homogeneous(false);
+        review_controls.set_column_spacing(4);
+        review_controls.set_row_spacing(4);
+        review_controls.set_min_children_per_line(1);
+        review_controls.set_max_children_per_line(5);
+        review_controls.set_halign(gtk4::Align::End);
+        review_controls.set_focusable(false);
+        for control in [
+            audio_button.upcast_ref::<gtk4::Widget>(),
+            speed_button.upcast_ref(),
+            marker_button.upcast_ref(),
+            drawing_toggle.upcast_ref(),
+            clip_stack.upcast_ref(),
+        ] {
+            review_controls.insert(control, -1);
+        }
+
+        let identity_title = gtk4::Label::new(None);
+        identity_title.add_css_class("caption-heading");
+        identity_title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        identity_title.set_xalign(0.0);
+        let identity_detail = gtk4::Label::new(None);
+        identity_detail.add_css_class("caption");
+        identity_detail.add_css_class("dim-label");
+        identity_detail.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        identity_detail.set_xalign(0.0);
+        let identity_text = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        identity_text.set_hexpand(true);
+        identity_text.append(&identity_title);
+        identity_text.append(&identity_detail);
         let pov_dropdown = gtk4::DropDown::from_strings(&[]);
+        pov_dropdown.set_halign(gtk4::Align::End);
+        pov_dropdown.set_valign(gtk4::Align::Center);
         pov_dropdown.set_tooltip_text(Some("Viewpoint"));
         pov_dropdown.update_property(&[gtk4::accessible::Property::Label("Viewpoint")]);
         pov_dropdown.set_visible(false);
+        let identity_strip = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        identity_strip.add_css_class("toolbar");
+        identity_strip.set_margin_top(4);
+        identity_strip.set_margin_bottom(4);
+        identity_strip.set_margin_start(8);
+        identity_strip.set_margin_end(8);
+        identity_strip.append(&identity_text);
+        identity_strip.set_hexpand(true);
+        identity_strip.append(&pov_dropdown);
+        identity_strip.set_visible(false);
 
-        for widget in [
-            play_button.upcast_ref::<gtk4::Widget>(),
-            mute_button.upcast_ref(),
-            volume_scale.upcast_ref(),
-            time_label.upcast_ref(),
-        ] {
-            controls.append(widget);
-        }
-        controls.append(&timeline.widget);
-        for widget in [
-            speed_button.upcast_ref::<gtk4::Widget>(),
-            marker_button.upcast_ref(),
-            drawing_toggle.upcast_ref(),
-            clip_button.upcast_ref(),
-            clip_actions.upcast_ref(),
-            pov_dropdown.upcast_ref(),
-            reveal_button.upcast_ref(),
-            fullscreen_button.upcast_ref(),
-        ] {
-            controls.append(widget);
-        }
+        // Identity and secondary review actions share one quiet context row at
+        // ordinary desktop widths. FlowBox wraps its natural-size controls
+        // when space is tight, so the player gains height only when it needs
+        // it instead of permanently reserving a three-row control deck.
+        let context_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        context_row.append(&identity_strip);
+        context_row.append(&review_controls);
 
         let bottom_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         bottom_box.append(&drawing.toolbar);
-        bottom_box.append(&controls);
+        bottom_box.append(&context_row);
+        bottom_box.append(&primary_controls);
+
         let bottom_bar = gtk4::Revealer::new();
         bottom_bar.set_child(Some(&bottom_box));
-        bottom_bar.set_transition_type(gtk4::RevealerTransitionType::SlideUp);
-        bottom_bar.set_transition_duration(250);
+        bottom_bar.set_transition_type(gtk4::RevealerTransitionType::None);
+        bottom_bar.set_transition_duration(0);
         bottom_bar.set_reveal_child(true);
 
         let widget = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -236,16 +351,20 @@ impl Player {
             error_bar,
             timeline,
             drawing,
+            identity_strip,
+            identity_title,
+            identity_detail,
             time_label,
             play_button,
             speed_button,
+            audio_button,
             mute_button,
             volume_scale,
             pov_dropdown,
             clip_button,
-            clip_actions,
+            clip_stack,
             drawing_toggle,
-            marker_button,
+            marker_controls,
             reveal_button,
             bottom_bar,
             fullscreen: Cell::new(false),
@@ -296,13 +415,8 @@ impl Player {
         video_overlay.add_controller(video_click);
 
         inner.connect_backend();
-        inner.connect_controls(
-            &clip_create,
-            &clip_cancel,
-            &fullscreen_button,
-            &error_reveal,
-            &inner.empty_reveal,
-        );
+        inner.connect_controls(&fullscreen_button, &error_reveal, &inner.empty_reveal);
+        inner.connect_clip_controls(&clip_create, &clip_set_start, &clip_set_end, &clip_cancel);
         // The common default preferences do not differ on the first snapshot,
         // so install the initial menu here rather than relying on an update.
         inner.rebuild_marker_menu();
@@ -412,8 +526,6 @@ impl Inner {
 
     fn connect_controls(
         self: &Rc<Self>,
-        clip_create: &gtk4::Button,
-        clip_cancel: &gtk4::Button,
         fullscreen_button: &gtk4::Button,
         error_reveal: &gtk4::Button,
         empty_reveal: &gtk4::Button,
@@ -450,10 +562,6 @@ impl Inner {
             this.enter_clip_mode();
         });
         let this = Rc::clone(self);
-        clip_create.connect_clicked(move |_| this.create_clip());
-        let this = Rc::clone(self);
-        clip_cancel.connect_clicked(move |_| this.exit_clip_mode());
-        let this = Rc::clone(self);
         self.reveal_button.connect_clicked(move |_| this.reveal());
         let this = Rc::clone(self);
         error_reveal.connect_clicked(move |_| this.reveal());
@@ -474,6 +582,22 @@ impl Inner {
             }
         });
     }
+    fn connect_clip_controls(
+        self: &Rc<Self>,
+        clip_create: &gtk4::Button,
+        clip_set_start: &gtk4::Button,
+        clip_set_end: &gtk4::Button,
+        clip_cancel: &gtk4::Button,
+    ) {
+        let this = Rc::clone(self);
+        clip_create.connect_clicked(move |_| this.create_clip());
+        let this = Rc::clone(self);
+        clip_cancel.connect_clicked(move |_| this.exit_clip_mode());
+        let this = Rc::clone(self);
+        clip_set_start.connect_clicked(move |_| this.set_clip_start());
+        let this = Rc::clone(self);
+        clip_set_end.connect_clicked(move |_| this.set_clip_end());
+    }
 
     // -- selection and loading ----------------------------------------------
 
@@ -482,6 +606,9 @@ impl Inner {
             self.unload();
             return;
         };
+        self.identity_title.set_text(&selection.identity_title);
+        self.identity_detail.set_text(&selection.identity_detail);
+        self.identity_strip.set_visible(true);
         // Same activity (e.g. snapshot-driven reselect): keep everything.
         let same_activity = self
             .active_id
@@ -537,6 +664,17 @@ impl Inner {
         let is_clip = entry.category == Category::Clip;
         drop(entries);
         let replacing_media = self.active_id.replace(Some(id.clone())).is_some();
+        self.reveal_button.set_sensitive(true);
+        let shown_position_ms = if retain_position {
+            (self.position_seconds.get() * 1_000.0) as u64
+        } else {
+            0
+        };
+        self.time_label.set_text(&format!(
+            "{} / {}",
+            timeline::format_mm_ss(shown_position_ms.min(self.duration_ms.get())),
+            timeline::format_mm_ss(self.duration_ms.get()),
+        ));
 
         self.error_bar.set_visible(false);
         self.empty_reveal.set_visible(false);
@@ -585,7 +723,7 @@ impl Inner {
         self.report_video_dimensions(dimensions);
         self.watch_for_video_dimensions(id.clone(), uri, previous_video_stream);
         self.refresh_timeline();
-        self.watch_for_failure();
+        self.watch_for_failure(id.clone());
     }
 
     fn report_video_dimensions(&self, dimensions: Option<(u32, u32)>) -> bool {
@@ -630,11 +768,17 @@ impl Inner {
     /// Playback failure has no supported error signal in the bindings; if the
     /// player still is not ready shortly after a load, surface the one
     /// recovery row. A later successful load hides it again.
-    fn watch_for_failure(self: &Rc<Self>) {
+    fn watch_for_failure(self: &Rc<Self>, expected_id: RecordingId) {
         let this = Rc::clone(self);
         gtk4::glib::timeout_add_local_once(std::time::Duration::from_secs(4), move || {
+            if this.active_id.borrow().as_ref() != Some(&expected_id) {
+                return;
+            }
             let ready = this.backend.as_ref().is_some_and(PlayerBackend::is_ready);
-            if !ready && this.active_id.borrow().is_some() {
+            if !ready {
+                if let Some(backend) = &this.backend {
+                    backend.stop();
+                }
                 let is_clip = this.active_entry_is_clip();
                 this.set_media_usable(false, is_clip);
                 this.error_bar.set_visible(true);
@@ -650,8 +794,18 @@ impl Inner {
             backend.stop();
         }
         *self.active_id.borrow_mut() = None;
+        self.reveal_button.set_sensitive(false);
+        self.identity_title.set_text("");
+        self.identity_detail.set_text("");
+        self.identity_strip.set_visible(false);
         self.povs.borrow_mut().clear();
         self.playing.set(false);
+        self.play_button
+            .set_icon_name("media-playback-start-symbolic");
+        self.position_seconds.set(0.0);
+        self.duration_ms.set(0);
+        self.fps.set(None);
+        self.time_label.set_text("0:00 / 0:00");
         self.set_media_usable(false, false);
         self.placeholder.set_title("No recording selected");
         self.placeholder
@@ -666,8 +820,15 @@ impl Inner {
 
     fn set_media_usable(&self, usable: bool, is_clip: bool) {
         self.media_usable.set(usable);
+        if !usable {
+            self.playing.set(false);
+            self.play_button
+                .set_icon_name("media-playback-start-symbolic");
+        }
         self.play_button.set_sensitive(usable);
+        self.timeline.widget.set_sensitive(usable);
         self.speed_button.set_sensitive(usable);
+        self.audio_button.set_sensitive(usable);
         self.mute_button.set_sensitive(usable);
         self.volume_scale.set_sensitive(usable);
         self.drawing_toggle.set_sensitive(usable);
@@ -708,11 +869,19 @@ impl Inner {
         if let Some(backend) = &self.backend {
             backend.set_muted(muted);
         }
-        self.mute_button.set_icon_name(if muted {
-            "audio-volume-muted-symbolic"
+        let (icon, mute_action, audio_label) = if muted {
+            ("audio-volume-muted-symbolic", "Unmute", "Audio (muted)")
         } else {
-            "audio-volume-high-symbolic"
-        });
+            ("audio-volume-high-symbolic", "Mute", "Audio")
+        };
+        self.audio_button.set_icon_name(icon);
+        self.audio_button.set_tooltip_text(Some(audio_label));
+        self.audio_button
+            .update_property(&[gtk4::accessible::Property::Label(audio_label)]);
+        self.mute_button.set_icon_name(icon);
+        self.mute_button.set_tooltip_text(Some(mute_action));
+        self.mute_button
+            .update_property(&[gtk4::accessible::Property::Label(mute_action)]);
     }
 
     fn set_speed(&self, index: usize) {
@@ -903,15 +1072,36 @@ impl Inner {
             position_ms,
             self.duration_ms.get(),
         )));
-        self.clip_button.set_visible(false);
-        self.clip_actions.set_visible(true);
+        self.clip_stack.set_visible_child_name("actions");
+    }
+    fn set_clip_start(&self) {
+        let Some(range) = self.timeline.clip() else {
+            return;
+        };
+        let position_ms = (self.position_seconds.get() * 1_000.0) as u64;
+        self.timeline.set_clip(Some(timeline::ClipRangeMs {
+            start_ms: position_ms.min(range.end_ms.saturating_sub(1)),
+            end_ms: range.end_ms,
+        }));
+    }
+
+    fn set_clip_end(&self) {
+        let Some(range) = self.timeline.clip() else {
+            return;
+        };
+        let position_ms = (self.position_seconds.get() * 1_000.0) as u64;
+        self.timeline.set_clip(Some(timeline::ClipRangeMs {
+            start_ms: range.start_ms,
+            end_ms: position_ms
+                .max(range.start_ms.saturating_add(1))
+                .min(self.duration_ms.get()),
+        }));
     }
 
     fn exit_clip_mode(&self) {
         self.clip_mode.set(false);
         self.timeline.set_clip(None);
-        self.clip_button.set_visible(true);
-        self.clip_actions.set_visible(false);
+        self.clip_stack.set_visible_child_name("start");
     }
 
     fn create_clip(&self) {
@@ -945,20 +1135,18 @@ impl Inner {
         self.timeline.set_entry(entry, self.prefs.get());
     }
 
-    /// The marker-visibility popover: death radio plus two check rows. Rebuilt
-    /// from config so it always reflects the authoritative snapshot.
+    /// The Review popover's marker group: death radio plus two check rows.
+    /// Rebuilt from config so it always reflects the authoritative snapshot.
     fn rebuild_marker_menu(self: &Rc<Self>) {
         let prefs = self.prefs.get();
-        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
-        content.set_margin_top(8);
-        content.set_margin_bottom(8);
-        content.set_margin_start(8);
-        content.set_margin_end(8);
+        while let Some(child) = self.marker_controls.first_child() {
+            self.marker_controls.remove(&child);
+        }
 
         let deaths_label = gtk4::Label::new(Some("Deaths"));
         deaths_label.add_css_class("caption-heading");
         deaths_label.set_xalign(0.0);
-        content.append(&deaths_label);
+        self.marker_controls.append(&deaths_label);
         let mut group: Option<gtk4::CheckButton> = None;
         for (value, label) in [
             (DeathMarkerVisibility::None, "Hidden"),
@@ -980,7 +1168,7 @@ impl Inner {
                     this.dispatch_markers(prefs);
                 }
             });
-            content.append(&radio);
+            self.marker_controls.append(&radio);
         }
         for (encounters, label) in [(true, "Encounter segments"), (false, "Round boundaries")] {
             let check = gtk4::CheckButton::with_label(label);
@@ -1008,11 +1196,8 @@ impl Inner {
                 }
                 this.dispatch_markers(prefs);
             });
-            content.append(&check);
+            self.marker_controls.append(&check);
         }
-        let popover = gtk4::Popover::new();
-        popover.set_child(Some(&content));
-        self.marker_button.set_popover(Some(&popover));
     }
 
     fn dispatch_markers(self: &Rc<Self>, prefs: MarkerPrefs) {
