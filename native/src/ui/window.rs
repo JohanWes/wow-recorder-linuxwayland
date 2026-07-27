@@ -21,12 +21,17 @@ use warcraft_recorder::domain::RecorderStatus;
 use warcraft_recorder::storage::now_unix_ms;
 
 use super::library::{Library, Selection};
-use super::operational_actions::{ManualBar, present_test_dialog, present_update_dialog};
+use super::operational_actions::{
+    ManualBar, present_migration_notice, present_test_dialog, present_update_dialog,
+};
 use super::player::Player;
 use super::settings::Settings;
 use super::sidebar::Sidebar;
 use super::tray_backend::TrayBackend;
-use super::{ActionSink, ShellAction, category_label, install_actions, primary_menu};
+use super::{ActionSink, LayoutStore, ShellAction, category_label, install_actions, primary_menu};
+
+/// Starting divider position when nothing is stored and nothing is playing.
+const DEFAULT_PLAYER_SPLIT: i32 = 400;
 
 /// The content pane as rendered from one snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,40 +88,87 @@ fn fitted_video_height(viewport_width: i32, video_width: u32, video_height: u32)
     .min(i64::from(i32::MAX)) as i32
 }
 
-/// Nudge the pane by the viewport's own error instead of predicting a height.
-/// Working off the real allocation self-corrects whatever the chrome, sidebar,
-/// or a fullscreen transition changed underneath us, and settles in one pass.
-///
-/// A width change means the window itself resized (maximize above all), and the
-/// fit lands a frame later than the new window size, which reads as the pane
-/// jumping. Those go through `animation`. Same-width corrections stay instant so
-/// dragging the divider is not fought by a running animation.
-fn fit_player_pane(
-    paned: &gtk4::Paned,
-    player: &Player,
-    dimensions: (u32, u32),
-    animation: &adw::TimedAnimation,
-    last_width: &Cell<i32>,
-) {
-    if animation.state() == adw::AnimationState::Playing {
-        return;
+/// The player/library divider. Sizing the pane to the video's aspect ratio is
+/// a clean-start convenience only: the first drag hands ownership to the user
+/// for good.
+struct PaneLayout {
+    paned: gtk4::Paned,
+    store: Rc<LayoutStore>,
+    /// Set while we move the divider ourselves.
+    programmatic: Rc<Cell<bool>>,
+    autoscale: Cell<bool>,
+    /// Viewport width at the last fit; a change means the window resized, and
+    /// that correction is animated rather than snapped.
+    last_fit_width: Cell<i32>,
+    /// `GtkPaned` rescales the divider whenever its own height changes and
+    /// notifies exactly as a drag does, so only an unchanged height is a drag.
+    last_height: Cell<i32>,
+}
+
+impl PaneLayout {
+    fn set_position(&self, position: i32) {
+        self.programmatic.set(true);
+        self.paned.set_position(position);
+        self.programmatic.set(false);
     }
-    let (width, height) = player.viewport_size();
-    let desired = fitted_video_height(width, dimensions.0, dimensions.1);
-    if desired <= 0 || desired == height {
-        last_width.set(width);
-        return;
+
+    /// Adopt the persisted split, or leave autoscaling on for a clean start.
+    fn restore(&self) {
+        self.last_height.set(self.paned.height());
+        match self.store.player_split() {
+            Some(position) => {
+                self.autoscale.set(false);
+                self.set_position(position);
+            }
+            None => self.autoscale.set(true),
+        }
     }
-    let position = (paned.position() + desired - height)
-        .max(0)
-        .min(paned.max_position());
-    if last_width.replace(width) == width {
-        paned.set_position(position);
-        return;
+
+    /// Keep the baseline current for relayouts that moved no divider.
+    fn sync_height(&self) {
+        self.last_height.set(self.paned.height());
     }
-    animation.set_value_from(f64::from(paned.position()));
-    animation.set_value_to(f64::from(position));
-    animation.play();
+
+    fn watch_position(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        self.paned.connect_position_notify(move |paned| {
+            let Some(this) = weak.upgrade() else {
+                return;
+            };
+            let height = paned.height();
+            let relayout = this.last_height.replace(height) != height;
+            if this.programmatic.get() || relayout {
+                return;
+            }
+            this.autoscale.set(false);
+            this.store.set_player_split(paned.position());
+        });
+    }
+
+    /// Nudge the pane by the viewport's own error instead of predicting a
+    /// height, so the real allocation self-corrects chrome and fullscreen
+    /// changes in one pass.
+    fn fit(&self, player: &Player, dimensions: (u32, u32), animation: &adw::TimedAnimation) {
+        if !self.autoscale.get() || animation.state() == adw::AnimationState::Playing {
+            return;
+        }
+        let (width, height) = player.viewport_size();
+        let desired = fitted_video_height(width, dimensions.0, dimensions.1);
+        if desired <= 0 || desired == height {
+            self.last_fit_width.set(width);
+            return;
+        }
+        let position = (self.paned.position() + desired - height)
+            .max(0)
+            .min(self.paned.max_position());
+        if self.last_fit_width.replace(width) == width {
+            self.set_position(position);
+            return;
+        }
+        animation.set_value_from(f64::from(self.paned.position()));
+        animation.set_value_to(f64::from(position));
+        animation.play();
+    }
 }
 
 pub struct Shell {
@@ -129,12 +181,18 @@ pub struct Shell {
     library: Library,
     player: Rc<Player>,
     manual_bar: ManualBar,
+    layout: Rc<LayoutStore>,
+    pane: Rc<PaneLayout>,
+    layout_adopted: Cell<bool>,
     settings: Rc<RefCell<Option<Rc<Settings>>>>,
     latest_snapshot: Rc<RefCell<Option<Arc<AppSnapshot>>>>,
     close_to_tray: Rc<Cell<bool>>,
     minimize_to_tray: Rc<Cell<bool>>,
     tray_available: Rc<Cell<bool>>,
     hold_guard: Rc<RefCell<Option<gtk4::gio::ApplicationHoldGuard>>>,
+    sink: ActionSink,
+    /// One migration notice per process, even if the acknowledgement is lost.
+    migration_notice_shown: Cell<bool>,
 }
 
 impl Shell {
@@ -235,7 +293,8 @@ impl Shell {
             let player = Rc::clone(&player);
             Rc::new(move |selection| player.set_selection(selection.as_ref()))
         };
-        let library = Library::new(Rc::clone(&sink), on_select);
+        let layout = LayoutStore::new(Rc::clone(&sink));
+        let library = Library::new(Rc::clone(&sink), Rc::clone(&layout), on_select);
 
         let paned = gtk4::Paned::new(gtk4::Orientation::Vertical);
         paned.set_wide_handle(true);
@@ -248,9 +307,10 @@ impl Shell {
         paned.set_shrink_end_child(false);
 
         // Match the pane to the active recording instead of leaving Clapper
-        // centered inside a fixed-height viewport with black side bars.
+        // centered inside a fixed-height viewport with black side bars — until
+        // the user sizes the divider, after which `PaneLayout` stands down.
         let video_dimensions = Rc::new(Cell::new(None::<(u32, u32)>));
-        let last_fit_width = Rc::new(Cell::new(0));
+        let programmatic = Rc::new(Cell::new(false));
         let fit_animation = adw::TimedAnimation::new(
             &paned,
             0.0,
@@ -258,60 +318,75 @@ impl Shell {
             200,
             adw::CallbackAnimationTarget::new({
                 let weak_paned = paned.downgrade();
+                let programmatic = Rc::clone(&programmatic);
                 move |value| {
                     if let Some(paned) = weak_paned.upgrade() {
+                        programmatic.set(true);
                         paned.set_position(value as i32);
+                        programmatic.set(false);
                     }
                 }
             }),
         );
+        let pane = Rc::new(PaneLayout {
+            paned: paned.clone(),
+            store: Rc::clone(&layout),
+            programmatic,
+            autoscale: Cell::new(true),
+            last_fit_width: Cell::new(0),
+            last_height: Cell::new(0),
+        });
+        pane.watch_position();
         {
-            // Only the starting split for an empty player; once a video is
-            // playing the viewport probe drives the position from real
-            // allocations, and realize fires mid-transition with stale ones.
+            // Only the starting split for an empty player with nothing stored;
+            // once a video is playing the viewport probe drives the position
+            // from real allocations, and realize fires mid-transition with
+            // stale ones.
+            let weak_pane = Rc::downgrade(&pane);
             let video_dimensions = Rc::clone(&video_dimensions);
-            paned.connect_realize(move |paned| {
-                if video_dimensions.get().is_none() {
-                    paned.set_position(400);
+            paned.connect_realize(move |_| {
+                let Some(pane) = weak_pane.upgrade() else {
+                    return;
+                };
+                if pane.store.player_split().is_none() && video_dimensions.get().is_none() {
+                    pane.set_position(DEFAULT_PLAYER_SPLIT);
                 }
             });
         }
         {
-            let weak_paned = paned.downgrade();
+            let weak_pane = Rc::downgrade(&pane);
             let weak_player = Rc::downgrade(&player);
             let video_dimensions = Rc::clone(&video_dimensions);
-            let last_fit_width = Rc::clone(&last_fit_width);
             let fit_animation = fit_animation.clone();
             player.connect_video_dimensions(move |width, height| {
                 let dimensions = (width, height);
                 video_dimensions.set(Some(dimensions));
-                if let (Some(paned), Some(player)) = (weak_paned.upgrade(), weak_player.upgrade()) {
-                    fit_player_pane(&paned, &player, dimensions, &fit_animation, &last_fit_width);
+                if let (Some(pane), Some(player)) = (weak_pane.upgrade(), weak_player.upgrade()) {
+                    pane.fit(&player, dimensions, &fit_animation);
                 }
             });
         }
         {
-            let weak_paned = paned.downgrade();
+            let weak_pane = Rc::downgrade(&pane);
             let weak_player = Rc::downgrade(&player);
             let video_dimensions = Rc::clone(&video_dimensions);
-            let last_fit_width = Rc::clone(&last_fit_width);
             let fit_animation = fit_animation.clone();
             player.connect_viewport_resize(move || {
-                if let (Some(dimensions), Some(paned), Some(player)) = (
-                    video_dimensions.get(),
-                    weak_paned.upgrade(),
-                    weak_player.upgrade(),
-                ) {
+                let Some(pane) = weak_pane.upgrade() else {
+                    return;
+                };
+                pane.sync_height();
+                if let (Some(dimensions), Some(player)) =
+                    (video_dimensions.get(), weak_player.upgrade())
+                {
                     // Fullscreen hides the library, so the pane position no
                     // longer drives the viewport; let the video letterbox.
-                    if paned.end_child().is_some_and(|child| child.is_visible()) {
-                        fit_player_pane(
-                            &paned,
-                            &player,
-                            dimensions,
-                            &fit_animation,
-                            &last_fit_width,
-                        );
+                    if pane
+                        .paned
+                        .end_child()
+                        .is_some_and(|child| child.is_visible())
+                    {
+                        pane.fit(&player, dimensions, &fit_animation);
                     }
                 }
             });
@@ -375,12 +450,17 @@ impl Shell {
             library,
             player,
             manual_bar,
+            layout,
+            pane,
+            layout_adopted: Cell::new(false),
             settings: settings_cell,
             latest_snapshot,
             close_to_tray: Rc::new(Cell::new(close_to_tray)),
             minimize_to_tray: Rc::new(Cell::new(minimize_to_tray)),
             tray_available,
             hold_guard: Rc::new(RefCell::new(None)),
+            sink,
+            migration_notice_shown: Cell::new(false),
         };
         shell.connect_close_request();
         shell.connect_minimize();
@@ -418,6 +498,12 @@ impl Shell {
     }
 
     pub fn apply_snapshot(&self, snapshot: &Arc<AppSnapshot>) {
+        // The stored layout arrives with the first snapshot, before the library
+        // builds the columns that read it.
+        if !self.layout_adopted.replace(true) {
+            self.layout.adopt(&snapshot.config.interface.layout);
+            self.pane.restore();
+        }
         self.close_to_tray
             .set(snapshot.config.interface.close_to_tray);
         self.minimize_to_tray
@@ -452,6 +538,12 @@ impl Shell {
                 self.problem_banner.set_revealed(true);
             }
             None => self.problem_banner.set_revealed(false),
+        }
+
+        // Last, so the notice lands over a window that already shows the real
+        // state behind it.
+        if snapshot.config.migration_notice_pending && !self.migration_notice_shown.replace(true) {
+            present_migration_notice(self.window.upcast_ref(), Rc::clone(&self.sink));
         }
     }
 

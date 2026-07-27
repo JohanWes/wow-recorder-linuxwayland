@@ -31,7 +31,7 @@ use warcraft_recorder::coordinator::{AppSnapshot, Command};
 use warcraft_recorder::domain::{ActivityDetails, Category, LibraryEntry, Outcome, RecordingId};
 
 use super::filters::{self, Chip};
-use super::{ActionSink, ShellAction};
+use super::{ActionSink, LayoutStore, ShellAction};
 
 /// What the player area needs when a single row is chosen.
 #[derive(Clone, Debug)]
@@ -412,6 +412,7 @@ pub struct Library {
 
 struct Inner {
     sink: ActionSink,
+    layout: Rc<LayoutStore>,
     on_select: Rc<dyn Fn(Option<Selection>)>,
     store: gio::ListStore,
     filter: gtk4::CustomFilter,
@@ -436,7 +437,11 @@ struct Inner {
 }
 
 impl Library {
-    pub fn new(sink: ActionSink, on_select: Rc<dyn Fn(Option<Selection>)>) -> Self {
+    pub fn new(
+        sink: ActionSink,
+        layout: Rc<LayoutStore>,
+        on_select: Rc<dyn Fn(Option<Selection>)>,
+    ) -> Self {
         let store = gio::ListStore::new::<BoxedAnyObject>();
         let filter = gtk4::CustomFilter::new(|_| true);
         let filter_model = gtk4::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
@@ -550,6 +555,7 @@ impl Library {
 
         let inner = Rc::new(Inner {
             sink,
+            layout,
             on_select,
             store,
             filter,
@@ -1116,8 +1122,28 @@ impl Inner {
             self.column_view.remove_column(&column);
         }
         for column in self.columns_for(family) {
+            self.bind_column_width(&column);
             self.column_view.append_column(&column);
         }
+    }
+
+    /// Restore and keep recording the width the user dragged. `fixed-width` is
+    /// only ever written by the column view's own resize gesture, so the
+    /// notification is a clean user-intent signal.
+    fn bind_column_width(self: &Rc<Self>, column: &gtk4::ColumnViewColumn) {
+        if !column.is_resizable() {
+            return;
+        }
+        let Some(title) = column.title().map(|title| title.to_string()) else {
+            return;
+        };
+        if let Some(width) = self.layout.column_width(&title) {
+            column.set_fixed_width(width);
+        }
+        let layout = Rc::clone(&self.layout);
+        column.connect_fixed_width_notify(move |column| {
+            layout.set_column_width(&title, column.fixed_width());
+        });
     }
 
     fn columns_for(self: &Rc<Self>, family: Family) -> Vec<gtk4::ColumnViewColumn> {

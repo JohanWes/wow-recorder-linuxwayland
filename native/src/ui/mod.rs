@@ -33,6 +33,7 @@ use std::time::Duration;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
+use warcraft_recorder::config::LayoutSettings;
 use warcraft_recorder::coordinator::{Command, CoordinatorHandle};
 use warcraft_recorder::domain::Category;
 
@@ -95,6 +96,79 @@ pub enum ShellAction {
     /// Runs the published install script to migrate/update to the Flatpak.
     CheckForUpdates,
     Quit,
+}
+
+/// A resize drag notifies per pixel; coalesce so one drag costs one write.
+const LAYOUT_SAVE_DELAY: Duration = Duration::from_millis(750);
+
+/// The divider and column widths the user dragged, adopted from the first
+/// snapshot and written back through the coordinator on a debounce.
+pub struct LayoutStore {
+    sink: ActionSink,
+    layout: RefCell<LayoutSettings>,
+    save_queued: Cell<bool>,
+}
+
+impl LayoutStore {
+    pub fn new(sink: ActionSink) -> Rc<Self> {
+        Rc::new(Self {
+            sink,
+            layout: RefCell::new(LayoutSettings::default()),
+            save_queued: Cell::new(false),
+        })
+    }
+
+    pub fn adopt(&self, layout: &LayoutSettings) {
+        self.layout.borrow_mut().clone_from(layout);
+    }
+
+    /// `None` means the user has never dragged the divider.
+    pub fn player_split(&self) -> Option<i32> {
+        self.layout.borrow().player_split
+    }
+
+    pub fn column_width(&self, title: &str) -> Option<i32> {
+        self.layout.borrow().column_widths.get(title).copied()
+    }
+
+    pub fn set_player_split(self: &Rc<Self>, position: i32) {
+        if self.layout.borrow().player_split == Some(position) {
+            return;
+        }
+        self.layout.borrow_mut().player_split = Some(position);
+        self.queue_save();
+    }
+
+    /// A negative width is GTK's double-click reset; drop the override.
+    pub fn set_column_width(self: &Rc<Self>, title: &str, width: i32) {
+        {
+            let mut layout = self.layout.borrow_mut();
+            let changed = if width < 0 {
+                layout.column_widths.remove(title).is_some()
+            } else {
+                layout.column_widths.insert(title.to_owned(), width) != Some(width)
+            };
+            if !changed {
+                return;
+            }
+        }
+        self.queue_save();
+    }
+
+    fn queue_save(self: &Rc<Self>) {
+        if self.save_queued.replace(true) {
+            return;
+        }
+        let this = Rc::clone(self);
+        gtk4::glib::timeout_add_local_once(LAYOUT_SAVE_DELAY, move || {
+            this.save_queued.set(false);
+            let layout = this.layout.borrow().clone();
+            if !(this.sink)(ShellAction::Command(Command::SaveLayout { layout })) {
+                // The command channel was full; retry rather than lose the drag.
+                this.queue_save();
+            }
+        });
+    }
 }
 
 /// Category rail metadata in rail order: label and symbolic icon.

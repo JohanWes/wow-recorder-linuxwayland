@@ -24,7 +24,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::activity::{ActivityAction, ActivityEngine, RecordingDraft};
-use crate::config::{Config, ConfigError, LoadedConfig, ValidationProblem, load_or_import};
+use crate::config::{
+    Config, ConfigError, LayoutSettings, LoadedConfig, ValidationProblem, load_or_import,
+};
 use crate::domain::{
     ActivityDetails, Category, CorrelatedActivity, DeathMarkerVisibility, GameFlavor, LibraryEntry,
     MarkerVisibility, MediaFacts, Outcome, Problem, RecorderStatus, RecordingId, RecoveryAction,
@@ -101,6 +103,12 @@ pub enum Command {
         encounters: MarkerVisibility,
         rounds: MarkerVisibility,
     },
+    /// Debounced UI geometry write from the shell: divider and column widths.
+    SaveLayout {
+        layout: LayoutSettings,
+    },
+    /// The user acknowledged the post-migration notice; never show it again.
+    DismissMigrationNotice,
     Shutdown,
 }
 
@@ -555,6 +563,20 @@ impl Coordinator {
                 draft.interface.encounter_markers = encounters;
                 draft.interface.round_markers = rounds;
                 self.patch_config(draft);
+            }
+            Command::SaveLayout { layout } => {
+                if self.config.interface.layout != layout {
+                    let mut draft = self.config.clone();
+                    draft.interface.layout = layout;
+                    self.patch_config(draft);
+                }
+            }
+            Command::DismissMigrationNotice => {
+                if self.config.migration_notice_pending {
+                    let mut draft = self.config.clone();
+                    draft.migration_notice_pending = false;
+                    self.patch_config(draft);
+                }
             }
             Command::Shutdown => {}
         }

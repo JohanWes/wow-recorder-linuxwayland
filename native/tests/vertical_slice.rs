@@ -8,6 +8,7 @@
 //! coordinator core is stepped with `tick()`, so no test sleeps or timing
 //! assertions are needed.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,8 +17,8 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
 use warcraft_recorder::config::{
-    ActivitySettings, AuthorizedPath, CaptureSettings, Config, FlavorConfig, ManualSettings,
-    StorageSettings,
+    ActivitySettings, AuthorizedPath, CaptureSettings, Config, FlavorConfig, LayoutSettings,
+    ManualSettings, StorageSettings,
 };
 use warcraft_recorder::coordinator::{AppSnapshot, ClipRange, Command, Coordinator, Setup, start};
 use warcraft_recorder::domain::{Category, Outcome, RecorderStatus, StorageLimit, TimelineKind};
@@ -542,6 +543,65 @@ fn commands_are_served_while_a_capture_is_ending() {
     harness.emit_artifacts(true);
     harness.pump(|snapshot| !snapshot.entries.is_empty());
     assert_eq!(harness.latest.entries[0].category, Category::Raids);
+}
+
+#[test]
+fn the_migration_notice_survives_a_restart_and_one_dismissal_ends_it() {
+    let harness = Harness::new("migration-notice");
+    let config_path = harness.root.join("config.json");
+    let mut config = Config::load(&config_path).expect("load the harness config");
+    config.migration_notice_pending = true;
+    config.save(&config_path).expect("raise the notice");
+    let (root, library, capture_root, log_file) = (
+        harness.root.clone(),
+        harness.library.clone(),
+        harness.capture_root.clone(),
+        harness.log_file.clone(),
+    );
+    drop(harness);
+
+    // What the first launch after a legacy import looks like to the shell.
+    let mut harness = Harness::attach(root, library, capture_root, log_file);
+    assert!(harness.latest.config.migration_notice_pending);
+
+    harness.send(Command::DismissMigrationNotice);
+    harness.pump(|snapshot| !snapshot.config.migration_notice_pending);
+    assert!(
+        !Config::load(&config_path)
+            .expect("reload the saved config")
+            .migration_notice_pending,
+        "the dismissal must outlive the process"
+    );
+}
+
+#[test]
+fn a_dragged_layout_outlives_the_process() {
+    let mut harness = Harness::new("layout");
+    assert_eq!(
+        harness.latest.config.interface.layout,
+        LayoutSettings::default(),
+        "a clean start stores nothing, which is what lets the pane autoscale"
+    );
+
+    let layout = LayoutSettings {
+        player_split: Some(612),
+        column_widths: BTreeMap::from([("Dungeon".to_owned(), 240)]),
+    };
+    harness.send(Command::SaveLayout {
+        layout: layout.clone(),
+    });
+    harness.pump(|snapshot| snapshot.config.interface.layout == layout);
+
+    let (root, library, capture_root, log_file) = (
+        harness.root.clone(),
+        harness.library.clone(),
+        harness.capture_root.clone(),
+        harness.log_file.clone(),
+    );
+    drop(harness);
+
+    let harness = Harness::attach(root, library, capture_root, log_file);
+    assert_eq!(harness.latest.config.interface.layout, layout);
 }
 
 #[test]

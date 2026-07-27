@@ -2,7 +2,7 @@
 
 //! Native configuration persistence and legacy import.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -228,6 +228,17 @@ impl Default for ManualSettings {
     }
 }
 
+/// Sizes the user dragged: the player/library divider and the table columns.
+/// Empty on a clean install, which is the only state in which the player pane
+/// may autoscale itself to the video's aspect ratio.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayoutSettings {
+    pub player_split: Option<i32>,
+    /// Column title to width. Titles are shared across category families, so a
+    /// width dragged in Mythic+ also applies to the raid column of that name.
+    pub column_widths: BTreeMap<String, i32>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterfaceSettings {
     pub hide_empty_categories: bool,
@@ -238,6 +249,8 @@ pub struct InterfaceSettings {
     pub minimize_to_tray: bool,
     pub close_to_tray: bool,
     pub start_minimized: bool,
+    #[serde(default)]
+    pub layout: LayoutSettings,
 }
 
 impl Default for InterfaceSettings {
@@ -251,6 +264,7 @@ impl Default for InterfaceSettings {
             minimize_to_tray: true,
             close_to_tray: true,
             start_minimized: false,
+            layout: LayoutSettings::default(),
         }
     }
 }
@@ -266,6 +280,12 @@ pub struct Config {
     pub interface: InterfaceSettings,
     pub validate_log_paths: bool,
     pub first_time_setup_complete: bool,
+    /// Set by the one-way legacy import and cleared once the user has seen
+    /// the migration notice. It outlives the importing launch on purpose: a
+    /// user who closes the window immediately still gets told which folders
+    /// the sandbox needs re-picked.
+    #[serde(default)]
+    pub migration_notice_pending: bool,
 }
 
 impl Default for Config {
@@ -280,6 +300,7 @@ impl Default for Config {
             interface: InterfaceSettings::default(),
             validate_log_paths: true,
             first_time_setup_complete: false,
+            migration_notice_pending: false,
         }
     }
 }
@@ -837,9 +858,13 @@ fn import_legacy(values: &Map<String, Value>) -> LegacyImport {
             minimize_to_tray: reader.boolean("minimizeToTray", true),
             close_to_tray: reader.boolean("minimizeOnQuit", true),
             start_minimized: reader.boolean("startMinimized", false),
+            // Nothing to carry over; an import is still a clean start.
+            layout: LayoutSettings::default(),
         },
         validate_log_paths: reader.boolean("validateLogPaths", true),
         first_time_setup_complete: !reader.boolean("firstTimeSetup", true),
+        // Only an import raises this: a clean install has nothing to explain.
+        migration_notice_pending: true,
     };
 
     if !config.validate().is_empty() {
