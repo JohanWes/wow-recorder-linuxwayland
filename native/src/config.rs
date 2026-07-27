@@ -601,7 +601,7 @@ fn write_atomic(config: &Config, path: &Path) -> Result<(), ConfigError> {
         File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|source| ConfigError::Io {
-                operation: "sync config directory",
+                operation: SYNC_DIRECTORY,
                 path: parent.to_owned(),
                 source,
             })
@@ -1015,6 +1015,18 @@ pub enum ConfigError {
         source: io::Error,
     },
     UnresolvedHome,
+}
+
+/// Naming the one post-rename step lets a caller tell "the write never
+/// happened" from "the write is visible but its durability is unconfirmed".
+const SYNC_DIRECTORY: &str = "sync config directory";
+
+impl ConfigError {
+    /// True when the new config is already on disk despite the error, so the
+    /// caller must keep the value it just wrote rather than roll it back.
+    pub fn is_committed(&self) -> bool {
+        matches!(self, Self::Io { operation, .. } if *operation == SYNC_DIRECTORY)
+    }
 }
 
 impl fmt::Display for ConfigError {

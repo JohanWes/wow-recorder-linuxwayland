@@ -134,6 +134,11 @@ pub enum RecorderEvent {
         at_ms: i64,
     },
     Restarted,
+    /// A requested end resolved: `None` means the bounded wait produced no
+    /// regular recording, which the coordinator reports and sweeps.
+    CaptureEnded {
+        artifacts: Option<CaptureArtifacts>,
+    },
     RestartFailed {
         message: String,
     },
@@ -184,6 +189,15 @@ struct ActiveCapture {
     replay_deadline: Instant,
 }
 
+/// A requested end whose hook events have not all arrived yet. `poll` resolves
+/// it so the coordinator thread never sleeps through GSR's flush and mux.
+struct PendingEnd {
+    config: CaptureConfig,
+    active: ActiveCapture,
+    regular_deadline: Instant,
+    regular: Option<PathBuf>,
+}
+
 pub struct Recorder {
     config: Option<CaptureConfig>,
     child: Option<Child>,
@@ -193,6 +207,7 @@ pub struct Recorder {
     events_offset: u64,
     pending: Vec<GsrEvent>,
     active: Option<ActiveCapture>,
+    ending: Option<PendingEnd>,
     last_token: Option<String>,
     ignored_events: u32,
     timeouts: Timeouts,
@@ -226,6 +241,7 @@ impl Recorder {
             events_offset: 0,
             pending: Vec::new(),
             active: None,
+            ending: None,
             last_token: None,
             ignored_events: 0,
             timeouts,
@@ -376,7 +392,12 @@ impl Recorder {
     /// Register the replay wait, save the pre-roll (SIGUSR1), and start the
     /// regular recording (SIGRTMIN). Never waits for media.
     pub fn begin(&mut self, request: StartRequest) -> Result<CaptureStarted, RecorderError> {
-        if self.active.is_some() {
+        // A pending end still owns the hook events GSR has yet to write, and
+        // `resolve_end` clears whatever is left over. Starting here would let
+        // it swallow the new capture's replay event, costing it the entire
+        // pre-roll. The coordinator defers instead, and this keeps that
+        // invariant local to the recorder.
+        if self.active.is_some() || self.ending.is_some() {
             return Err(RecorderError::Busy);
         }
         let child = self.live_child()?;
@@ -396,9 +417,18 @@ impl Recorder {
         Ok(started)
     }
 
-    /// Stop the regular recording and return the GSR-named artifacts. Missing
-    /// replay is tolerated; missing regular is an error.
-    pub fn end(&mut self, id: &RecordingId) -> Result<CaptureArtifacts, RecorderError> {
+    /// Stop the regular recording and resolve its artifacts through `poll`.
+    /// GSR needs however long the encoder flush and mux take, and the
+    /// coordinator owns every piece of UI state while it waits, so the wait
+    /// must not happen here. Missing replay stays tolerated; a missing regular
+    /// recording arrives as `CaptureEnded { artifacts: None }`.
+    ///
+    /// Discarding a capture uses the same request: the coordinator sweeps the
+    /// artifacts instead of finalizing them. Recorder never unlinks them.
+    pub fn request_end(&mut self, id: &RecordingId) -> Result<(), RecorderError> {
+        if self.ending.is_some() {
+            return Err(RecorderError::Busy);
+        }
         match &self.active {
             None => return Err(RecorderError::NotArmed),
             Some(active) if &active.id != id => return Err(RecorderError::WrongId),
@@ -408,39 +438,105 @@ impl Recorder {
         process::send_signal(child, process::sigrtmin())?;
         let config = self.config.clone().expect("armed with config");
         let active = self.active.take().expect("checked above");
+        self.ending = Some(PendingEnd {
+            config,
+            active,
+            regular_deadline: Instant::now() + self.timeouts.regular_event,
+            regular: None,
+        });
+        Ok(())
+    }
 
-        let regular = self.wait_for_event(
-            &config,
-            "regular",
-            &Self::regular_dir(&config),
-            Instant::now() + self.timeouts.regular_event,
-        );
-        let replay = self.wait_for_event(
-            &config,
-            "replay",
-            &Self::replay_dir(&config),
-            active.replay_deadline,
-        );
+    /// True between `request_end` and its `CaptureEnded`.
+    pub fn is_ending(&self) -> bool {
+        self.ending.is_some()
+    }
+
+    /// Shutdown only: drive the requested end to its conclusion so the
+    /// finalization is queued before GSR is killed.
+    ///
+    /// `deadline` keeps quitting responsive. The full 30 s regular wait is
+    /// right for a running app but not for a window the user just closed: a
+    /// quit that appears hung invites a force-kill, which orphans GSR and
+    /// leaves it capturing the screen forever. On expiry the end resolves with
+    /// whatever arrived, exactly as a timed-out poll would.
+    pub fn finish_end_blocking(&mut self, deadline: Instant) -> Vec<RecorderEvent> {
+        let mut events = Vec::new();
+        while self.ending.is_some() {
+            self.poll_pending_end(&mut events);
+            if self.ending.is_none() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                self.resolve_end(None, &mut events);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        events
+    }
+
+    /// One nonblocking step of a requested end. The regular recording is
+    /// awaited first against its own deadline, then the replay pre-roll
+    /// against the absolute deadline taken at `begin`.
+    fn poll_pending_end(&mut self, events: &mut Vec<RecorderEvent>) {
+        let Some(config) = self.ending.as_ref().map(|ending| ending.config.clone()) else {
+            return;
+        };
+        let _ = self.read_new_events(&config);
+        let now = Instant::now();
+
+        if self
+            .ending
+            .as_ref()
+            .is_some_and(|ending| ending.regular.is_none())
+        {
+            let regular = self.take_event("regular", &Self::regular_dir(&config));
+            let ending = self.ending.as_mut().expect("checked above");
+            ending.regular = regular;
+            if ending.regular.is_none() {
+                if now < ending.regular_deadline {
+                    return;
+                }
+                // The bounded wait expired. Consume any valid replay event
+                // first so it is not counted as unexpected noise; without a
+                // regular recording it is discarded either way, and the
+                // coordinator's sweep quarantines the file.
+                let _ = self.take_event("replay", &Self::replay_dir(&config));
+                self.resolve_end(None, events);
+                return;
+            }
+        }
+
+        let replay_deadline = self
+            .ending
+            .as_ref()
+            .expect("regular resolution keeps the pending end")
+            .active
+            .replay_deadline;
+        let replay = self.take_event("replay", &Self::replay_dir(&config));
+        if replay.is_none() && now < replay_deadline {
+            return;
+        }
+        self.resolve_end(replay, events);
+    }
+
+    fn resolve_end(&mut self, replay: Option<PathBuf>, events: &mut Vec<RecorderEvent>) {
+        let Some(ending) = self.ending.take() else {
+            return;
+        };
         // Any event still pending after the session was noise (wrong kind,
         // duplicate, or outside the managed directories).
         self.ignored_events += self.pending.len() as u32;
         self.pending.clear();
-        let Some(regular) = regular else {
-            return Err(RecorderError::MissingRegularArtifact);
-        };
-        Ok(CaptureArtifacts {
+        let artifacts = ending.regular.map(|regular| CaptureArtifacts {
             replay,
             regular,
-            requested_replay_ms: active.requested_replay_ms,
-            regular_started_at_ms: active.regular_started_at_ms,
+            requested_replay_ms: ending.active.requested_replay_ms,
+            regular_started_at_ms: ending.active.regular_started_at_ms,
             regular_stopped_at_ms: now_wall_ms(),
-        })
-    }
-
-    /// Stop the active session and hand its artifacts to the coordinator for
-    /// cleanup. Recorder never unlinks them itself.
-    pub fn cancel(&mut self, id: &RecordingId) -> Result<CaptureArtifacts, RecorderError> {
-        self.end(id)
+        });
+        events.push(RecorderEvent::CaptureEnded { artifacts });
     }
 
     /// WR-002's token contract: stop the child, invalidate the token only
@@ -550,6 +646,19 @@ impl Recorder {
                 Ok(Some(status)) => {
                     self.child = None;
                     self.active = None;
+                    // A capture waiting to be written will never be: nothing
+                    // is left to write it. Expire both waits so
+                    // `poll_pending_end` resolves in this same batch, instead
+                    // of holding the coordinator's ending state — and the
+                    // recovery actions it blocks — against a dead child. The
+                    // replay deadline matters too: a child that wrote the
+                    // regular event and then died would otherwise keep the end
+                    // open for the rest of its pre-roll wait.
+                    if let Some(ending) = self.ending.as_mut() {
+                        let now = Instant::now();
+                        ending.regular_deadline = now;
+                        ending.active.replay_deadline = now;
+                    }
                     events.push(RecorderEvent::ChildExited {
                         code: status.code(),
                     });
@@ -593,6 +702,7 @@ impl Recorder {
                 events.push(RecorderEvent::TargetTokenAvailable(token));
             }
         }
+        self.poll_pending_end(&mut events);
         if self.ignored_events > 0 {
             events.push(RecorderEvent::Diagnostic(format!(
                 "ignored {} unexpected GSR hook event(s)",
@@ -620,6 +730,7 @@ impl Recorder {
         self.desired_running = false;
         self.restart_at_ms = None;
         self.active = None;
+        self.ending = None;
         if let Some(mut child) = self.child.take() {
             process::terminate(&mut child, self.timeouts.exit_grace)?;
         }
@@ -677,37 +788,26 @@ impl Recorder {
         Ok(())
     }
 
-    fn wait_for_event(
-        &mut self,
-        config: &CaptureConfig,
-        kind: &str,
-        directory: &Path,
-        deadline: Instant,
-    ) -> Option<PathBuf> {
+    /// Consume the already-read hook event of `kind` written into `directory`.
+    /// Anything unconsumed of that kind came from somewhere else and is
+    /// rejected with the same bounded diagnostic the caller always used.
+    fn take_event(&mut self, kind: &str, directory: &Path) -> Option<PathBuf> {
         let canonical_dir = directory.canonicalize().ok()?;
-        loop {
-            let _ = self.read_new_events(config);
-            let matched = self.pending.iter().position(|event| {
-                event.kind == kind
-                    && event
-                        .path
-                        .parent()
-                        .and_then(|parent| parent.canonicalize().ok())
-                        .is_some_and(|parent| parent == canonical_dir)
-            });
-            if let Some(index) = matched {
-                return Some(self.pending.remove(index).path);
-            }
-            // Anything unconsumed of this kind was outside the expected
-            // directory: reject it with one bounded diagnostic.
-            let before = self.pending.len();
-            self.pending.retain(|event| event.kind != kind);
-            self.ignored_events += (before - self.pending.len()) as u32;
-            if Instant::now() >= deadline {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(25));
+        let matched = self.pending.iter().position(|event| {
+            event.kind == kind
+                && event
+                    .path
+                    .parent()
+                    .and_then(|parent| parent.canonicalize().ok())
+                    .is_some_and(|parent| parent == canonical_dir)
+        });
+        if let Some(index) = matched {
+            return Some(self.pending.remove(index).path);
         }
+        let before = self.pending.len();
+        self.pending.retain(|event| event.kind != kind);
+        self.ignored_events += (before - self.pending.len()) as u32;
+        None
     }
 }
 
@@ -967,6 +1067,19 @@ mod tests {
         fs::write(path, b"media").unwrap();
     }
 
+    /// Drive a requested end to its bounded conclusion, the way shutdown does,
+    /// and return whatever artifacts it produced.
+    fn end_artifacts(recorder: &mut Recorder) -> Option<CaptureArtifacts> {
+        recorder
+            .finish_end_blocking(Instant::now() + Duration::from_secs(5))
+            .into_iter()
+            .find_map(|event| match event {
+                RecorderEvent::CaptureEnded { artifacts } => Some(artifacts),
+                _ => None,
+            })
+            .expect("a requested end always resolves")
+    }
+
     #[test]
     fn argv_matches_baseline_and_preserves_awkward_paths() {
         let mut config = test_config("argv");
@@ -1051,7 +1164,7 @@ mod tests {
         ));
         // Ending the wrong ID is rejected and the session stays live.
         assert!(matches!(
-            recorder.end(&RecordingId::new()),
+            recorder.request_end(&RecordingId::new()),
             Err(RecorderError::WrongId)
         ));
 
@@ -1066,7 +1179,10 @@ mod tests {
         append_event(&config, "replay", &replay);
         append_event(&config, "regular", &regular);
 
-        let artifacts = recorder.end(&id).unwrap();
+        recorder.request_end(&id).unwrap();
+        assert!(recorder.is_ending());
+        let artifacts = end_artifacts(&mut recorder);
+        let artifacts = artifacts.expect("regular artifact");
         assert_eq!(artifacts.replay.as_deref(), Some(replay.as_path()));
         assert_eq!(artifacts.regular, regular);
         assert!(artifacts.regular_stopped_at_ms >= artifacts.regular_started_at_ms);
@@ -1098,7 +1214,8 @@ mod tests {
         let regular = Recorder::regular_dir(&config).join("Video_1.mkv");
         touch(&regular);
         append_event(&config, "regular", &regular);
-        let artifacts = recorder.end(&id).unwrap();
+        recorder.request_end(&id).unwrap();
+        let artifacts = end_artifacts(&mut recorder).expect("regular artifact");
         assert_eq!(artifacts.replay, None);
         assert_eq!(artifacts.regular, regular);
 
@@ -1111,10 +1228,11 @@ mod tests {
                 mode: RecordingMode::Test(Category::Raids),
             })
             .unwrap();
-        assert!(matches!(
-            recorder.end(&id),
-            Err(RecorderError::MissingRegularArtifact)
-        ));
+        recorder.request_end(&id).unwrap();
+        assert!(
+            end_artifacts(&mut recorder).is_none(),
+            "a session with no regular event resolves to no artifacts"
+        );
         // The failed session was cleared; a new begin works.
         recorder
             .begin(StartRequest {
@@ -1317,7 +1435,7 @@ mod tests {
             Err(RecorderError::NotArmed)
         ));
         assert!(matches!(
-            recorder.end(&RecordingId::new()),
+            recorder.request_end(&RecordingId::new()),
             Err(RecorderError::NotArmed)
         ));
     }

@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::activity::{ActivityAction, ActivityEngine, RecordingDraft};
 use crate::config::{Config, ConfigError, LoadedConfig, ValidationProblem, load_or_import};
@@ -38,7 +38,8 @@ use crate::logwatch::LogTailer;
 use crate::media_jobs::{MediaConfig, MediaControl, MediaEvent, MediaJob, MediaWorker};
 use crate::parser::{CombatEvent, ParseTimeContext, ParsedEvent, PlayerObservationKind};
 use crate::recorder::{
-    CaptureConfig, Recorder, RecorderError, RecorderEvent, RecordingMode, StartRequest, Timeouts,
+    CaptureArtifacts, CaptureConfig, Recorder, RecorderError, RecorderEvent, RecordingMode,
+    StartRequest, Timeouts,
 };
 use crate::storage::{EntryUpdate, LibraryIndex, Storage, now_unix_ms};
 
@@ -57,6 +58,11 @@ const COMMAND_BATCH: usize = 16;
 const MAX_PROBLEMS: usize = 8;
 /// Keep queued transcodes finite while preserving the one-worker design.
 const MAX_MEDIA_QUEUE: usize = 16;
+
+/// How long quitting waits for gpu-screen-recorder to finish writing the
+/// capture it was asked to stop. Long enough for a normal flush, short enough
+/// that closing the window never looks hung.
+const QUIT_END_GRACE: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -228,18 +234,22 @@ impl Setup {
     }
 }
 
-/// Start the coordinator and its media worker.
-pub fn start(setup: Setup) -> CoordinatorHandle {
+/// Start the coordinator and its media worker. `wake` runs whenever a new
+/// snapshot or the stopped signal has been queued, so the shell can react
+/// immediately instead of waiting out its next poll. It is called from the
+/// coordinator thread and must be cheap and nonblocking.
+pub fn start(setup: Setup, wake: Box<dyn Fn() + Send>) -> CoordinatorHandle {
     let (commands_tx, commands_rx) = mpsc::sync_channel(64);
     let (snapshot_tx, snapshots) = mpsc::sync_channel(1);
     let (stopped_tx, stopped) = mpsc::sync_channel(1);
     let join = std::thread::Builder::new()
         .name("coordinator".to_owned())
         .spawn(move || {
-            let mut coordinator = Coordinator::new(setup, commands_rx, snapshot_tx);
+            let mut coordinator = Coordinator::new(setup, commands_rx, snapshot_tx, wake);
             coordinator.startup();
             while coordinator.tick() {}
             let _ = stopped_tx.try_send(());
+            coordinator.wake();
         })
         .expect("spawn coordinator thread");
     CoordinatorHandle {
@@ -265,6 +275,23 @@ struct ActiveRecording {
     stop_at_ms: Option<i64>,
 }
 
+/// A capture whose stop was requested and whose artifacts have not arrived.
+/// `Finalize` carries the draft the media worker needs; `Discard` only waits
+/// so the artifacts can be swept instead of kept.
+enum EndingCapture {
+    Finalize(Box<RecordingDraft>),
+    Discard,
+}
+
+/// An activity held back because GSR was still writing the previous capture.
+/// `finished` is set when the activity also ended inside that window: the
+/// capture still has to start, because the replay buffer holds it, and then
+/// stop again after whatever overrun is left.
+struct DeferredBegin {
+    draft: Box<RecordingDraft>,
+    finished: bool,
+}
+
 pub struct Coordinator {
     setup: Setup,
     config: Config,
@@ -277,6 +304,10 @@ pub struct Coordinator {
     last_event: HashMap<GameFlavor, (i64, i64)>,
     index: LibraryIndex,
     active: Option<ActiveRecording>,
+    /// Set between the stop request and its `CaptureEnded`.
+    ending: Option<EndingCapture>,
+    /// An activity that began while the previous capture was still flushing.
+    deferred_begin: Option<DeferredBegin>,
     /// Injected test end event, released once its wall-clock deadline passes.
     pending_test_end: Option<(i64, ParsedEvent)>,
 
@@ -299,6 +330,8 @@ pub struct Coordinator {
 
     commands: Receiver<Command>,
     snapshot_tx: SyncSender<Arc<AppSnapshot>>,
+    /// Nudges the shell's main loop after a snapshot is queued.
+    wake: Box<dyn Fn() + Send>,
     pending_snapshot: Option<Arc<AppSnapshot>>,
     dirty: bool,
     stopping: bool,
@@ -309,6 +342,7 @@ impl Coordinator {
         setup: Setup,
         commands: Receiver<Command>,
         snapshot_tx: SyncSender<Arc<AppSnapshot>>,
+        wake: Box<dyn Fn() + Send>,
     ) -> Self {
         let loaded = load_or_import(&setup.config_path, &setup.legacy_config_path);
         let (config, mut problems) = match loaded {
@@ -360,6 +394,8 @@ impl Coordinator {
             last_event: HashMap::new(),
             index: LibraryIndex::default(),
             active: None,
+            ending: None,
+            deferred_begin: None,
             pending_test_end: None,
             media_jobs,
             media_events_tx: events_tx,
@@ -378,6 +414,7 @@ impl Coordinator {
             protected_over_limit: false,
             commands,
             snapshot_tx,
+            wake,
             pending_snapshot: None,
             dirty: true,
             stopping: false,
@@ -410,14 +447,20 @@ impl Coordinator {
             );
         }
         self.rescan();
+        self.enforce_limit();
+        self.dirty = true;
+        // Show the library before arming: spawning gpu-screen-recorder waits
+        // out a stability check, and there is no reason for the window to sit
+        // empty through it.
+        self.publish();
+
         let tailers_ready = self.open_tailers();
         if self.setup_problems.is_empty() && tailers_ready {
             self.arm();
         }
-        self.enforce_limit();
         self.dirty = true;
-        // Make the scanned library and armed recorder available before the
-        // optional one-time historical-log pass reads large source files.
+        // Make the armed recorder available before the optional one-time
+        // historical-log pass reads large source files.
         self.publish();
 
         let retail_logs: Vec<PathBuf> = enabled_log_sources(&self.config)
@@ -544,10 +587,17 @@ impl Coordinator {
         }
     }
 
+    /// True from the moment a capture starts until its artifacts are in hand.
+    /// Anything that stops, replaces, or reconfigures gpu-screen-recorder has
+    /// to wait: the child is still writing the previous recording.
+    fn capture_in_flight(&self) -> bool {
+        self.active.is_some() || self.ending.is_some()
+    }
+
     fn arm(&mut self) {
-        if self.active.is_some() {
+        if self.capture_in_flight() {
             self.push_problem(
-                "Screen capture cannot be rearmed while a recording is active.",
+                "Screen capture cannot be rearmed while a recording is being captured or saved.",
                 None,
                 Some(RecoveryAction::Retry),
             );
@@ -566,9 +616,9 @@ impl Coordinator {
     }
 
     fn disarm(&mut self) {
-        if self.active.is_some() {
+        if self.capture_in_flight() {
             self.push_problem(
-                "Screen capture cannot be disarmed while a recording is active.",
+                "Screen capture cannot be disarmed while a recording is being captured or saved.",
                 None,
                 Some(RecoveryAction::Retry),
             );
@@ -581,9 +631,9 @@ impl Coordinator {
     }
 
     fn reselect_target(&mut self) {
-        if self.active.is_some() {
+        if self.capture_in_flight() {
             self.push_problem(
-                "The capture target cannot change while a recording is active.",
+                "The capture target cannot change while a recording is being captured or saved.",
                 None,
                 Some(RecoveryAction::Retry),
             );
@@ -623,6 +673,7 @@ impl Coordinator {
         for event in self.recorder.poll(now_unix_ms()) {
             match event {
                 RecorderEvent::TargetTokenAvailable(token) => self.store_token(token),
+                RecorderEvent::CaptureEnded { artifacts } => self.capture_ended(artifacts),
                 RecorderEvent::RestartFailed { message } => {
                     self.armed = false;
                     self.push_problem(
@@ -733,6 +784,17 @@ impl Coordinator {
                 let Some(draft) = self.engine.take_finished(&id) else {
                     return;
                 };
+                // The activity both began and ended while the previous capture
+                // was flushing. The replay buffer still holds it, so keep the
+                // authoritative finished draft and let `capture_ended` start
+                // and immediately stop its capture.
+                if let Some(deferred) = self.deferred_begin.as_mut()
+                    && deferred.draft.id == id
+                {
+                    *deferred.draft = draft;
+                    deferred.finished = true;
+                    return;
+                }
                 let Some(active) = self.active.as_mut() else {
                     return;
                 };
@@ -745,6 +807,16 @@ impl Coordinator {
             }
             ActivityAction::Discard { id, reason } => {
                 let _ = self.engine.take_finished(&id);
+                if self
+                    .deferred_begin
+                    .as_ref()
+                    .is_some_and(|deferred| deferred.draft.id == id)
+                {
+                    // Never captured, nothing written: just forget it.
+                    self.deferred_begin = None;
+                    tracing::info!(?reason, "discarding deferred recording");
+                    return;
+                }
                 if self
                     .active
                     .as_ref()
@@ -761,6 +833,20 @@ impl Coordinator {
     fn begin(&mut self, draft: RecordingDraft, detected_at_ms: i64) {
         if self.active.is_some() {
             self.drop_activity(&draft.flavor);
+            return;
+        }
+        // GSR is still writing the previous capture. Hold the draft instead of
+        // dropping the activity; the replay buffer keeps filling, so the
+        // lead-in is recomputed from the real start when the capture begins.
+        if self.ending.is_some() {
+            if self.deferred_begin.is_some() {
+                self.drop_activity(&draft.flavor);
+                return;
+            }
+            self.deferred_begin = Some(DeferredBegin {
+                draft: Box::new(draft),
+                finished: false,
+            });
             return;
         }
         let capacity_ms = u64::from(self.config.capture.replay_buffer_seconds) * 1_000;
@@ -867,7 +953,7 @@ impl Coordinator {
     // -----------------------------------------------------------------------
 
     fn start_manual(&mut self) {
-        if self.active.is_some() || !self.armed || !self.config.manual.enabled {
+        if self.capture_in_flight() || !self.armed || !self.config.manual.enabled {
             self.push_problem(
                 "A manual recording could not be started.",
                 None,
@@ -912,7 +998,7 @@ impl Coordinator {
     /// Inject the minimum events for the chosen category, then release the end
     /// event once the test duration has elapsed.
     fn run_test(&mut self, category: &Category) {
-        if self.active.is_some() || self.pending_test_end.is_some() || !self.armed {
+        if self.capture_in_flight() || self.pending_test_end.is_some() || !self.armed {
             self.push_problem(
                 "A test recording could not be started.",
                 None,
@@ -966,34 +1052,16 @@ impl Coordinator {
         }
     }
 
+    /// Ask the recorder to stop and remember what to do with the artifacts.
+    /// `CaptureEnded` finishes the job; the coordinator keeps serving commands
+    /// and snapshots while GSR flushes.
     fn end_capture(&mut self) {
         let Some(active) = self.active.take() else {
             return;
         };
         self.dirty = true;
-        match self.recorder.end(&active.draft.id) {
-            Ok(artifacts) => {
-                if self.finalize_queue.len() >= MAX_MEDIA_QUEUE {
-                    let report = self.storage.sweep_orphans();
-                    if !report.failures.is_empty() {
-                        tracing::warn!(failures = ?report.failures, "finalization queue overflow sweep failed");
-                    }
-                    self.push_problem(
-                        "The recording could not be queued for saving.",
-                        None,
-                        Some(RecoveryAction::Retry),
-                    );
-                    return;
-                }
-                self.finalize_queue.push_back(MediaJob::FinalizeRecording {
-                    draft: Box::new(active.draft),
-                    artifacts,
-                    facts: self.media_facts(),
-                });
-                if self.maintenance_busy {
-                    let _ = self.media_control.try_send(MediaControl::CancelMaintenance);
-                }
-            }
+        match self.recorder.request_end(&active.draft.id) {
+            Ok(()) => self.ending = Some(EndingCapture::Finalize(Box::new(active.draft))),
             Err(error) => {
                 self.push_recorder_problem(&error);
                 let report = self.storage.sweep_orphans();
@@ -1004,14 +1072,91 @@ impl Coordinator {
 
     /// Stop capture without producing an entry and quarantine what GSR wrote.
     fn cancel_capture(&mut self, id: &RecordingId) {
-        match self.recorder.cancel(id) {
-            Ok(_) => {
+        self.dirty = true;
+        match self.recorder.request_end(id) {
+            Ok(()) => self.ending = Some(EndingCapture::Discard),
+            Err(error) => self.push_recorder_problem(&error),
+        }
+    }
+
+    /// The recorder resolved a requested end. Missing artifacts mean GSR never
+    /// wrote the regular recording within its bounded wait.
+    fn capture_ended(&mut self, artifacts: Option<CaptureArtifacts>) {
+        self.dirty = true;
+        match (self.ending.take(), artifacts) {
+            (Some(EndingCapture::Finalize(draft)), Some(artifacts)) => {
+                self.queue_finalization(draft, artifacts);
+            }
+            (Some(EndingCapture::Finalize(_)), None) => {
+                self.push_recorder_problem(&RecorderError::MissingRegularArtifact);
+                let report = self.storage.sweep_orphans();
+                tracing::info!(quarantined = report.quarantined.len(), "capture end failed");
+            }
+            (Some(EndingCapture::Discard), _) => {
                 let report = self.storage.sweep_orphans();
                 if !report.failures.is_empty() {
                     tracing::warn!(failures = ?report.failures, "discard sweep failed");
                 }
             }
-            Err(error) => self.push_recorder_problem(&error),
+            (None, _) => {}
+        }
+        // Quitting drains this same path and the recorder is killed right
+        // after, so a capture started here would be one that nothing ever ends
+        // or saves; hold the draft rather than losing it to a shutdown that may
+        // still be cancelled by a later tick.
+        if self.stopping {
+            return;
+        }
+        let Some(deferred) = self.deferred_begin.take() else {
+            return;
+        };
+        // A disarmed recorder has no child left to start the capture — that is
+        // how a mid-flush GSR crash arrives here — and `start_capture` would
+        // stack a second, baffling problem on top of the crash the user was
+        // already told about. Drop the activity instead: nothing was written.
+        if !self.armed {
+            tracing::info!("dropping deferred recording: capture is no longer armed");
+            return;
+        }
+        let overrun_ms = deferred.draft.overrun_ms as i64;
+        let ended_at_ms = deferred.draft.ended_at_ms;
+        // The activity started while the previous capture was flushing; treat
+        // now as the detection time so the requested pre-roll still reaches
+        // back to the real activity start.
+        self.begin(*deferred.draft, now_unix_ms());
+        // It already ended too. The capture had to start anyway so the replay
+        // buffer is written; stop it on the same overrun the live path would
+        // have used, anchored to when the activity actually ended rather than
+        // to whenever the previous flush finished. A deadline already in the
+        // past simply stops on the next tick.
+        if deferred.finished
+            && let Some(active) = self.active.as_mut()
+        {
+            let anchor_ms = ended_at_ms.unwrap_or_else(now_unix_ms);
+            active.stop_at_ms = Some(anchor_ms + overrun_ms);
+        }
+    }
+
+    fn queue_finalization(&mut self, draft: Box<RecordingDraft>, artifacts: CaptureArtifacts) {
+        if self.finalize_queue.len() >= MAX_MEDIA_QUEUE {
+            let report = self.storage.sweep_orphans();
+            if !report.failures.is_empty() {
+                tracing::warn!(failures = ?report.failures, "finalization queue overflow sweep failed");
+            }
+            self.push_problem(
+                "The recording could not be queued for saving.",
+                None,
+                Some(RecoveryAction::Retry),
+            );
+            return;
+        }
+        self.finalize_queue.push_back(MediaJob::FinalizeRecording {
+            draft,
+            artifacts,
+            facts: self.media_facts(),
+        });
+        if self.maintenance_busy {
+            let _ = self.media_control.try_send(MediaControl::CancelMaintenance);
         }
     }
 
@@ -1030,16 +1175,21 @@ impl Coordinator {
     // -----------------------------------------------------------------------
 
     /// Finalization is always chosen before queued user work, and only one job
-    /// is in flight at a time.
+    /// is in flight at a time. A capture that has been asked to stop counts as
+    /// queued finalization: its artifacts are moments away, and letting a clip
+    /// jump the queue in that window would reorder the library.
     fn dispatch_media(&mut self) {
         if self.media_busy.is_some() || self.maintenance_busy {
             return;
         }
-        let Some(job) = self
-            .finalize_queue
-            .pop_front()
-            .or_else(|| self.user_queue.pop_front())
-        else {
+        let finalization_pending = matches!(self.ending, Some(EndingCapture::Finalize(_)));
+        let Some(job) = self.finalize_queue.pop_front().or_else(|| {
+            if finalization_pending {
+                None
+            } else {
+                self.user_queue.pop_front()
+            }
+        }) else {
             return;
         };
         let kind = job.kind();
@@ -1167,7 +1317,9 @@ impl Coordinator {
                 ),
             }
         }
-        self.refresh_correlations();
+        // Correlation keys on activity hash, start and category; a tag or
+        // protect flag cannot move an entry between groups, so there is
+        // nothing to recompute.
         self.enforce_limit();
     }
 
@@ -1184,7 +1336,6 @@ impl Coordinator {
             }
         }
         let result = self.storage.delete(&entries);
-        Arc::make_mut(&mut self.index.entries).retain(|entry| !result.deleted.contains(&entry.id));
         for (id, error) in &result.failures {
             let title = self
                 .entry(id)
@@ -1195,12 +1346,10 @@ impl Coordinator {
                 Some(RecoveryAction::Retry),
             );
         }
-        if result.failures.is_empty() {
-            self.refresh_correlations();
-        } else {
-            self.retain_valid_correlations();
-        }
-        self.recount();
+        // Files went away: reconcile entries, correlations and usage with the
+        // directory. Rebuilding the groups by hand loses any activity whose
+        // primary was deleted while one of its viewpoints survived a failure.
+        self.rescan();
     }
 
     fn rescan(&mut self) {
@@ -1233,29 +1382,11 @@ impl Coordinator {
             .storage
             .enforce_limit(self.config.storage.limit, &self.index.entries);
         self.protected_over_limit = result.protected_over_limit;
-        if !result.evicted.is_empty() {
-            Arc::make_mut(&mut self.index.entries)
-                .retain(|entry| !result.evicted.contains(&entry.id));
-            self.refresh_correlations();
+        if result.evicted.is_empty() && !result.partially_deleted {
+            self.recount();
+        } else {
+            self.rescan();
         }
-        self.recount();
-    }
-
-    fn refresh_correlations(&mut self) {
-        self.index.correlations = self.storage.scan().correlations;
-    }
-
-    fn retain_valid_correlations(&mut self) {
-        let ids: std::collections::HashSet<RecordingId> = self
-            .index
-            .entries
-            .iter()
-            .map(|entry| entry.id.clone())
-            .collect();
-        Arc::make_mut(&mut self.index.correlations).retain(|correlation| {
-            ids.contains(&correlation.primary_id)
-                && correlation.local_pov_ids.iter().all(|id| ids.contains(id))
-        });
     }
 
     // -----------------------------------------------------------------------
@@ -1281,21 +1412,34 @@ impl Coordinator {
         Ok(())
     }
 
-    /// UI-only fields: save atomically, reconfigure nothing.
+    /// UI-only fields: adopt, show, then save atomically; reconfigure nothing.
+    ///
+    /// Persisting first would put two `fsync`s in front of every category
+    /// click, and on a disk busy with the replay buffer that is exactly when
+    /// they are slowest. Nothing rereads the file at runtime, so the snapshot
+    /// can go out first; a failed write rolls the preference back so the UI
+    /// never keeps showing something the next launch will not have.
     fn patch_config(&mut self, draft: Config) {
-        if let Err(error) = draft.save(&self.setup.config_path) {
+        let previous = std::mem::replace(&mut self.config, draft);
+        self.dirty = true;
+        self.publish();
+        if let Err(error) = self.config.save(&self.setup.config_path) {
+            // The rename may already have made the new file visible; only the
+            // directory sync failed. Rolling back then would leave the next
+            // launch loading a value this one just told the user it dropped.
+            if !error.is_committed() {
+                self.config = previous;
+            }
             self.push_problem(
                 "Settings could not be saved.",
                 Some(error.to_string()),
                 Some(RecoveryAction::Retry),
             );
-            return;
         }
-        self.config = draft;
     }
 
     fn save_config(&mut self, draft: Config) {
-        if self.active.is_some()
+        if self.capture_in_flight()
             || self.media_busy.is_some()
             || !self.finalize_queue.is_empty()
             || !self.user_queue.is_empty()
@@ -1458,7 +1602,15 @@ impl Coordinator {
                 },
             };
         }
-        if self.media_busy == Some(WorkKind::Finalize) {
+        // A stop was requested and GSR is still writing: the recording is not
+        // over from the user's side, so do not fall back to Ready. A discarded
+        // capture is not being saved, so say what is actually happening.
+        if matches!(self.ending, Some(EndingCapture::Discard)) {
+            return RecorderStatus::Finalizing {
+                title: "Discarding recording".to_owned(),
+            };
+        }
+        if self.ending.is_some() || self.media_busy == Some(WorkKind::Finalize) {
             return RecorderStatus::Finalizing {
                 title: "Saving recording".to_owned(),
             };
@@ -1513,9 +1665,16 @@ impl Coordinator {
         } else {
             self.pending_snapshot.take().expect("checked above")
         };
-        if let Err(TrySendError::Full(unsent)) = self.snapshot_tx.try_send(snapshot) {
-            self.pending_snapshot = Some(unsent);
+        match self.snapshot_tx.try_send(snapshot) {
+            Ok(()) => self.wake(),
+            Err(TrySendError::Full(unsent)) => self.pending_snapshot = Some(unsent),
+            Err(TrySendError::Disconnected(_)) => {}
         }
+    }
+
+    /// Nudge the shell's main loop. Cheap and nonblocking by contract.
+    pub fn wake(&self) {
+        (self.wake)();
     }
 
     // -----------------------------------------------------------------------
@@ -1534,6 +1693,19 @@ impl Coordinator {
                 active.stop_at_ms = Some(now_unix_ms());
             }
             self.check_deadlines();
+        }
+        // Quitting is the one place that must wait: `recorder.shutdown` kills
+        // GSR, so the requested end has to produce its artifacts first or the
+        // recording is lost. Same bounded deadlines the poll path uses.
+        if self.recorder.is_ending() {
+            for event in self
+                .recorder
+                .finish_end_blocking(Instant::now() + QUIT_END_GRACE)
+            {
+                if let RecorderEvent::CaptureEnded { artifacts } = event {
+                    self.capture_ended(artifacts);
+                }
+            }
         }
         if let Err(error) = self.recorder.shutdown() {
             tracing::warn!(?error, "recorder shutdown failed");

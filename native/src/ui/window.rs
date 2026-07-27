@@ -8,6 +8,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gtk4::prelude::*;
@@ -139,7 +140,7 @@ pub struct Shell {
     player: Rc<Player>,
     manual_bar: ManualBar,
     settings: Rc<RefCell<Option<Rc<Settings>>>>,
-    latest_snapshot: Rc<RefCell<Option<AppSnapshot>>>,
+    latest_snapshot: Rc<RefCell<Option<Arc<AppSnapshot>>>>,
     close_to_tray: Rc<Cell<bool>>,
     minimize_to_tray: Rc<Cell<bool>>,
     tray_available: Rc<Cell<bool>>,
@@ -183,7 +184,7 @@ impl Shell {
 
         let busy_banner = adw::Banner::new("The app is busy — try again in a moment.");
         let settings_cell: Rc<RefCell<Option<Rc<Settings>>>> = Rc::new(RefCell::new(None));
-        let latest_snapshot: Rc<RefCell<Option<AppSnapshot>>> = Rc::new(RefCell::new(None));
+        let latest_snapshot: Rc<RefCell<Option<Arc<AppSnapshot>>>> = Rc::new(RefCell::new(None));
         let tray_available = Rc::new(Cell::new(
             tray.as_ref().is_some_and(|tray| tray.is_available()),
         ));
@@ -427,7 +428,7 @@ impl Shell {
         }
     }
 
-    pub fn apply_snapshot(&self, snapshot: &AppSnapshot) {
+    pub fn apply_snapshot(&self, snapshot: &Arc<AppSnapshot>) {
         self.close_to_tray
             .set(snapshot.config.interface.close_to_tray);
         self.minimize_to_tray
@@ -445,7 +446,7 @@ impl Shell {
         self.library.apply(snapshot);
         self.manual_bar.apply(snapshot, now_unix_ms());
 
-        *self.latest_snapshot.borrow_mut() = Some(snapshot.clone());
+        *self.latest_snapshot.borrow_mut() = Some(Arc::clone(snapshot));
         if let Some(settings) = self.settings.borrow().as_ref() {
             settings.apply_snapshot(snapshot);
         }
@@ -528,7 +529,7 @@ fn make_sink(
     data_dir: &Path,
     config_dir: &Path,
     settings_cell: &Rc<RefCell<Option<Rc<Settings>>>>,
-    latest_snapshot: &Rc<RefCell<Option<AppSnapshot>>>,
+    latest_snapshot: &Rc<RefCell<Option<Arc<AppSnapshot>>>>,
     tray_available: &Rc<Cell<bool>>,
 ) -> ActionSink {
     let window = window.clone();
@@ -628,7 +629,7 @@ fn open_settings(
     window: &adw::ApplicationWindow,
     sink: ActionSink,
     settings_cell: &Rc<RefCell<Option<Rc<Settings>>>>,
-    latest_snapshot: &Rc<RefCell<Option<AppSnapshot>>>,
+    latest_snapshot: &Rc<RefCell<Option<Arc<AppSnapshot>>>>,
     tray_available: bool,
 ) {
     if let Some(settings) = settings_cell.borrow().as_ref() {

@@ -26,6 +26,8 @@ pub mod window;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
@@ -55,6 +57,31 @@ pub struct ShellOptions {
 /// Returns `false` when the command channel was full (caller shows one Busy
 /// problem and may disable the initiating widget briefly).
 pub type ActionSink = Rc<dyn Fn(ShellAction) -> bool>;
+
+thread_local! {
+    /// The shell's receiver drain, reachable from the coordinator's wake
+    /// callback. GLib only accepts `Send` closures from another thread, and
+    /// the drain owns `Rc`s, so the closure looks the pump up here after GLib
+    /// has already hopped it onto the main thread.
+    static PUMP: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
+}
+
+/// Run the shell's drain on the main thread. Safe to call from any thread and
+/// harmless before the pump is installed or after the loop has finished.
+/// `pending` collapses a burst of wakes into one queued idle.
+pub fn wake_shell(pending: &Arc<AtomicBool>) {
+    if pending.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let pending = Arc::clone(pending);
+    gtk4::glib::idle_add_once(move || {
+        pending.store(false, Ordering::Release);
+        let pump = PUMP.with(|pump| pump.borrow().clone());
+        if let Some(pump) = pump {
+            pump();
+        }
+    });
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShellAction {
@@ -185,9 +212,12 @@ pub fn run(
         });
     }
 
-    // The single pump: drains tray events, the newest snapshot, and the
-    // coordinator-stopped signal. Installed once before the loop starts and
-    // removed with the application.
+    // The single drain: tray events, the newest snapshot, and the
+    // coordinator-stopped signal. The coordinator and the tray call
+    // `wake_shell` whenever they queue something, so this normally runs within
+    // one main-loop iteration of the event; the slow timer below is only a
+    // safety net for state nobody signals, such as the tray appearing or
+    // vanishing on the session bus.
     {
         let app = application.clone();
         let shutdown_sent = Cell::new(false);
@@ -195,7 +225,10 @@ pub fn run(
         // Last tooltip pushed to the tray, so we only pay the cross-thread
         // `update` round-trip on a real change instead of every snapshot.
         let last_tray_title = RefCell::new(String::new());
-        gtk4::glib::timeout_add_local(Duration::from_millis(33), move || {
+        // Last availability fanned out to the widgets; `None` guarantees the
+        // first pass propagates, including "no tray at all".
+        let last_tray_available = Cell::new(None::<bool>);
+        let pump: Rc<dyn Fn()> = Rc::new(move || {
             while let Ok(TrayEvent::Open) = tray_events.try_recv() {
                 if let Some(shell) = shell.borrow().as_ref() {
                     shell.present();
@@ -205,8 +238,11 @@ pub fn run(
             if quit_requested && !shutdown_sent.get() {
                 shutdown_sent.set(coordinator.borrow().send(Command::Shutdown));
             }
-            if let Ok(snapshot) = coordinator.borrow().snapshots.try_recv()
-                && let Some(shell) = shell.borrow().as_ref()
+            // Borrow the shell first: a snapshot taken before the window
+            // exists would be dropped, and the coordinator only republishes
+            // when its state changes again.
+            if let Some(shell) = shell.borrow().as_ref()
+                && let Ok(snapshot) = coordinator.borrow().snapshots.try_recv()
             {
                 shell.apply_snapshot(&snapshot);
                 if let Some(tray) = &tray {
@@ -217,15 +253,26 @@ pub fn run(
                     }
                 }
             }
-            if let Some(shell) = shell.borrow().as_ref()
-                && let Some(tray) = &tray
+            // A missing tray service is itself an availability the widgets
+            // need, so this reads `false` rather than skipping the fan-out.
+            // The cache is only committed once the widgets actually have it:
+            // recording a transition the shell was too early to receive would
+            // suppress it until availability happened to change again.
+            let available = tray.as_ref().is_some_and(|tray| tray.is_available());
+            if last_tray_available.get() != Some(available)
+                && let Some(shell) = shell.borrow().as_ref()
             {
-                shell.set_tray_available(tray.is_available());
+                shell.set_tray_available(available);
+                last_tray_available.set(Some(available));
             }
             if !coordinator_stopped.get() && coordinator.borrow().stopped.try_recv().is_ok() {
                 coordinator_stopped.set(true);
                 app.quit();
             }
+        });
+        PUMP.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&pump)));
+        gtk4::glib::timeout_add_local(Duration::from_millis(250), move || {
+            pump();
             gtk4::glib::ControlFlow::Continue
         });
     }

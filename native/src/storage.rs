@@ -101,6 +101,10 @@ pub struct EvictionResult {
     pub evicted: Vec<RecordingId>,
     pub freed_bytes: u64,
     pub remaining_bytes: u64,
+    /// A deletion removed the media but could not remove its sidecar, so the
+    /// library no longer matches the directory even though nothing was fully
+    /// evicted. The caller has to rescan.
+    pub partially_deleted: bool,
     /// Protected content alone exceeds a positive limit; nothing was deleted
     /// for it.
     pub protected_over_limit: bool,
@@ -687,10 +691,26 @@ impl Storage {
             if entry.protected {
                 continue;
             }
-            if self.delete_one(entry).is_ok() {
-                used = used.saturating_sub(size);
-                result.freed_bytes += size;
-                result.evicted.push(entry.id.clone());
+            match self.delete_one(entry) {
+                Ok(()) => {
+                    used = used.saturating_sub(size);
+                    result.freed_bytes += size;
+                    result.evicted.push(entry.id.clone());
+                }
+                Err(error) => {
+                    // `delete_one` unlinks the media before the sidecar and
+                    // tags which stage failed. Only a sidecar failure means
+                    // the media is actually gone; a media failure — already
+                    // missing, not owned, a symlink — freed nothing, and
+                    // probing `exists()` cannot tell those apart. Credit the
+                    // space for the real case rather than evicting more, and
+                    // make the caller rescan.
+                    if error.starts_with("sidecar:") {
+                        used = used.saturating_sub(size);
+                        result.freed_bytes += size;
+                        result.partially_deleted = true;
+                    }
+                }
             }
         }
 

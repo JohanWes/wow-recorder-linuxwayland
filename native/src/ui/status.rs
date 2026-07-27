@@ -5,7 +5,7 @@
 //! problem list. WR-000 proves the Linux recorder never emits a microphone
 //! state, so no microphone badge exists here.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4::prelude::*;
@@ -259,6 +259,12 @@ pub struct StatusCard {
     sink: ActionSink,
     elapsed_anchor: Rc<Cell<Option<i64>>>,
     timer_running: Rc<Cell<bool>>,
+    /// What the two rebuilt sections were last built from. Rebuilding them per
+    /// snapshot throws away GTK objects, relayouts the rail, and collapses any
+    /// problem row the user had expanded.
+    rendered_warnings: RefCell<Vec<String>>,
+    rendered_problems: RefCell<Vec<Problem>>,
+    rendered_tone: Cell<Option<Tone>>,
 }
 
 impl StatusCard {
@@ -363,25 +369,29 @@ impl StatusCard {
             sink,
             elapsed_anchor: Rc::new(Cell::new(None)),
             timer_running: Rc::new(Cell::new(false)),
+            rendered_warnings: RefCell::new(Vec::new()),
+            rendered_problems: RefCell::new(Vec::new()),
+            rendered_tone: Cell::new(None),
         }
     }
 
     pub fn apply(&self, snapshot: &AppSnapshot, now_unix_ms: i64) {
         let view = view(snapshot);
 
-        let classes = [
-            "tone-ready",
-            "tone-recording",
-            "tone-waiting",
-            "tone-overrunning",
-            "tone-finalizing",
-            "tone-invalid",
-            "tone-error",
-        ];
-        for class in classes {
-            self.light.remove_css_class(class);
+        if self.rendered_tone.replace(Some(view.tone)) != Some(view.tone) {
+            for class in [
+                "tone-ready",
+                "tone-recording",
+                "tone-waiting",
+                "tone-overrunning",
+                "tone-finalizing",
+                "tone-invalid",
+                "tone-error",
+            ] {
+                self.light.remove_css_class(class);
+            }
+            self.light.add_css_class(view.tone.css_class());
         }
-        self.light.add_css_class(view.tone.css_class());
 
         self.title.set_label(&view.title);
         self.detail.set_label(&view.detail);
@@ -398,32 +408,44 @@ impl StatusCard {
             self.elapsed.set_visible(false);
         }
 
-        while let Some(child) = self.warnings.first_child() {
-            self.warnings.remove(&child);
-        }
-        for warning in advanced_logging_warnings(snapshot) {
-            let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-            row.set_tooltip_text(Some(
-                "Enable advanced combat logging in-game (System → Network) or some stats will be missing.",
-            ));
-            let icon = gtk4::Image::from_icon_name("dialog-warning-symbolic");
-            icon.add_css_class("warning");
-            let label = gtk4::Label::new(Some(&warning));
-            label.set_xalign(0.0);
-            label.set_wrap(true);
-            label.add_css_class("caption");
-            label.add_css_class("dim-label");
-            row.append(&icon);
-            row.append(&label);
-            self.warnings.append(&row);
+        let warnings = advanced_logging_warnings(snapshot);
+        if *self.rendered_warnings.borrow() != warnings {
+            while let Some(child) = self.warnings.first_child() {
+                self.warnings.remove(&child);
+            }
+            for warning in &warnings {
+                let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+                row.set_tooltip_text(Some(
+                    "Enable advanced combat logging in-game (System → Network) or some stats will be missing.",
+                ));
+                let icon = gtk4::Image::from_icon_name("dialog-warning-symbolic");
+                icon.add_css_class("warning");
+                let label = gtk4::Label::new(Some(warning));
+                label.set_xalign(0.0);
+                label.set_wrap(true);
+                label.add_css_class("caption");
+                label.add_css_class("dim-label");
+                row.append(&icon);
+                row.append(&label);
+                self.warnings.append(&row);
+            }
+            *self.rendered_warnings.borrow_mut() = warnings;
         }
 
         self.apply_problems(&snapshot.problems);
     }
 
     /// The bounded recovered-problem list: one expandable row per problem
-    /// with its technical detail and one recovery action.
+    /// with its technical detail and one recovery action. Unchanged lists keep
+    /// their rows, so an expanded problem stays expanded.
     fn apply_problems(&self, problems: &[Problem]) {
+        if *self.rendered_problems.borrow() == problems {
+            return;
+        }
+        self.rendered_problems.borrow_mut().clear();
+        self.rendered_problems
+            .borrow_mut()
+            .extend_from_slice(problems);
         self.problems_expander.set_visible(!problems.is_empty());
         self.problems_expander
             .set_label(Some(&format!("Problems ({})", problems.len())));

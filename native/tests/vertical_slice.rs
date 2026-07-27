@@ -67,7 +67,8 @@ impl Harness {
     fn attach(root: PathBuf, library: PathBuf, capture_root: PathBuf, log_file: PathBuf) -> Self {
         let (commands, commands_rx) = mpsc::sync_channel(64);
         let (snapshot_tx, snapshots) = mpsc::sync_channel(1);
-        let mut coordinator = Coordinator::new(setup(&root), commands_rx, snapshot_tx);
+        let mut coordinator =
+            Coordinator::new(setup(&root), commands_rx, snapshot_tx, Box::new(|| {}));
         coordinator.startup();
         let mut harness = Self {
             root,
@@ -80,7 +81,14 @@ impl Harness {
             latest: Arc::new(empty_snapshot()),
             replay_index: 0,
         };
-        harness.pump(|snapshot| !matches!(snapshot.status, RecorderStatus::SetupRequired));
+        // Startup publishes the scanned library before it arms, so settle on
+        // the post-arm snapshot rather than the first one out.
+        harness.pump(|snapshot| {
+            !matches!(
+                snapshot.status,
+                RecorderStatus::SetupRequired | RecorderStatus::WaitingForWow
+            )
+        });
         harness
     }
 
@@ -165,7 +173,13 @@ fn setup(root: &Path) -> Setup {
         recorder_timeouts: Timeouts {
             arm_stability: Duration::from_millis(150),
             replay_event: Duration::from_millis(400),
-            regular_event: Duration::from_millis(400),
+            // Ends are asynchronous now, so this budget spans however long a
+            // test spends between the stop request and the fake hook's event —
+            // including `Config::save`'s two fsyncs. Keep it far enough above
+            // that work that a loaded filesystem cannot expire it: the failure
+            // mode is a dropped recording and a 20 s `pump` timeout, not a
+            // clear assertion. Only the missing-artifact test waits it out.
+            regular_event: Duration::from_secs(2),
             exit_grace: Duration::from_millis(500),
         },
         poll_interval: Duration::from_millis(5),
@@ -513,6 +527,40 @@ fn finalization_precedes_queued_user_jobs() {
     assert_eq!(order, vec![Category::Raids, Category::Clip]);
 }
 
+/// Ending a capture waits on gpu-screen-recorder flushing and muxing, which
+/// takes as long as it takes. The coordinator owns every piece of UI state, so
+/// it has to keep serving commands and publishing snapshots throughout.
+#[test]
+fn commands_are_served_while_a_capture_is_ending() {
+    let mut harness = Harness::new("ending");
+    harness.log(&raid_start(now_unix_ms() - 1_000));
+    harness.pump(|snapshot| snapshot.active.is_some());
+
+    // End the activity without the hook reporting any artifact yet.
+    harness.log(&[raid_end(now_unix_ms(), true)]);
+    harness.pump(|snapshot| snapshot.active.is_none());
+    assert!(
+        matches!(harness.latest.status, RecorderStatus::Finalizing { .. }),
+        "status {:?}",
+        harness.latest.status
+    );
+    assert!(harness.latest.entries.is_empty());
+
+    harness.send(Command::SetSelectedCategory {
+        category: Category::MythicPlus,
+    });
+    harness.pump(|snapshot| snapshot.config.interface.selected_category == Category::MythicPlus);
+    assert!(
+        harness.latest.entries.is_empty(),
+        "the capture must still be waiting on its artifacts"
+    );
+
+    // The artifacts finally land: the recording finalizes as usual.
+    harness.emit_artifacts(true);
+    harness.pump(|snapshot| !snapshot.entries.is_empty());
+    assert_eq!(harness.latest.entries[0].category, Category::Raids);
+}
+
 /// Without a replay artifact the recording still saves, and markers that fall
 /// before the media start are clipped away.
 #[test]
@@ -576,12 +624,18 @@ fn production_handle_starts_and_shuts_down() {
     fs::write(log_dir.join("WoWCombatLog.txt"), b"").unwrap();
     write_config(&root, &library, &capture_root, &log_dir);
 
-    let mut handle = start(setup(&root));
-    let snapshot = handle
-        .snapshots
-        .recv_timeout(STEP_TIMEOUT)
-        .expect("first snapshot");
-    assert_eq!(snapshot.status, RecorderStatus::Ready);
+    let mut handle = start(setup(&root), Box::new(|| {}));
+    let mut snapshot = handle.snapshots.recv_timeout(STEP_TIMEOUT);
+    while let Ok(current) = &snapshot {
+        if current.status == RecorderStatus::Ready {
+            break;
+        }
+        snapshot = handle.snapshots.recv_timeout(STEP_TIMEOUT);
+    }
+    assert_eq!(
+        snapshot.expect("armed snapshot").status,
+        RecorderStatus::Ready
+    );
     assert!(handle.send(Command::Disarm));
     handle.shutdown();
 }

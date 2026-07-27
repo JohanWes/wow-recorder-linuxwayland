@@ -620,6 +620,8 @@ pub struct Settings {
     input_ids: Rc<RefCell<Vec<String>>>,
     audio_group: adw::PreferencesGroup,
     advanced_box: gtk4::Box,
+    /// What `advanced_box` was last built from; see `StatusCard`.
+    rendered_warnings: RefCell<Vec<String>>,
     storage_group: adw::PreferencesGroup,
     protected_note: gtk4::Label,
     tray_note: gtk4::Label,
@@ -942,6 +944,7 @@ impl Settings {
             input_ids,
             audio_group,
             advanced_box,
+            rendered_warnings: RefCell::new(Vec::new()),
             storage_group,
             protected_note,
             tray_note,
@@ -1091,16 +1094,20 @@ impl Settings {
         self.protected_note
             .set_visible(snapshot.protected_over_limit);
 
-        while let Some(child) = self.advanced_box.first_child() {
-            self.advanced_box.remove(&child);
-        }
-        for warning in super::status::advanced_logging_warnings(snapshot) {
-            let label = gtk4::Label::new(Some(&warning));
-            label.set_wrap(true);
-            label.set_xalign(0.0);
-            label.add_css_class("warning");
-            label.add_css_class("caption");
-            self.advanced_box.append(&label);
+        let warnings = super::status::advanced_logging_warnings(snapshot);
+        if *self.rendered_warnings.borrow() != warnings {
+            while let Some(child) = self.advanced_box.first_child() {
+                self.advanced_box.remove(&child);
+            }
+            for warning in &warnings {
+                let label = gtk4::Label::new(Some(warning));
+                label.set_wrap(true);
+                label.set_xalign(0.0);
+                label.add_css_class("warning");
+                label.add_css_class("caption");
+                self.advanced_box.append(&label);
+            }
+            *self.rendered_warnings.borrow_mut() = warnings;
         }
 
         if let Some((sent, sent_at_ms)) = pending

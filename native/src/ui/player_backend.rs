@@ -3,6 +3,20 @@
 use clapper_gtk::prelude::AvExt;
 use gtk4::glib::prelude::Cast;
 
+/// How precisely a seek has to land, which decides how much decoding GStreamer
+/// does before it can present a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeekMode {
+    /// Nearest keyframe. No decode from the previous keyframe, which is what
+    /// lets the picture keep up with a dragged playhead.
+    Preview,
+    /// Clapper's default approximation: where the playhead comes to rest.
+    Settle,
+    /// Exact frame. Only worth its decode cost when the frame itself is the
+    /// point, as in stepping backwards.
+    Exact,
+}
+
 /// The concrete Clapper objects used by Warcraft Recorder's player UI.
 #[derive(Clone)]
 pub struct PlayerBackend {
@@ -44,8 +58,15 @@ impl PlayerBackend {
         self.player.pause();
     }
 
-    pub fn seek(&self, position_seconds: f64) {
-        self.player.seek(position_seconds);
+    pub fn seek(&self, position_seconds: f64, mode: SeekMode) {
+        self.player.seek_custom(
+            position_seconds,
+            match mode {
+                SeekMode::Preview => clapper::PlayerSeekMethod::Fast,
+                SeekMode::Settle => clapper::PlayerSeekMethod::Normal,
+                SeekMode::Exact => clapper::PlayerSeekMethod::Accurate,
+            },
+        );
     }
 
     pub fn set_volume(&self, volume: f64) {

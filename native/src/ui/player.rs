@@ -26,7 +26,7 @@ use warcraft_recorder::domain::{
 
 use super::library::Selection;
 use super::multipov;
-use super::player_backend::{PlayerBackend, VideoStreamToken};
+use super::player_backend::{PlayerBackend, SeekMode, VideoStreamToken};
 use super::timeline::{self, MarkerPrefs, Timeline};
 use super::{ActionSink, ShellAction, drawing};
 
@@ -96,9 +96,15 @@ struct Inner {
     fps: Cell<Option<u32>>,
     clip_mode: Cell<bool>,
 
-    /// Async seek: the newest requested target and whether one is in flight.
-    pending_seek: Cell<Option<f64>>,
+    /// Async seek: the newest requested target with the precision it needs,
+    /// and whether one is in flight.
+    pending_seek: Cell<Option<(f64, SeekMode)>>,
     seek_in_flight: Cell<bool>,
+    /// Bumped by every load and unload so timers armed for an earlier media
+    /// item cannot report on the current one.
+    load_generation: Cell<u64>,
+    /// Whole seconds and duration the time label was last rendered from.
+    time_label_state: Cell<Option<(u64, u64)>>,
     /// Guard: snapshot-driven widget updates must not dispatch commands.
     updating: Cell<bool>,
 }
@@ -272,6 +278,8 @@ impl Player {
             clip_mode: Cell::new(false),
             pending_seek: Cell::new(None),
             seek_in_flight: Cell::new(false),
+            load_generation: Cell::new(0),
+            time_label_state: Cell::new(None),
             updating: Cell::new(false),
         });
 
@@ -279,7 +287,7 @@ impl Player {
         // that recognizer see a first press makes it wait for the double-click
         // interval before toggling playback. Every press therefore follows the
         // same direct transport path as Space; the second press also toggles
-        // fullscreen per the UI-BRIEF pointer contract.
+        // fullscreen.
         let video_click = gtk4::GestureClick::new();
         video_click.set_button(gtk4::gdk::BUTTON_PRIMARY);
         video_click.set_propagation_phase(gtk4::PropagationPhase::Capture);
@@ -438,8 +446,15 @@ impl Inner {
             this.set_speed(next);
         });
         let this = Rc::clone(self);
-        self.timeline.connect_seek(move |ms| {
-            this.request_seek(ms as f64 / 1_000.0);
+        self.timeline.connect_seek(move |ms, scrubbing| {
+            // Dragging asks for a picture now, not an exact frame; the
+            // keyframe snap is what keeps the video with the pointer.
+            let mode = if scrubbing {
+                SeekMode::Preview
+            } else {
+                SeekMode::Settle
+            };
+            this.request_seek(ms as f64 / 1_000.0, mode);
         });
         let this = Rc::clone(self);
         self.drawing_toggle.connect_toggled(move |toggle| {
@@ -537,6 +552,13 @@ impl Inner {
         let is_clip = entry.category == Category::Clip;
         drop(entries);
         let replacing_media = self.active_id.replace(Some(id.clone())).is_some();
+        // A seek belongs to the media it was issued against: a completion that
+        // arrives after the swap must not drive the new item, and a seek that
+        // never completes must not wedge the new one.
+        let generation = self.load_generation.get().wrapping_add(1);
+        self.load_generation.set(generation);
+        self.seek_in_flight.set(false);
+        self.pending_seek.set(None);
 
         self.error_bar.set_visible(false);
         self.empty_reveal.set_visible(false);
@@ -553,6 +575,8 @@ impl Inner {
                 .set_description(Some("The media file is empty."));
             self.empty_reveal.set_visible(true);
             self.stack.set_visible_child_name("placeholder");
+            self.position_seconds.set(0.0);
+            self.show_position(0.0);
             self.refresh_timeline();
             return;
         }
@@ -577,15 +601,16 @@ impl Inner {
             .set_icon_name("media-playback-pause-symbolic");
         if retain_position {
             let position = self.position_seconds.get();
-            self.request_seek(position);
+            self.request_seek(position, SeekMode::Settle);
         } else {
             self.position_seconds.set(0.0);
         }
+        self.show_position(self.position_seconds.get());
         self.stack.set_visible_child_name("video");
         self.report_video_dimensions(dimensions);
         self.watch_for_video_dimensions(id.clone(), uri, previous_video_stream);
         self.refresh_timeline();
-        self.watch_for_failure();
+        self.watch_for_failure(generation);
     }
 
     fn report_video_dimensions(&self, dimensions: Option<(u32, u32)>) -> bool {
@@ -630,9 +655,15 @@ impl Inner {
     /// Playback failure has no supported error signal in the bindings; if the
     /// player still is not ready shortly after a load, surface the one
     /// recovery row. A later successful load hides it again.
-    fn watch_for_failure(self: &Rc<Self>) {
+    ///
+    /// The check belongs to the load that armed it: without the generation a
+    /// slow first load would be blamed on whatever the user selected next.
+    fn watch_for_failure(self: &Rc<Self>, generation: u64) {
         let this = Rc::clone(self);
         gtk4::glib::timeout_add_local_once(std::time::Duration::from_secs(4), move || {
+            if this.load_generation.get() != generation {
+                return;
+            }
             let ready = this.backend.as_ref().is_some_and(PlayerBackend::is_ready);
             if !ready && this.active_id.borrow().is_some() {
                 let is_clip = this.active_entry_is_clip();
@@ -652,6 +683,13 @@ impl Inner {
         *self.active_id.borrow_mut() = None;
         self.povs.borrow_mut().clear();
         self.playing.set(false);
+        self.load_generation
+            .set(self.load_generation.get().wrapping_add(1));
+        self.seek_in_flight.set(false);
+        self.pending_seek.set(None);
+        self.position_seconds.set(0.0);
+        self.duration_ms.set(0);
+        self.show_position(0.0);
         self.set_media_usable(false, false);
         self.placeholder.set_title("No recording selected");
         self.placeholder
@@ -725,31 +763,43 @@ impl Inner {
     }
 
     /// Asynchronous seeking: keep only the newest target while one is pending.
-    fn request_seek(self: &Rc<Self>, seconds: f64) {
+    /// A preview target may be superseded by a settling one, so the mode
+    /// travels with the position.
+    fn request_seek(self: &Rc<Self>, seconds: f64, mode: SeekMode) {
         if !self.media_usable.get() {
             return;
         }
         let seconds = seconds.clamp(0.0, self.duration_ms.get() as f64 / 1_000.0);
-        self.position_seconds.set(seconds);
-        self.timeline.set_position((seconds * 1_000.0) as u64);
+        self.show_position(seconds);
         if self.seek_in_flight.get() {
-            self.pending_seek.set(Some(seconds));
+            self.pending_seek.set(Some((seconds, mode)));
             return;
         }
         self.seek_in_flight.set(true);
         if let Some(backend) = &self.backend {
-            backend.seek(seconds);
+            backend.seek(seconds, mode);
         }
     }
 
     fn on_seek_done(self: &Rc<Self>) {
+        // A completion for media that has since been replaced: loading already
+        // reset the seek state, so acting on it would drive the new item.
+        if !self.seek_in_flight.get() {
+            return;
+        }
         match self.pending_seek.take() {
-            Some(target) => {
+            Some((target, mode)) => {
                 if let Some(backend) = &self.backend {
-                    backend.seek(target);
+                    backend.seek(target, mode);
                 }
             }
-            None => self.seek_in_flight.set(false),
+            None => {
+                // The requested target stays on screen until Clapper's own
+                // position notification arrives. Re-reading the position here
+                // would report the keyframe a preview landed on and yank the
+                // playhead backwards out from under the pointer mid-drag.
+                self.seek_in_flight.set(false);
+            }
         }
     }
 
@@ -758,14 +808,26 @@ impl Inner {
         if self.seek_in_flight.get() {
             return;
         }
+        self.show_position(seconds);
+    }
+
+    /// The one place playhead and clock are presented, so every path that
+    /// changes position — load, unload, scrub, seek completion, playback —
+    /// agrees. The label only shows whole seconds, so only reformat when one
+    /// actually ticks over.
+    fn show_position(&self, seconds: f64) {
         self.position_seconds.set(seconds);
         let position_ms = (seconds * 1_000.0) as u64;
+        let duration_ms = self.duration_ms.get();
         self.timeline.set_position(position_ms);
-        self.time_label.set_text(&format!(
-            "{} / {}",
-            timeline::format_mm_ss(position_ms),
-            timeline::format_mm_ss(self.duration_ms.get()),
-        ));
+        let rendered = (position_ms / 1_000, duration_ms);
+        if self.time_label_state.replace(Some(rendered)) != Some(rendered) {
+            self.time_label.set_text(&format!(
+                "{} / {}",
+                timeline::format_mm_ss(position_ms),
+                timeline::format_mm_ss(duration_ms),
+            ));
+        }
     }
 
     fn handle_key(self: &Rc<Self>, keyval: gtk4::gdk::Key) -> gtk4::glib::Propagation {
@@ -778,17 +840,18 @@ impl Inner {
                 self.toggle_playing();
             }
             gtk4::gdk::Key::j | gtk4::gdk::Key::J | gtk4::gdk::Key::Left => {
-                self.request_seek(position - SEEK_STEP_SECONDS);
+                self.request_seek(position - SEEK_STEP_SECONDS, SeekMode::Settle);
             }
             gtk4::gdk::Key::l | gtk4::gdk::Key::L | gtk4::gdk::Key::Right => {
-                self.request_seek(position + SEEK_STEP_SECONDS);
+                self.request_seek(position + SEEK_STEP_SECONDS, SeekMode::Settle);
             }
             gtk4::gdk::Key::comma => {
-                // Approximate previous frame while paused: known FPS, else the
-                // legacy 30 fps assumption.
+                // Previous frame while paused: known FPS, else the legacy
+                // 30 fps assumption. The frame is the whole point here, so
+                // this is the one seek worth decoding exactly.
                 if !self.playing.get() {
                     let fps = self.fps.get().unwrap_or(30).max(1);
-                    self.request_seek(position - 1.0 / f64::from(fps));
+                    self.request_seek(position - 1.0 / f64::from(fps), SeekMode::Exact);
                 }
             }
             gtk4::gdk::Key::period => {

@@ -1023,10 +1023,15 @@ impl Inner {
     fn apply(self: &Rc<Self>, snapshot: &AppSnapshot) {
         self.state.mutation_pending.set(false);
         let category = snapshot.config.interface.selected_category.clone();
-        let category_changed = self.state.category.borrow().as_ref() != Some(&category);
+        let previous = self.state.category.replace(Some(category.clone()));
+        let category_changed = previous.as_ref() != Some(&category);
         if category_changed {
-            *self.state.category.borrow_mut() = Some(category.clone());
-            self.reset_for_category(&category);
+            // Categories in one family share their column set, so 2v2 to 3v3
+            // keeps its columns — and the widths the user dragged them to.
+            let family_changed = previous
+                .as_ref()
+                .is_none_or(|previous| family_of(previous) != family_of(&category));
+            self.reset_for_category(&category, family_changed);
         }
 
         let index_changed = self
@@ -1095,7 +1100,7 @@ impl Inner {
         self.update_bulk_bar(&self.selected_rows());
     }
 
-    fn reset_for_category(self: &Rc<Self>, category: &Category) {
+    fn reset_for_category(self: &Rc<Self>, category: &Category, family_changed: bool) {
         // Category change clears chips, dates, selection, and any active sort,
         // and swaps in the family's columns (WR-000 baseline).
         self.state.selected_chips.borrow_mut().clear();
@@ -1106,7 +1111,9 @@ impl Inner {
         self.selection.unselect_all();
         self.column_view
             .sort_by_column(None::<&gtk4::ColumnViewColumn>, gtk4::SortType::Ascending);
-        self.rebuild_columns(family_of(category));
+        if family_changed {
+            self.rebuild_columns(family_of(category));
+        }
         (self.on_select)(None);
     }
 

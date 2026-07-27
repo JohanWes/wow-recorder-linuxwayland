@@ -170,6 +170,47 @@ pub struct Timeline {
     state: Rc<State>,
 }
 
+/// A position to seek to, and whether it may be served from the nearest
+/// keyframe instead of decoded exactly.
+type SeekRequest = (u64, bool);
+
+/// The seek requests one pointer grab is allowed to produce.
+///
+/// A press lands exactly where it was aimed, motion during the drag may snap
+/// to a keyframe so the picture keeps up, and the release settles precisely —
+/// but only if the drag actually moved. Emitting a second seek for a single
+/// click makes the decoder present a second frame, which reads as a flicker.
+#[derive(Clone, Copy, Default)]
+struct SeekGesture {
+    /// Last position emitted, so a pointer that has not reached a new
+    /// millisecond cannot seek again.
+    last_ms: Option<u64>,
+    /// Newest position a preview asked for, replayed precisely on release.
+    previewed_ms: Option<u64>,
+}
+
+impl SeekGesture {
+    fn press(&mut self, ms: u64) -> SeekRequest {
+        self.last_ms = Some(ms);
+        self.previewed_ms = None;
+        (ms, false)
+    }
+
+    fn motion(&mut self, ms: u64) -> Option<SeekRequest> {
+        if self.last_ms == Some(ms) {
+            return None;
+        }
+        self.last_ms = Some(ms);
+        self.previewed_ms = Some(ms);
+        Some((ms, true))
+    }
+
+    fn release(&mut self) -> Option<SeekRequest> {
+        self.last_ms = None;
+        self.previewed_ms.take().map(|ms| (ms, false))
+    }
+}
+
 struct State {
     duration_ms: Cell<u64>,
     position_ms: Cell<u64>,
@@ -177,7 +218,10 @@ struct State {
     clip: Cell<Option<ClipRangeMs>>,
     grab: Cell<Option<Grab>>,
     #[allow(clippy::type_complexity)]
-    on_seek: RefCell<Option<Box<dyn Fn(u64)>>>,
+    /// `(position_ms, scrubbing)`. A scrubbing seek is a preview that the
+    /// caller may serve from the nearest keyframe; the release is not.
+    on_seek: RefCell<Option<Box<dyn Fn(u64, bool)>>>,
+    seek_gesture: Cell<SeekGesture>,
     labels: RefCell<Vec<LabelledItem>>,
 }
 
@@ -206,6 +250,7 @@ impl Timeline {
             clip: Cell::new(None),
             grab: Cell::new(None),
             on_seek: RefCell::new(None),
+            seek_gesture: Cell::new(SeekGesture::default()),
             labels: RefCell::new(Vec::new()),
         });
         let timeline = Self { widget, state };
@@ -215,7 +260,7 @@ impl Timeline {
         timeline
     }
 
-    pub fn connect_seek(&self, on_seek: impl Fn(u64) + 'static) {
+    pub fn connect_seek(&self, on_seek: impl Fn(u64, bool) + 'static) {
         *self.state.on_seek.borrow_mut() = Some(Box::new(on_seek));
     }
 
@@ -250,7 +295,13 @@ impl Timeline {
         self.widget.queue_draw();
     }
 
+    /// Ignored while the pointer owns the playhead: a drag's preview seeks
+    /// report back the keyframe they landed on, and letting that through would
+    /// pull the playhead backwards out from under the pointer.
     pub fn set_position(&self, position_ms: u64) {
+        if self.state.grab.get() == Some(Grab::Seek) {
+            return;
+        }
         if self.state.position_ms.replace(position_ms) != position_ms {
             self.widget.queue_draw();
         }
@@ -384,17 +435,30 @@ impl Timeline {
                 None => Grab::Seek,
             };
             state.grab.set(Some(grab));
-            apply_pointer(&state, &widget, x);
+            // A press lands exactly where it was aimed; only the motion that
+            // follows it is a preview.
+            apply_pointer(&state, &widget, x, false);
         });
         let state = Rc::clone(&self.state);
         let widget = self.widget.clone();
         drag.connect_drag_update(move |gesture, offset_x, _| {
             if let Some((start_x, _)) = gesture.start_point() {
-                apply_pointer(&state, &widget, start_x + offset_x);
+                apply_pointer(&state, &widget, start_x + offset_x, true);
             }
         });
         let state = Rc::clone(&self.state);
-        drag.connect_drag_end(move |_, _, _| state.grab.set(None));
+        drag.connect_drag_end(move |_, _, _| {
+            let seeking = state.grab.get() == Some(Grab::Seek);
+            state.grab.set(None);
+            let mut gesture = state.seek_gesture.get();
+            let request = gesture.release();
+            state.seek_gesture.set(gesture);
+            if let (true, Some((ms, scrubbing))) = (seeking, request)
+                && let Some(on_seek) = state.on_seek.borrow().as_ref()
+            {
+                on_seek(ms, scrubbing);
+            }
+        });
         self.widget.add_controller(drag);
     }
 
@@ -435,7 +499,7 @@ impl Timeline {
                 _ => return gtk4::glib::Propagation::Proceed,
             };
             if let Some(on_seek) = state.on_seek.borrow().as_ref() {
-                on_seek(target);
+                on_seek(target, false);
             }
             gtk4::glib::Propagation::Stop
         });
@@ -480,7 +544,9 @@ fn marker_x(x: f64, width: f64) -> f64 {
 }
 
 /// Route a pointer x according to the active grab: seek or move a handle.
-fn apply_pointer(state: &Rc<State>, widget: &gtk4::DrawingArea, x: f64) {
+/// `scrubbing` marks motion during a drag, which may be served from the
+/// nearest keyframe; the press and the release are exact.
+fn apply_pointer(state: &Rc<State>, widget: &gtk4::DrawingArea, x: f64, scrubbing: bool) {
     let duration = state.duration_ms.get();
     if duration == 0 {
         return;
@@ -495,8 +561,22 @@ fn apply_pointer(state: &Rc<State>, widget: &gtk4::DrawingArea, x: f64) {
             }
         }
         _ => {
+            let mut gesture = state.seek_gesture.get();
+            let request = if scrubbing {
+                gesture.motion(ms)
+            } else {
+                Some(gesture.press(ms))
+            };
+            state.seek_gesture.set(gesture);
+            let Some((ms, scrubbing)) = request else {
+                return;
+            };
+            // The pointer owns the playhead for the length of the grab.
+            if state.position_ms.replace(ms) != ms {
+                widget.queue_draw();
+            }
             if let Some(on_seek) = state.on_seek.borrow().as_ref() {
-                on_seek(ms);
+                on_seek(ms, scrubbing);
             }
         }
     }
@@ -663,5 +743,32 @@ mod tests {
         assert_eq!(drag_clip_handle(range, true, 25_000).start_ms, 19_999);
         assert_eq!(drag_clip_handle(range, false, 5_000).end_ms, 10_001);
         assert_eq!(drag_clip_handle(range, true, 0).start_ms, 0);
+    }
+
+    #[test]
+    fn one_pointer_action_produces_one_frame_worth_of_seeks() {
+        // A click is a press and a release with nothing between: exactly one
+        // exact seek, so the decoder presents exactly one frame.
+        let mut click = SeekGesture::default();
+        assert_eq!(click.press(4_000), (4_000, false));
+        assert_eq!(click.release(), None);
+
+        // A press that jitters without leaving its millisecond is still a
+        // click; a repeated position must not become a keyframe preview.
+        let mut jitter = SeekGesture::default();
+        assert_eq!(jitter.press(4_000), (4_000, false));
+        assert_eq!(jitter.motion(4_000), None);
+        assert_eq!(jitter.release(), None);
+
+        // A real drag previews while it moves and settles precisely on the
+        // position it was released at.
+        let mut drag = SeekGesture::default();
+        assert_eq!(drag.press(4_000), (4_000, false));
+        assert_eq!(drag.motion(4_500), Some((4_500, true)));
+        assert_eq!(drag.motion(4_500), None);
+        assert_eq!(drag.motion(9_000), Some((9_000, true)));
+        assert_eq!(drag.release(), Some((9_000, false)));
+        // The gesture is spent: it cannot settle twice.
+        assert_eq!(drag.release(), None);
     }
 }

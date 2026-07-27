@@ -29,18 +29,25 @@ struct RecorderTray {
     events: SyncSender<TrayEvent>,
     available: Arc<AtomicBool>,
     quit_requested: Arc<AtomicBool>,
+    /// Nudges the shell's main loop; Open and Quit are otherwise invisible
+    /// until the slow safety tick.
+    wake: Arc<dyn Fn() + Send + Sync>,
     title: String,
     status: ksni::Status,
 }
 
 impl TrayBackend {
-    pub fn start(events: SyncSender<TrayEvent>) -> Result<Self, ksni::Error> {
+    pub fn start(
+        events: SyncSender<TrayEvent>,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<Self, ksni::Error> {
         let available = Arc::new(AtomicBool::new(true));
         let quit_requested = Arc::new(AtomicBool::new(false));
         let tray = RecorderTray {
             events,
             available: Arc::clone(&available),
             quit_requested: Arc::clone(&quit_requested),
+            wake,
             title: "Warcraft Recorder".into(),
             status: ksni::Status::Active,
         };
@@ -88,10 +95,12 @@ impl RecorderTray {
     /// under a saturated channel is fine and never stalls the tray executor.
     fn request_open(&self) {
         let _ = self.events.try_send(TrayEvent::Open);
+        (self.wake)();
     }
 
     fn request_quit(&self) {
         self.quit_requested.store(true, Ordering::Release);
+        (self.wake)();
     }
 }
 
@@ -158,6 +167,7 @@ mod tests {
             events: sender,
             available: Arc::new(AtomicBool::new(true)),
             quit_requested: Arc::clone(&quit),
+            wake: Arc::new(|| {}),
             title: "Warcraft Recorder".into(),
             status: ksni::Status::Active,
         };

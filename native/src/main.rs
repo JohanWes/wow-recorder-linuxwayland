@@ -7,7 +7,8 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, mpsc};
 
 use warcraft_recorder::config::Config;
 use warcraft_recorder::coordinator;
@@ -33,10 +34,21 @@ fn main() {
     };
     init_logging(&setup.data_dir);
     let options = shell_options(APP_ID, &setup);
-    let coordinator = Rc::new(RefCell::new(coordinator::start(setup)));
+
+    // One latch shared by everything that can make the shell's drain useful,
+    // so a burst of wakes costs a single queued main-loop callback.
+    let wake_pending = Arc::new(AtomicBool::new(false));
+    let wake: Arc<dyn Fn() + Send + Sync> = {
+        let pending = Arc::clone(&wake_pending);
+        Arc::new(move || ui::wake_shell(&pending))
+    };
+    let coordinator = Rc::new(RefCell::new(coordinator::start(setup, {
+        let wake = Arc::clone(&wake);
+        Box::new(move || wake())
+    })));
 
     let (tray_events_tx, tray_events_rx) = mpsc::sync_channel(8);
-    let tray = TrayBackend::start(tray_events_tx)
+    let tray = TrayBackend::start(tray_events_tx, Arc::clone(&wake))
         .map(Rc::new)
         .map_err(|error| tracing::warn!(%error, "tray service unavailable"))
         .ok();
@@ -49,12 +61,13 @@ fn main() {
         tray_events_rx,
     );
 
-    // The GTK loop has exited: stop the coordinator and join it, then shut
-    // down the tray service thread.
-    coordinator.borrow_mut().shutdown();
+    // The GTK loop has exited. Take the tray icon down first: the coordinator's
+    // shutdown now waits out gpu-screen-recorder's flush, and an icon that
+    // outlives the window by seconds is one the user can click for nothing.
     if let Some(tray) = tray {
         tray.shutdown();
     }
+    coordinator.borrow_mut().shutdown();
     std::process::exit(code);
 }
 

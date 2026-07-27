@@ -38,6 +38,5 @@ offline from pinned inputs, runs the three Flatpak Builder lints, signs the
 OSTree repository with the project key held in CI secrets, and uploads a
 candidate bundle. It never publishes the permanent remote automatically.
 
-Keep visual decisions in `implementation_docs/UI-BRIEF.md`, preserve English
-strings next to their widgets, and update the relevant evidence report when a
-Flatpak-facing behavior is changed.
+Preserve English strings next to their widgets, and update the relevant
+evidence report when a Flatpak-facing behavior is changed.
