@@ -15,6 +15,9 @@ REMOTE_DESCRIPTOR="${WARCRAFTRECORDER_REMOTE_DESCRIPTOR:-https://johanwes.github
 FLATHUB_DESCRIPTOR="${WARCRAFTRECORDER_FLATHUB_DESCRIPTOR:-https://dl.flathub.org/repo/flathub.flatpakrepo}"
 INSTALL_PAGE="${WARCRAFTRECORDER_INSTALL_PAGE:-https://github.com/JohanWes/wow-recorder-linuxwayland#install-and-update}"
 APP_ID="io.github.JohanWes.WarcraftRecorder"
+# Always address the published branch: a leftover development install of the
+# same application ID would otherwise make a bare `flatpak run` ambiguous.
+APP_REF="${APP_ID}//stable"
 # Kept in step with `runtime-version` in the release manifest.
 RUNTIME_REF="org.gnome.Platform//50"
 
@@ -33,7 +36,7 @@ manual_instructions() {
   printf '  flatpak remote-add --user --if-not-exists flathub %s\n' "$FLATHUB_DESCRIPTOR" >&2
   printf '  flatpak remote-add --user --if-not-exists %s %s\n' \
     "$REMOTE_NAME" "$REMOTE_DESCRIPTOR" >&2
-  printf '  flatpak install --user %s %s\n' "$REMOTE_NAME" "$APP_ID" >&2
+  printf '  flatpak install --user %s %s\n' "$REMOTE_NAME" "$APP_REF" >&2
 }
 
 fail_with_manual_instructions() {
@@ -68,7 +71,7 @@ retire_appimage_launchers() {
 #!/usr/bin/env bash
 # Warcraft Recorder is a Flatpak now. The final AppImage was preserved at
 # ${PRESERVED_APPIMAGE} and can be run directly to roll back.
-exec flatpak run ${APP_ID} "\$@"
+exec flatpak run ${APP_REF} "\$@"
 EOF
       chmod 755 "$LEGACY_BIN"
       log "Rewrote ${LEGACY_BIN} to launch the Flatpak"
@@ -90,9 +93,42 @@ EOF
     [[ -f "$entry" ]] || continue
     grep -Eqi "^Exec=.*(${LEGACY_BIN}|[^[:space:]]*warcraftrecorder[^[:space:]]*\.AppImage)" \
       "$entry" || continue
-    sed -i "s|^Exec=.*|Exec=flatpak run ${APP_ID}|" "$entry"
+    sed -i "s|^Exec=.*|Exec=flatpak run ${APP_REF}|" "$entry"
     log "Repointed the start-up entry at the Flatpak: ${entry}"
   done
+}
+
+# The final AppImage is meant to quit once this script returns, but it does not
+# always do so, which leaves the retired Electron app running beside the native
+# one. Close the AppImage ancestor of this script, after giving the updater a
+# moment to report success on its own. Best effort: never fail the migration.
+close_running_appimage() {
+  local pid exe stat watchdog
+  pid="${PPID:-0}"
+  while [[ "$pid" =~ ^[0-9]+$ ]] && ((pid > 1)); do
+    exe="$(readlink -f "/proc/${pid}/exe" 2>/dev/null || true)"
+    if [[ "$exe" == /tmp/.mount_*/* && "$exe" == *[wW]arcraft[rR]ecorder* ]]; then
+      # Re-check the mount before signalling, so a recycled PID is left alone.
+      watchdog="sleep 8
+exe=\$(readlink -f /proc/${pid}/exe 2>/dev/null || true)
+case \"\$exe\" in
+  /tmp/.mount_*) kill ${pid} 2>/dev/null || true ;;
+esac"
+      if command -v setsid >/dev/null 2>&1; then
+        setsid sh -c "$watchdog" >/dev/null 2>&1 </dev/null &
+      else
+        sh -c "$watchdog" >/dev/null 2>&1 </dev/null &
+      fi
+      log "The retired AppImage will close once this update finishes."
+      return 0
+    fi
+    # Field 4 of /proc/PID/stat is the parent PID; comm can contain spaces and
+    # parentheses, so skip past the last ')' rather than splitting on columns.
+    stat="$(cat "/proc/${pid}/stat" 2>/dev/null || true)"
+    [[ -n "$stat" ]] || return 0
+    pid="$(printf '%s' "$stat" | sed -E 's/^[0-9]+ \(.*\) [A-Za-z] ([0-9]+).*/\1/')"
+  done
+  return 0
 }
 
 if ! command -v flatpak >/dev/null 2>&1; then
@@ -111,7 +147,7 @@ fi
 
 # `--or-update` keeps a repeated migration (or a plain update) from failing on
 # an already-installed application.
-if ! flatpak install --user --assumeyes --or-update "$REMOTE_NAME" "$APP_ID"; then
+if ! flatpak install --user --assumeyes --or-update "$REMOTE_NAME" "$APP_REF"; then
   fail_with_manual_instructions
 fi
 
@@ -120,14 +156,15 @@ log "Installed binary: Flatpak $APP_ID"
 
 retire_appimage_launchers
 
-# The AppImage updater quits itself after this script returns, so start the
-# native app here. stdio goes to /dev/null: the updater waits for this script's
-# pipes to close before it reports success.
+# Start the native app here. stdio goes to /dev/null: the updater waits for this
+# script's pipes to close before it reports success.
 log "Launching the native app..."
 if command -v setsid >/dev/null 2>&1; then
-  setsid flatpak run "$APP_ID" >/dev/null 2>&1 </dev/null &
+  setsid flatpak run "$APP_REF" >/dev/null 2>&1 </dev/null &
 else
-  flatpak run "$APP_ID" >/dev/null 2>&1 </dev/null &
+  flatpak run "$APP_REF" >/dev/null 2>&1 </dev/null &
 fi
+
+close_running_appimage
 
 log "Done. Warcraft Recorder now updates through Flatpak; roll back by running ${PRESERVED_APPIMAGE}."
