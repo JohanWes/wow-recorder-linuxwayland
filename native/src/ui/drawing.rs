@@ -2,10 +2,9 @@
 
 //! The in-player drawing overlay: a session-only tagged item list in
 //! normalized video coordinates, rendered with Cairo/Pango on one
-//! `GtkDrawingArea`. Tools are exactly the WR-000 exposed set: select/move,
-//! freehand, line, arrow, rectangle, diamond, ellipse, text, eraser, stroke
-//! color/width, undo/redo, and clear. Items clear on media change and are
-//! never saved or exported.
+//! `GtkDrawingArea`. Tools: select/move, freehand, line, arrow, rectangle,
+//! diamond, ellipse, text, eraser, stroke color/width, undo/redo, clear. Items
+//! clear on media change and are never saved or exported.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -227,9 +226,7 @@ fn translate(shape: &mut Shape, dx: f64, dy: f64) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Widget
-// ---------------------------------------------------------------------------
+// --- Widget ---
 
 pub struct Overlay {
     /// The transparent drawing surface stacked over the video.
@@ -276,8 +273,8 @@ impl Overlay {
         overlay
     }
 
-    /// Enabling shows the surface/tools; disabling keeps items (legacy: the
-    /// toggle hides the canvas, items reset only on media change/remount).
+    /// Enabling shows the surface/tools; disabling keeps items. Items reset
+    /// only on media change or remount.
     pub fn set_enabled(&self, enabled: bool) {
         self.state.enabled.set(enabled);
         self.area.set_visible(enabled);

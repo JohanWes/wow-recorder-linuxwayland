@@ -3,7 +3,7 @@
 Warcraft Recorder is a native Rust/GTK4 application for Linux/Wayland that
 tails the World of Warcraft combat log, captures activities with
 `gpu-screen-recorder`, and keeps a local video library with combat metadata,
-timeline markers, playback controls, clips, and local kill-video rendering.
+timeline markers, playback controls, clipping, and local POV switching.
 
 The supported application ID is `io.github.JohanWes.WarcraftRecorder`. English
 is the only shipped language and recordings/configuration remain local.
@@ -24,9 +24,9 @@ After installation, the desktop software center or this command owns updates:
 flatpak update --user io.github.JohanWes.WarcraftRecorder
 ```
 
-The permanent remote is signed and is published manually only after the full
-WR-015 release gate. Until then, use the release-candidate bundle attached to
-the candidate workflow:
+The permanent remote is signed and published manually once a candidate is
+approved. Until then, use the release-candidate bundle attached to the
+candidate workflow:
 
 ```sh
 flatpak install --user ./warcraft-recorder.flatpak
@@ -38,8 +38,7 @@ Existing AppImage users should keep their final AppImage until the stable
 Flatpak is announced. The migration release imports the existing legacy config
 once without changing it; the native app then writes its own config and keeps
 the existing recordings and sidecars in place. Rollback is launching that
-untouched final AppImage again. The migration command is intentionally not
-made live for ordinary users before WR-015 publishes the stable remote.
+untouched final AppImage again.
 
 To uninstall the application while retaining user data:
 

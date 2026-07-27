@@ -2,17 +2,12 @@
 
 //! Serialized media and storage jobs.
 //!
-//! One worker thread consumes `MediaJob`s in order: perform one-time legacy
-//! timeline enrichment, finalize a finished capture, or cut a clip. FFmpeg is spawned
-//! directly with `std::process::Command` — no shell, no wrapper crate, no
-//! reader thread. Every invocation writes progress to an exclusively created
-//! `-progress` file and stderr to an exclusively created log file, which the
-//! single poll loop reads incrementally.
-//!
-//! Shutdown arrives on a separate capacity-one control channel and is observed
-//! within one polling interval: an automatic finalization gets a bounded grace
-//! period, user clip jobs are cancelled immediately, and both
-//! escalate SIGINT then `Child::kill`.
+//! One worker thread consumes `MediaJob`s in order: legacy timeline
+//! enrichment, finalizing a finished capture, or cutting a clip. FFmpeg is
+//! spawned directly and polled through its `-progress` file plus an exclusive
+//! stderr log. Shutdown arrives on a capacity-one control channel: automatic
+//! finalization gets a bounded grace period, user clips are cancelled at once,
+//! and both escalate SIGINT then `Child::kill`.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -35,23 +30,20 @@ use crate::storage::{CombinedMedia, Storage, now_unix_ms, sanitize_name, unique_
 
 /// Bytes of the per-job stderr log read back for diagnostics.
 const LOG_TAIL_BYTES: u64 = 8 * 1024;
-/// Presenting transcode progress more often is visually indistinguishable but
-/// makes every GTK snapshot repeat work unrelated to the progress label.
+/// Emitting progress more often is visually indistinguishable but makes every
+/// GTK snapshot repeat work.
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug)]
 pub struct MediaConfig {
-    /// FFmpeg executable; the production value is the one bundled by WR-002.
     pub ffmpeg: PathBuf,
-    /// Local UTC offset used for generated display names, supplied by the
-    /// coordinator exactly like the parser's time context (WR-004).
+    /// Local UTC offset for generated display names, supplied by the coordinator.
     pub utc_offset_minutes: i32,
     /// Poll interval for control and FFmpeg progress.
     pub poll_interval: Duration,
-    /// How long an in-flight automatic finalization may continue after a
-    /// shutdown request before it is interrupted.
+    /// Grace an in-flight automatic finalization gets after a shutdown request.
     pub finalize_grace: Duration,
-    /// How long a SIGINT is given before `Child::kill`.
+    /// Grace a SIGINT is given before `Child::kill`.
     pub sigint_grace: Duration,
 }
 
@@ -97,8 +89,7 @@ impl MediaJob {
 }
 
 pub enum MediaControl {
-    /// Stop optional startup maintenance so recording finalization can use the
-    /// sole worker. Ignored once a real media job is running.
+    /// Stop startup maintenance so finalization can use the sole worker.
     CancelMaintenance,
     Shutdown {
         pending_finalizations: Vec<MediaJob>,
@@ -208,30 +199,28 @@ impl MediaWorker {
                 let control = &self.control;
                 let mut shutdown_finalizations = None;
                 let mut cancellation_observed = false;
-                let report = self.storage.enrich_legacy_bloodlust_cancellable(
-                    &retail_log_dirs,
-                    context,
-                    || {
-                        if cancellation_observed {
-                            return true;
-                        }
-                        cancellation_observed = match control.try_recv() {
-                            Ok(MediaControl::CancelMaintenance) => true,
-                            Ok(MediaControl::Shutdown {
-                                pending_finalizations,
-                            }) => {
-                                shutdown_finalizations = Some(pending_finalizations);
-                                true
+                let report =
+                    self.storage
+                        .enrich_legacy_bloodlust(&retail_log_dirs, context, || {
+                            if cancellation_observed {
+                                return true;
                             }
-                            Err(TryRecvError::Disconnected) => {
-                                shutdown_finalizations = Some(Vec::new());
-                                true
-                            }
-                            Err(TryRecvError::Empty) => false,
-                        };
-                        cancellation_observed
-                    },
-                );
+                            cancellation_observed = match control.try_recv() {
+                                Ok(MediaControl::CancelMaintenance) => true,
+                                Ok(MediaControl::Shutdown {
+                                    pending_finalizations,
+                                }) => {
+                                    shutdown_finalizations = Some(pending_finalizations);
+                                    true
+                                }
+                                Err(TryRecvError::Disconnected) => {
+                                    shutdown_finalizations = Some(Vec::new());
+                                    true
+                                }
+                                Err(TryRecvError::Empty) => false,
+                            };
+                            cancellation_observed
+                        });
                 if let Some(pending) = shutdown_finalizations {
                     self.begin_shutdown(pending);
                 }
@@ -268,10 +257,6 @@ impl MediaWorker {
             Err(message) => self.emit(MediaEvent::Failed { kind, message }),
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Finalization
-    // -----------------------------------------------------------------------
 
     fn finalize_recording(
         &mut self,
@@ -314,9 +299,8 @@ impl MediaWorker {
     }
 
     /// Trim the replay to the requested lead-in and concatenate it in front of
-    /// the regular recording. Returns the usable replay milliseconds, or `None`
-    /// when the job was cancelled. Any replay problem falls back to the regular
-    /// recording alone with zero replay, matching the baseline.
+    /// the regular recording. Returns usable replay milliseconds, or `None` when
+    /// cancelled. Any replay problem falls back to the regular recording alone.
     fn combine(
         &mut self,
         artifacts: &CaptureArtifacts,
@@ -358,10 +342,9 @@ impl MediaWorker {
         };
 
         // `-sseof` reports the seek-relative output time, which is shorter than
-        // the keyframe-aligned file the stream copy actually wrote (measured at
-        // ~0.9 s on the WR-006 captures). Remuxing the trim to the null sink is
-        // one cheap pass that yields the real lead-in; without it every marker
-        // would sit that far off. The trim's own progress is the fallback.
+        // the keyframe-aligned file the stream copy actually wrote (~0.9 s).
+        // Remuxing the trim to the null sink yields the real lead-in; the trim's
+        // own progress is the fallback.
         let actual_replay_ms =
             match self.run_ffmpeg(WorkKind::Finalize, measure_args(&trim_temp), None) {
                 FfmpegOutcome::Done { out_time_ms } if out_time_ms > 0 => out_time_ms,
@@ -400,10 +383,6 @@ impl MediaWorker {
             FfmpegOutcome::Failed { .. } => regular_only(self),
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Clips
-    // -----------------------------------------------------------------------
 
     fn create_clip(
         &mut self,
@@ -474,8 +453,7 @@ impl MediaWorker {
             start_unix_ms: created_at,
             duration_ms,
             outcome: source.outcome,
-            // Clips are protected in the baseline so eviction cannot reclaim
-            // work the user deliberately cut.
+            // Clips are protected so eviction cannot reclaim deliberate work.
             protected: true,
             tag: None,
             activity_hash: source.activity_hash.clone(),
@@ -498,14 +476,6 @@ impl MediaWorker {
             })?;
         Ok(Some(entry))
     }
-
-    // -----------------------------------------------------------------------
-    // Kill videos
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // FFmpeg
-    // -----------------------------------------------------------------------
 
     /// Exclusively create a per-job file in the capture staging directory.
     fn job_file(&self, prefix: &str, extension: &str) -> io::Result<PathBuf> {
@@ -558,8 +528,8 @@ impl MediaWorker {
 
         let mut command = Command::new(&self.config.ffmpeg);
         command
-            // Stable Flatpak constrains the GTK process allocator arenas for
-            // its RSS gate; media tools must retain their own defaults.
+            // The GTK process constrains allocator arenas for its RSS gate;
+            // media tools must retain their own defaults.
             .env_remove("MALLOC_ARENA_MAX")
             .arg("-progress")
             .arg(&progress_path)
@@ -618,8 +588,7 @@ impl MediaWorker {
 
         loop {
             if interrupt_at.is_some() {
-                // Shutdown is one-shot: once observed there is nothing more to
-                // read, and polling a disconnected channel would busy-spin.
+                // Shutdown is one-shot; polling a dead channel would busy-spin.
                 std::thread::sleep(self.config.poll_interval);
             } else {
                 match self.control.recv_timeout(self.config.poll_interval) {
@@ -627,10 +596,8 @@ impl MediaWorker {
                         pending_finalizations,
                     }) => {
                         self.begin_shutdown(pending_finalizations);
-                        // Automatic finalization may finish inside the grace
-                        // period; user jobs are cancelled immediately. The
-                        // deadline is set once: a disconnected control channel
-                        // must not keep pushing it into the future.
+                        // Set once: a disconnected control channel must not keep
+                        // pushing the deadline into the future.
                         interrupt_at = Some(match kind {
                             WorkKind::Finalize => Instant::now() + self.config.finalize_grace,
                             _ => Instant::now(),
@@ -739,8 +706,7 @@ impl ProgressReader {
             let value = value.trim();
             match key.trim() {
                 "out_time_us" | "out_time_ms" => {
-                    // FFmpeg reports microseconds in both keys; `out_time_ms`
-                    // has been microseconds since 2017.
+                    // Both keys have carried microseconds since 2017.
                     if let Ok(micros) = value.parse::<u64>() {
                         latest = Some(micros / 1000);
                     }
@@ -770,12 +736,7 @@ fn read_log_tail(path: &Path) -> String {
     String::from_utf8_lossy(&tail).trim().to_owned()
 }
 
-// ---------------------------------------------------------------------------
-// FFmpeg argument builders
-// ---------------------------------------------------------------------------
-
-/// Take the final `seconds` of the replay without needing its duration, exactly
-/// as the baseline does.
+/// Take the final `seconds` of the replay without needing its duration.
 fn trim_args(replay: &Path, seconds: u64, output: &Path) -> Vec<String> {
     vec![
         "-nostdin".to_owned(),
@@ -833,8 +794,7 @@ fn concat_args(list: &Path, output: &Path) -> Vec<String> {
     ]
 }
 
-/// Baseline clip rule: input-side seek (`setStartTime` is a fluent-ffmpeg
-/// input option) plus output-side duration, with a pure stream copy.
+/// Input-side seek plus output-side duration, with a pure stream copy.
 fn clip_args(source: &Path, start_ms: u64, duration_ms: u64, output: &Path) -> Vec<String> {
     vec![
         "-nostdin".to_owned(),
@@ -858,167 +818,6 @@ fn clip_args(source: &Path, start_ms: u64, duration_ms: u64, output: &Path) -> V
     ]
 }
 
-/*
-fn kill_video_args(
-    segments: &[KillSegment],
-    width: u32,
-    height: u32,
-    fps: u32,
-    audio: KillAudio,
-    output: &Path,
-) -> Vec<String> {
-    let mut args = vec!["-nostdin".to_owned(), "-hide_banner".to_owned()];
-    for segment in segments {
-        args.push("-i".to_owned());
-        args.push(segment.source.media_path.to_string_lossy().into_owned());
-    }
-    args.push("-filter_complex".to_owned());
-    args.push(kill_video_filter(segments, width, height, fps, audio));
-    args.push("-map".to_owned());
-    args.push("[v]".to_owned());
-    args.push("-map".to_owned());
-    args.push(match audio {
-        KillAudio::Switched => "[a]".to_owned(),
-        KillAudio::Source(index) => format!("{index}:a"),
-    });
-    args.extend(
-        [
-            "-shortest",
-            "-c:v",
-            "libx264",
-            "-crf",
-            KILL_VIDEO_CRF,
-            "-c:a",
-            "aac",
-            "-preset",
-            "fast",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            "-xerror",
-            "-y",
-        ]
-        .map(str::to_owned),
-    );
-    args.push(output.to_string_lossy().into_owned());
-    args
-}
-
-/// Trim, normalize, and cross-fade each viewpoint, then concatenate. Identical
-/// in shape to the baseline's filter graph.
-fn kill_video_filter(
-    segments: &[KillSegment],
-    width: u32,
-    height: u32,
-    fps: u32,
-    audio: KillAudio,
-) -> String {
-    let mut filter = String::new();
-    let switched = audio == KillAudio::Switched;
-
-    for (index, segment) in segments.iter().enumerate() {
-        let start = format_seconds(segment.start_ms);
-        let stop = format_seconds(segment.end_ms);
-        let segment_seconds = (segment.end_ms - segment.start_ms) as f64 / 1000.0;
-        let fade_out_start =
-            format_number((segment_seconds - KILL_VIDEO_FADE_SECONDS as f64).max(0.0));
-        let fade_in = format!("t=in:st=0:d={KILL_VIDEO_FADE_SECONDS}");
-        let fade_out = format!("t=out:st={fade_out_start}:d={KILL_VIDEO_FADE_SECONDS}");
-
-        filter.push_str(&format!(
-            "[{index}:v]trim=start={start}:end={stop},setpts=PTS-STARTPTS,\
-fps={fps},scale={width}:-2,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,\
-fade={fade_in},fade={fade_out}[v{index}];"
-        ));
-        if switched {
-            filter.push_str(&format!(
-                "[{index}:a]atrim=start={start}:end={stop},asetpts=PTS-STARTPTS,\
-afade={fade_in},afade={fade_out}[a{index}];"
-            ));
-        }
-    }
-
-    let count = segments.len();
-    if switched {
-        let inputs: String = (0..count).map(|i| format!("[v{i}][a{i}]")).collect();
-        filter.push_str(&format!("{inputs}concat=n={count}:v=1:a=1[v][a]"));
-    } else {
-        let inputs: String = (0..count).map(|i| format!("[v{i}]")).collect();
-        filter.push_str(&format!("{inputs}concat=n={count}:v=1:a=0[v]"));
-    }
-    filter
-}
-
-fn validate_kill_video(
-    segments: &[KillSegment],
-    width: u32,
-    height: u32,
-    fps: u32,
-    audio: KillAudio,
-) -> Result<(), String> {
-    if segments.len() < 2 {
-        return Err("a kill video needs at least two viewpoints".to_owned());
-    }
-    let distinct: std::collections::HashSet<&RecordingId> =
-        segments.iter().map(|segment| &segment.source.id).collect();
-    if distinct.len() < 2 {
-        return Err("a kill video needs at least two distinct sources".to_owned());
-    }
-    if width == 0 || height == 0 || fps == 0 {
-        return Err(format!("invalid output {width}x{height} at {fps} fps"));
-    }
-    if let KillAudio::Source(index) = audio
-        && index >= segments.len()
-    {
-        return Err(format!("audio source {index} is not one of the viewpoints"));
-    }
-    for segment in segments {
-        if segment.end_ms <= segment.start_ms || segment.end_ms > segment.source.duration_ms {
-            return Err(format!(
-                "segment {}..{} ms is outside {}",
-                segment.start_ms,
-                segment.end_ms,
-                segment.source.media_path.display()
-            ));
-        }
-        if !segment.source.media_path.exists() {
-            return Err(format!(
-                "viewpoint {} is missing",
-                segment.source.media_path.display()
-            ));
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Naming, timeline, formatting
-// ---------------------------------------------------------------------------
-
-/// Baseline kill-video display name.
-fn kill_video_name(first: &LibraryEntry, created_at_ms: i64, utc_offset_minutes: i32) -> String {
-    let mut name = format_local_stamp(first.start_unix_ms, utc_offset_minutes);
-    name.push_str(" - Multiview");
-    // The baseline appends the encounter only when it also has a difficulty.
-    if let ActivityDetails::Raid {
-        encounter_name: Some(encounter),
-        difficulty: Some(difficulty),
-        ..
-    } = &first.details
-    {
-        name.push_str(&format!(" - {encounter} [{difficulty}]"));
-    }
-    name.push_str(&format!(
-        " - Rendered at {}",
-        format_local_stamp(created_at_ms, utc_offset_minutes)
-    ));
-    name
-}
-
-/// Move timeline items into the clipped range, dropping what falls outside and
-/// truncating spans that straddle a boundary.
-*/
 fn clip_timeline(timeline: &[TimelineItem], start_ms: u64, end_ms: u64) -> Vec<TimelineItem> {
     let mut clipped = Vec::new();
     for item in timeline {
@@ -1078,8 +877,7 @@ fn escape_concat(path: &Path) -> String {
     path.to_string_lossy().replace('\'', "'\\''")
 }
 
-/// `YYYY-MM-DD HH-MM-SS` in the supplied local offset, matching the baseline's
-/// OBS-style timestamps.
+/// `YYYY-MM-DD HH-MM-SS` in the supplied local offset.
 fn format_local_stamp(epoch_ms: i64, utc_offset_minutes: i32) -> String {
     let local_seconds = epoch_ms.div_euclid(1000) + i64::from(utc_offset_minutes) * 60;
     let days = local_seconds.div_euclid(86_400);
@@ -1300,47 +1098,6 @@ mod tests {
             .unwrap_or(false)
     }
 
-    /*
-    #[test]
-    fn clip_and_kill_video_arguments_match_their_goldens() {
-        let source = Path::new("/library dir/My Raid Kill.mp4");
-        let output = Path::new("/staging dir/clip out.mp4");
-        assert_golden(
-            "clip-args.txt",
-            &clip_args(source, 12_500, 30_000, output).join("\n"),
-        );
-
-        let first = LibraryEntry {
-            media_path: PathBuf::from("/library dir/POV one.mp4"),
-            ..Harness::new("golden-a").source("unused", 60_000)
-        };
-        let second = LibraryEntry {
-            media_path: PathBuf::from("/library dir/POV two.mp4"),
-            ..Harness::new("golden-b").source("unused", 60_000)
-        };
-        let segments = vec![
-            KillSegment {
-                source: first,
-                start_ms: 4_000,
-                end_ms: 14_000,
-            },
-            KillSegment {
-                source: second,
-                start_ms: 2_000,
-                end_ms: 9_500,
-            },
-        ];
-        assert_golden(
-            "kill-video-args.txt",
-            &kill_video_args(&segments, 1920, 1080, 30, KillAudio::Switched, output).join("\n"),
-        );
-        assert_golden(
-            "kill-video-single-audio-args.txt",
-            &kill_video_args(&segments, 1280, 720, 60, KillAudio::Source(1), output).join("\n"),
-        );
-    }
-
-    */
     #[test]
     fn clip_job_writes_a_clips_entry_for_the_selected_interval() {
         let mut harness = Harness::new("clip");
@@ -1411,139 +1168,6 @@ mod tests {
         );
     }
 
-    /*
-    #[test]
-    fn kill_video_job_preserves_order_audio_progress_and_provenance() {
-        let mut harness = Harness::new("kill");
-        let first = harness.source("POV one", 60_000);
-        let second = harness.source("POV two", 60_000);
-        harness
-            .jobs
-            .send(MediaJob::CreateKillVideo {
-                segments: vec![
-                    KillSegment {
-                        source: second.clone(),
-                        start_ms: 5_000,
-                        end_ms: 15_000,
-                    },
-                    KillSegment {
-                        source: first.clone(),
-                        start_ms: 1_000,
-                        end_ms: 9_000,
-                    },
-                ],
-                width: 1920,
-                height: 1080,
-                fps: 30,
-                audio: KillAudio::Switched,
-            })
-            .expect("send kill video");
-
-        let MediaEvent::Completed { kind, entry } = harness.outcome() else {
-            panic!("kill video did not complete");
-        };
-        assert_eq!(kind, WorkKind::KillVideo);
-        assert_eq!(entry.category, Category::Clip);
-        assert_eq!(entry.duration_ms, 18_000);
-        assert!(entry.protected);
-        assert!(entry.title.contains("Multiview"));
-        assert!(entry.title.contains("Chrome King Gallywix [M]"));
-        assert_eq!(entry.media.width, Some(1920));
-        let tag = entry.tag.clone().expect("provenance tag");
-        assert!(tag.starts_with("WCR Multipov Kill Video."));
-        assert!(tag.contains(&second.title) && tag.contains(&first.title));
-        assert_eq!(
-            entry.details,
-            ActivityDetails::Clip {
-                source_recording: second.id.clone(),
-                source_category: Category::Raids,
-                source_title: Some(second.title.clone()),
-            }
-        );
-
-        let argv = harness.argv();
-        let inputs: Vec<&String> = argv
-            .windows(2)
-            .filter(|pair| pair[0] == "-i")
-            .map(|pair| &pair[1])
-            .collect();
-        assert_eq!(
-            inputs,
-            vec![
-                &second.media_path.to_string_lossy().into_owned(),
-                &first.media_path.to_string_lossy().into_owned()
-            ]
-        );
-        let filter = argv
-            .iter()
-            .position(|arg| arg == "-filter_complex")
-            .map(|index| argv[index + 1].clone())
-            .expect("filter");
-        assert!(filter.contains("[0:v]trim=start=5:end=15"));
-        assert!(filter.contains("[1:v]trim=start=1:end=9"));
-        assert!(filter.contains("concat=n=2:v=1:a=1[v][a]"));
-
-        harness.shutdown_and_join();
-    }
-
-    #[test]
-    fn kill_video_rejects_invalid_selections() {
-        let harness = Harness::new("kill-invalid");
-        let source = harness.source("POV one", 60_000);
-        let single = vec![KillSegment {
-            source: source.clone(),
-            start_ms: 0,
-            end_ms: 10_000,
-        }];
-        assert!(validate_kill_video(&single, 1920, 1080, 30, KillAudio::Switched).is_err());
-
-        let duplicate = vec![
-            KillSegment {
-                source: source.clone(),
-                start_ms: 0,
-                end_ms: 10_000,
-            },
-            KillSegment {
-                source: source.clone(),
-                start_ms: 0,
-                end_ms: 10_000,
-            },
-        ];
-        assert!(validate_kill_video(&duplicate, 1920, 1080, 30, KillAudio::Switched).is_err());
-
-        let other = harness.source("POV two", 60_000);
-        let out_of_bounds = vec![
-            KillSegment {
-                source: source.clone(),
-                start_ms: 0,
-                end_ms: 10_000,
-            },
-            KillSegment {
-                source: other.clone(),
-                start_ms: 0,
-                end_ms: 90_000,
-            },
-        ];
-        assert!(validate_kill_video(&out_of_bounds, 1920, 1080, 30, KillAudio::Switched).is_err());
-
-        let valid = vec![
-            KillSegment {
-                source,
-                start_ms: 0,
-                end_ms: 10_000,
-            },
-            KillSegment {
-                source: other,
-                start_ms: 0,
-                end_ms: 10_000,
-            },
-        ];
-        assert!(validate_kill_video(&valid, 0, 1080, 30, KillAudio::Switched).is_err());
-        assert!(validate_kill_video(&valid, 1920, 1080, 30, KillAudio::Source(5)).is_err());
-        assert!(validate_kill_video(&valid, 1920, 1080, 30, KillAudio::Switched).is_ok());
-    }
-
-    */
     fn finalize_job(harness: &Harness, with_replay: bool) -> MediaJob {
         let regular = harness.root.join("capture/regular/Video.mkv");
         fs::write(&regular, "regular bytes").expect("regular");
@@ -1807,8 +1431,8 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_terminates_a_chatty_child_and_reads_a_bounded_log_tail() {
-        let mut harness = Harness::new("shutdown-chatty");
+    fn progress_is_parsed_incrementally_while_ffmpeg_runs() {
+        let mut harness = Harness::new("progress");
         harness.set_mode("chatty");
         let source = harness.source("Raid POV", 60_000);
         harness
@@ -1821,31 +1445,13 @@ mod tests {
             .expect("send clip");
 
         thread::sleep(Duration::from_millis(200));
-        // Progress is parsed incrementally while the child is still writing.
         assert!(
             harness
                 .progress()
                 .iter()
                 .any(|progress| progress.completed > 0)
         );
-
-        harness
-            .control
-            .send(MediaControl::Shutdown {
-                pending_finalizations: Vec::new(),
-            })
-            .expect("shutdown");
-        let event = harness.outcome();
-        assert_eq!(
-            event,
-            MediaEvent::Cancelled {
-                kind: WorkKind::Clip
-            }
-        );
-
-        let pattern = harness.staging().to_string_lossy().into_owned();
-        harness.worker.take().expect("worker").join().expect("join");
-        assert!(!any_running(&pattern), "an FFmpeg child survived shutdown");
+        harness.shutdown_and_join();
     }
 
     #[test]

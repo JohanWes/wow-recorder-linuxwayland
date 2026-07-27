@@ -421,8 +421,8 @@ fn days_in_month(year: i32, month: i32) -> i32 {
     }
 }
 
-// Howard Hinnant's proleptic Gregorian conversion, expressed directly for std-only parsing.
-fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
+/// Howard Hinnant's proleptic Gregorian days-from-civil conversion.
+pub(crate) fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
     let year = year - i32::from(month <= 2);
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let year_of_era = year - era * 400;
@@ -438,65 +438,8 @@ mod tests {
 
     const CONTEXT: ParseTimeContext = ParseTimeContext::new(2026, 120);
 
-    // Each entry maps to both tests/logs/<entry>.txt and tests/src/<entry>.py. The latter is
-    // the legacy expected-behavior group; test.py is its shared harness. Keeping paths here,
-    // rather than copying raw fixtures, audits complete corpus coverage without retaining names.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum GoldenGroup {
-        Retail,
-        Classic,
-        Era,
-    }
-
-    const SOURCE_BEHAVIOR_GROUPS: &[(&str, GoldenGroup)] = &[
-        ("retail/beloren_boss_hp", GoldenGroup::Retail),
-        ("retail/mythic_plus", GoldenGroup::Retail),
-        ("retail/mythic_plus_ditch_into_raid", GoldenGroup::Retail),
-        ("retail/mythic_plus_drop_go", GoldenGroup::Retail),
-        ("retail/mythic_plus_no_boss", GoldenGroup::Retail),
-        ("retail/mythic_plus_repair", GoldenGroup::Retail),
-        ("retail/raid_reset", GoldenGroup::Retail),
-        ("retail/raid_unknown_encounter", GoldenGroup::Retail),
-        ("retail/raid_wipe", GoldenGroup::Retail),
-        ("retail/rated_2v2", GoldenGroup::Retail),
-        ("retail/rated_2v2_afk_out", GoldenGroup::Retail),
-        ("retail/rated_3v3", GoldenGroup::Retail),
-        ("retail/rated_battleground", GoldenGroup::Retail),
-        ("retail/rated_solo_shuffle", GoldenGroup::Retail),
-        ("retail/skirmish", GoldenGroup::Retail),
-        ("retail/wargame_3v3", GoldenGroup::Retail),
-        ("retail/zone_changes", GoldenGroup::Retail),
-        ("classic/battleground", GoldenGroup::Classic),
-        ("classic/mop_challenge_mode", GoldenGroup::Classic),
-        ("classic/raid", GoldenGroup::Classic),
-        ("classic/rated_2v2", GoldenGroup::Classic),
-        ("classic/rated_2v2_double", GoldenGroup::Classic),
-        ("classic/rated_2v2_extra_units", GoldenGroup::Classic),
-        ("classic/rated_2v2_feign_death", GoldenGroup::Classic),
-        ("classic/rated_3v3", GoldenGroup::Classic),
-        ("classic/rated_3v3_force_stop", GoldenGroup::Classic),
-        ("classic/rated_5v5", GoldenGroup::Classic),
-        ("era/raid", GoldenGroup::Era),
-    ];
-
     #[test]
-    fn parses_anonymized_retained_variants_in_order() {
-        assert_eq!(SOURCE_BEHAVIOR_GROUPS.len(), 28);
-        assert_eq!(
-            SOURCE_BEHAVIOR_GROUPS
-                .iter()
-                .filter(|(_, group)| *group == GoldenGroup::Retail)
-                .count(),
-            17
-        );
-        assert_eq!(
-            SOURCE_BEHAVIOR_GROUPS
-                .iter()
-                .filter(|(_, group)| *group == GoldenGroup::Classic)
-                .count(),
-            10
-        );
-        assert_eq!(SOURCE_BEHAVIOR_GROUPS[27].1, GoldenGroup::Era);
+    fn parses_every_retained_event_shape_in_order() {
         let fixture = [
             "4/9 19:27:13.200  ZONE_CHANGE,2652,\"The Stonevault\",23",
             "4/9 19:27:14.200  CHALLENGE_MODE_START,\"The Stonevault\",2652,501,10,[158,10,152,9]",

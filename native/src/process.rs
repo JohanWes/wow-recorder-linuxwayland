@@ -2,8 +2,8 @@
 
 //! Checked Unix signal/termination helpers for spawned children.
 //!
-//! Rust's `Child` can only SIGKILL, so `gpu-screen-recorder` control signals
-//! (WR-006) and FFmpeg termination (WR-007) go through `libc::kill` here.
+//! Rust's `Child` can only SIGKILL, so GSR control signals and FFmpeg
+//! termination go through `libc::kill` here.
 
 use std::io;
 use std::process::Child;

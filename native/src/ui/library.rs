@@ -2,7 +2,7 @@
 
 //! The library view: one virtualized `GtkColumnView` with the category column
 //! set, suggestion-chip + paired-date filtering, native multiselect, and the
-//! local protect/tag/reveal/delete actions (WR-010).
+//! local protect/tag/reveal/delete actions.
 //!
 //! Model pipeline (GTK-native, no bespoke collection):
 //!
@@ -33,22 +33,16 @@ use warcraft_recorder::domain::{ActivityDetails, Category, LibraryEntry, Outcome
 use super::filters::{self, Chip};
 use super::{ActionSink, ShellAction};
 
-/// What the player area needs when a single row is chosen. WR-011 turns this
-/// into an actual playback load; today the shell only shows the title.
-// ponytail: `media_path`/`viewpoints` are the WR-011 player seam the ticket
-// mandates ("load the preferred/default local POV"); unread until that lands.
-#[allow(dead_code)]
+/// What the player area needs when a single row is chosen.
 #[derive(Clone, Debug)]
 pub struct Selection {
     pub id: RecordingId,
-    pub title: String,
-    pub media_path: PathBuf,
     /// Correlated local POV ids (primary first) for the viewpoint selector.
     pub viewpoints: Vec<RecordingId>,
 }
 
-/// Column families as WR-000 records them. The selected category maps to one
-/// family which decides the column set.
+/// Column families: the selected category maps to one family, which decides
+/// the column set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Family {
     Raid,
@@ -294,8 +288,7 @@ fn build_rows(snapshot: &AppSnapshot, category: &Category) -> Vec<Rc<RowModel>> 
         })
         .collect();
 
-    // Default order: newest first, matching the legacy reverse-chronological
-    // scan/correlator. An active column sort overrides this in the sort model.
+    // Default order: newest first. An active column sort overrides this.
     rows.sort_by_key(|row| std::cmp::Reverse(row.date_ms));
     rows
 }
@@ -640,7 +633,7 @@ impl Inner {
             this.state.suggestions_active.set(search.has_focus());
             this.refresh_suggestion_popover();
         });
-        // Enter accepts the top narrowed suggestion, matching legacy Tab/Enter.
+        // Enter accepts the top narrowed suggestion.
         let this = Rc::clone(self);
         self.search.connect_activate(move |_| {
             this.accept_first_suggestion();
@@ -724,8 +717,8 @@ impl Inner {
         self.stack.set_visible_child_name(name);
     }
 
-    /// Suggestions come from the currently *filtered* rows (WR-000), deduped by
-    /// label and minus the already-selected chips.
+    /// Suggestions come from the currently *filtered* rows, deduped by label
+    /// and minus the already-selected chips.
     fn refresh_available_suggestions(&self) {
         let mut seen: HashSet<String> = HashSet::new();
         let mut chips = Vec::new();
@@ -875,8 +868,6 @@ impl Inner {
             let row = &selected[0];
             (self.on_select)(Some(Selection {
                 id: row.id.clone(),
-                title: row.details.clone(),
-                media_path: row.media_path.clone(),
                 viewpoints: row.correlated_ids.clone(),
             }));
         }
@@ -905,8 +896,8 @@ impl Inner {
         let rows = selected.len();
         self.bulk_count
             .set_text(&format!("{rows} recording{} selected", plural(rows)));
-        // Legacy rule: unless every selected viewpoint is protected, the action
-        // is Protect; only an all-protected selection unprotects.
+        // Unless every selected viewpoint is protected the action is Protect;
+        // only an all-protected selection unprotects.
         let all_protected = selected.iter().all(|row| row.all_protected);
         self.protect_button.set_label(if all_protected {
             "Unprotect"
@@ -993,8 +984,8 @@ impl Inner {
         let id = row.id.clone();
         dialog.connect_response(None, move |_, response| {
             if response == "save" {
-                // The entry already caps input at 1024 characters (the legacy
-                // limit); trim and let storage clear the tag when it is empty.
+                // The entry caps input at 1024 characters; trim and let storage
+                // clear the tag when it is empty.
                 this.send_mutation(Command::SetTag {
                     id: id.clone(),
                     tag: entry.text().trim().to_owned(),
@@ -1102,7 +1093,7 @@ impl Inner {
 
     fn reset_for_category(self: &Rc<Self>, category: &Category, family_changed: bool) {
         // Category change clears chips, dates, selection, and any active sort,
-        // and swaps in the family's columns (WR-000 baseline).
+        // and swaps in the family's columns.
         self.state.selected_chips.borrow_mut().clear();
         self.state.date_range.set(None);
         self.search.set_text("");
@@ -1541,9 +1532,8 @@ fn text_column(
     column
 }
 
-/// The Result column: same text cell as `text_column`, plus the win/loss
-/// outcome color the legacy table used (label conveys the meaning; color is
-/// reinforcement only).
+/// The Result column: same text cell as `text_column`, plus a win/loss outcome
+/// color (the label conveys the meaning; color is reinforcement only).
 fn result_column() -> gtk4::ColumnViewColumn {
     let factory = gtk4::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
@@ -1690,201 +1680,4 @@ fn labelled_calendar(title: &str, calendar: &gtk4::Calendar) -> gtk4::Box {
     container.append(&heading);
     container.append(calendar);
     container
-}
-
-#[cfg(test)]
-mod release_gate_tests {
-    use super::*;
-    use std::time::Instant;
-    use warcraft_recorder::config::Config;
-    use warcraft_recorder::domain::{RecorderStatus, StorageLimit};
-    use warcraft_recorder::storage::Storage;
-
-    fn snapshot() -> AppSnapshot {
-        let root = PathBuf::from(std::env::var_os("WR015_CORPUS").expect("set WR015_CORPUS"));
-        let index = Storage::new(root.clone(), root.join(".wr015-capture")).scan();
-        assert_eq!(index.entries.len(), 2_000);
-        AppSnapshot {
-            entries: index.entries,
-            correlations: index.correlations,
-            category_counts: Vec::new(),
-            status: RecorderStatus::WaitingForWow,
-            active: None,
-            config: Config::default(),
-            setup_problems: Vec::new(),
-            advanced_logging: Vec::new(),
-            problems: Vec::new(),
-            work: None,
-            queued_jobs: 0,
-            storage_used_bytes: 0,
-            storage_limit: StorageLimit::Unlimited,
-            protected_over_limit: false,
-        }
-    }
-
-    fn measure(mut operation: impl FnMut()) -> (Vec<u128>, u128) {
-        operation();
-        let mut samples = Vec::new();
-        for _ in 0..5 {
-            let started = Instant::now();
-            operation();
-            samples.push(started.elapsed().as_micros());
-        }
-        samples.sort_unstable();
-        let median = samples[2];
-        (samples, median)
-    }
-
-    #[test]
-    #[ignore = "run manually with WR015_CORPUS after generating the WR-000 corpus"]
-    fn measure_filter_and_sort_updates() {
-        gtk4::init().expect("GTK display is required for the manual release gate");
-        let mut snapshot = snapshot();
-        snapshot.config.interface.selected_category = Category::MythicPlus;
-        let library = Library::new(Rc::new(|_| true), Rc::new(|_| {}));
-        library.apply(&snapshot);
-        assert_eq!(library.inner.store.n_items(), 200);
-        assert_eq!(
-            library.inner.suggestion_model.n_items(),
-            0,
-            "a hidden popover must not materialize suggestion rows"
-        );
-        assert!(library.inner.state.suggestions_dirty.get());
-
-        // Exercise the focused-search path without depending on compositor
-        // focus policy in this manual harness.
-        library.inner.state.suggestions_active.set(true);
-        library.inner.refresh_suggestion_popover();
-        assert!(!library.inner.state.available.borrow().is_empty());
-
-        // A relevant snapshot while search is focused replaces the backing
-        // store with one notification, rather than rescanning a growing model
-        // once per row.
-        let notifications = Rc::new(Cell::new(0u32));
-        let notification_count = Rc::clone(&notifications);
-        library
-            .inner
-            .store
-            .connect_items_changed(move |_, _, _, _| {
-                notification_count.set(notification_count.get() + 1);
-            });
-        let entries = Arc::make_mut(&mut snapshot.entries);
-        entries
-            .iter_mut()
-            .find(|entry| entry.category == Category::MythicPlus)
-            .expect("Mythic+ entry")
-            .tag = Some("focused rebuild".to_owned());
-        library.apply(&snapshot);
-        assert_eq!(notifications.get(), 1);
-
-        // Exercise the actual widgets and GtkFilterListModel/GtkSortListModel,
-        // then enumerate the resulting selection model so lazy work is paid
-        // inside each sample.
-        let force_model = || {
-            let count = library.inner.selection.n_items();
-            for position in 0..count {
-                std::hint::black_box(library.inner.selection.item(position));
-            }
-        };
-        let mut suggestion_toggle = false;
-        let (suggestion_samples, suggestion_median) = measure(|| {
-            suggestion_toggle = !suggestion_toggle;
-            library.inner.search.set_text(if suggestion_toggle {
-                "player"
-            } else {
-                "dungeon"
-            });
-            library
-                .inner
-                .search
-                .emit_by_name::<()>("search-changed", &[]);
-            for position in 0..library.inner.suggestion_model.n_items() {
-                std::hint::black_box(library.inner.suggestion_model.item(position));
-            }
-        });
-        let normal_suggestions = library.inner.state.available.borrow().clone();
-        *library.inner.state.available.borrow_mut() = (0..10_000)
-            .map(|index| Chip {
-                group: 200,
-                label: format!(
-                    "stress-{}-{index:05}",
-                    if index % 2 == 0 { 'a' } else { 'b' }
-                ),
-            })
-            .collect();
-        let mut high_card_toggle = false;
-        let (high_card_samples, high_card_median) = measure(|| {
-            high_card_toggle = !high_card_toggle;
-            library.inner.search.set_text(if high_card_toggle {
-                "stress-a"
-            } else {
-                "stress-b"
-            });
-            library
-                .inner
-                .search
-                .emit_by_name::<()>("search-changed", &[]);
-            assert_eq!(library.inner.suggestion_model.n_items(), 5_000);
-            for position in 0..library.inner.suggestion_model.n_items() {
-                std::hint::black_box(library.inner.suggestion_model.item(position));
-            }
-        });
-        *library.inner.state.available.borrow_mut() = normal_suggestions;
-        library.inner.search.set_text("");
-        let chip = library.inner.state.available.borrow()[0].clone();
-        let mut chip_toggle = false;
-        let (chip_samples, chip_median) = measure(|| {
-            chip_toggle = !chip_toggle;
-            let mut selected = library.inner.state.selected_chips.borrow_mut();
-            selected.clear();
-            if chip_toggle {
-                selected.push(chip.clone());
-            }
-            drop(selected);
-            library.inner.refilter();
-            force_model();
-        });
-        let rows = build_rows(&snapshot, &Category::MythicPlus);
-        let start = rows.last().map_or(0, |row| row.date_ms);
-        let end = rows.first().map_or(0, |row| row.date_ms);
-        let mut date_toggle = false;
-        let (date_samples, date_median) = measure(|| {
-            date_toggle = !date_toggle;
-            library
-                .inner
-                .state
-                .date_range
-                .set(date_toggle.then_some((start, end)));
-            library.inner.refilter();
-            force_model();
-        });
-        let column = library
-            .inner
-            .column_view
-            .columns()
-            .item(1)
-            .expect("details column")
-            .downcast::<gtk4::ColumnViewColumn>()
-            .expect("column type");
-        let mut descending = false;
-        let (sort_samples, sort_median) = measure(|| {
-            descending = !descending;
-            library.inner.column_view.sort_by_column(
-                Some(&column),
-                if descending {
-                    gtk4::SortType::Descending
-                } else {
-                    gtk4::SortType::Ascending
-                },
-            );
-            force_model();
-        });
-        println!(
-            "suggestion_us={suggestion_samples:?} median={suggestion_median}; \
-             high_card_suggestion_us={high_card_samples:?} median={high_card_median}; \
-             chip_us={chip_samples:?} median={chip_median}; \
-             date_us={date_samples:?} median={date_median}; \
-             sort_us={sort_samples:?} median={sort_median}"
-        );
-    }
 }

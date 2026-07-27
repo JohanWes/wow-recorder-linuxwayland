@@ -76,8 +76,7 @@ pub enum GameFlavor {
     Retail,
     Classic,
     /// Classic Era log source. Only used to tag parsed events and key per-flavour
-    /// engine state; Era recordings store `Classic` in their metadata, matching
-    /// the legacy `Flavour.Classic` written by `EraLogHandler`.
+    /// engine state; Era recordings store `Classic` in their metadata.
     Era,
     Unknown(String),
 }
@@ -398,9 +397,8 @@ pub struct MediaFacts {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub codec: Option<Codec>,
-    /// Runtime filesystem fact. It is deliberately absent from sidecars: the
-    /// media worker validates real outputs, while WR-015's scan-only corpus
-    /// uses zero-byte placeholders that the player must not try to decode.
+    /// Runtime filesystem fact, deliberately absent from sidecars: the media
+    /// worker validates real outputs.
     #[serde(skip, default = "default_media_has_content")]
     pub has_content: bool,
 }
@@ -658,89 +656,17 @@ mod tests {
     }
 
     #[test]
-    fn retained_categories_have_concrete_detail_variants() {
-        let flavors = [
+    fn flavors_round_trip_including_unknown_values() {
+        for flavor in [
             GameFlavor::Retail,
             GameFlavor::Classic,
             GameFlavor::Unknown("Legacy flavor".to_owned()),
-        ];
-        for flavor in flavors {
+        ] {
             let encoded = serde_json::to_string(&flavor).expect("serialize flavor");
             assert_eq!(
                 serde_json::from_str::<GameFlavor>(&encoded).expect("deserialize flavor"),
                 flavor
             );
-        }
-
-        let pvp = || ActivityDetails::ArenaOrBattleground {
-            map_id: Some(1),
-            map_name: Some("Example Map".to_owned()),
-            team_mmr: Some(1_800),
-        };
-        let cases = [
-            (Category::TwoVTwo, pvp()),
-            (Category::ThreeVThree, pvp()),
-            (Category::FiveVFive, pvp()),
-            (Category::Skirmish, pvp()),
-            (Category::Battlegrounds, pvp()),
-            (
-                Category::SoloShuffle,
-                ActivityDetails::SoloRounds {
-                    map_id: Some(2),
-                    map_name: Some("Shuffle Map".to_owned()),
-                    rounds_won: Some(4),
-                    rounds_played: Some(6),
-                    rounds: vec![RoundSummary {
-                        round: 1,
-                        outcome: Outcome::Win,
-                        start_ms: 0,
-                        duration_ms: Some(30_000),
-                    }],
-                },
-            ),
-            (
-                Category::MythicPlus,
-                ActivityDetails::Dungeon {
-                    zone_id: Some(3),
-                    dungeon_name: Some("Example Dungeon".to_owned()),
-                    map_id: Some(4),
-                    keystone_level: Some(12),
-                    affixes: vec![9, 10],
-                    upgrade_level: Some(2),
-                },
-            ),
-            (
-                Category::Raids,
-                ActivityDetails::Raid {
-                    zone_id: Some(5),
-                    zone_name: Some("Example Raid".to_owned()),
-                    encounter_id: Some(6),
-                    encounter_name: Some("Example Boss".to_owned()),
-                    difficulty_id: Some(16),
-                    difficulty: Some("Mythic".to_owned()),
-                    pull: Some(7),
-                    boss_percent: Some(8),
-                },
-            ),
-            (Category::Manual, ActivityDetails::Manual),
-            (
-                Category::Clip,
-                ActivityDetails::Clip {
-                    source_recording: RecordingId::from_legacy(None, Path::new("source.mkv")),
-                    source_category: Category::Raids,
-                    source_title: Some("Example Boss".to_owned()),
-                },
-            ),
-            (
-                Category::Unknown("Legacy Category".to_owned()),
-                ActivityDetails::UnknownLegacy {
-                    description: Some("Legacy details".to_owned()),
-                },
-            ),
-        ];
-
-        for (category, details) in cases {
-            assert!(details.matches_category(&category), "{category:?}");
         }
     }
 

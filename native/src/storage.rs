@@ -9,13 +9,10 @@
 //! startup-sweep operations. FFmpeg work lives in `media_jobs`; this module
 //! never spawns a process.
 //!
-//! Reconciliation notes against WR-007:
-//! - `finalize` takes the already-combined media produced by the media worker
-//!   (`CombinedMedia`) instead of invoking FFmpeg itself, so storage stays
-//!   process-free and the worker keeps sole ownership of FFmpeg argv/progress.
-//! - `update`, `delete`, `reveal_path`, and `enforce_limit` take the scanned
-//!   `LibraryEntry` rather than a bare identifier: the entry already carries its
-//!   sidecar/media paths, so no second in-memory index is needed.
+//! `finalize` takes the already-combined media produced by the media worker, so
+//! storage stays process-free. `update`, `delete`, `reveal_path`, and
+//! `enforce_limit` take the scanned `LibraryEntry`, which already carries its
+//! sidecar/media paths, so no second in-memory index is needed.
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -34,15 +31,15 @@ use crate::domain::{
     StorageLimit, TimelineItem, TimelineKind, TimelineShape,
 };
 use crate::parser::{
-    CombatEvent, ParseTimeContext, PlayerObservationKind, is_bloodlust_spell, parse_line,
-    parse_timestamp,
+    CombatEvent, ParseTimeContext, PlayerObservationKind, days_from_civil, is_bloodlust_spell,
+    parse_line, parse_timestamp,
 };
 use crate::recorder::CaptureArtifacts;
 
 /// Schema version written into every native sidecar.
 pub const SIDECAR_SCHEMA_VERSION: u32 = 1;
 
-/// WR-000 multi-POV correlation tolerance on the activity start time.
+/// Multi-POV correlation tolerance on the activity start time.
 const CORRELATION_TOLERANCE_MS: i64 = 60_000;
 
 /// Directory (under the storage root) the startup sweep quarantines
@@ -73,7 +70,7 @@ pub struct SkippedEntry {
 /// Result of a library scan. Holds no file handles or UI objects.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LibraryIndex {
-    /// Reverse chronological, matching the baseline library ordering.
+    /// Reverse chronological.
     pub entries: Arc<Vec<LibraryEntry>>,
     pub correlations: Arc<Vec<CorrelatedActivity>>,
     /// Entries whose sidecar was written by the legacy application.
@@ -86,7 +83,7 @@ pub struct LibraryIndex {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EntryUpdate {
     Protected(bool),
-    /// An empty or whitespace-only tag clears it, matching the baseline.
+    /// An empty or whitespace-only tag clears it.
     Tag(String),
 }
 
@@ -141,7 +138,7 @@ pub struct Storage {
 
 impl Storage {
     /// `root` is the configured recording directory; `capture_root` holds GSR's
-    /// `replay`, `regular`, and `staging` subdirectories (WR-006).
+    /// `replay`, `regular`, and `staging` subdirectories.
     pub fn new(root: impl Into<PathBuf>, capture_root: impl AsRef<Path>) -> Self {
         let capture_root = capture_root.as_ref();
         Self {
@@ -176,18 +173,11 @@ impl Storage {
     /// an un-enriched recording falls within that log session. The added key is
     /// retained by the Electron reader as unknown metadata and makes future
     /// scans independent of the large source log.
+    ///
+    /// Historical logs can be very large, so `cancelled` lets shutdown and
+    /// newly queued finalization stop this optional one-time maintenance pass
+    /// between bounded batches of lines.
     pub fn enrich_legacy_bloodlust(
-        &self,
-        retail_log_dirs: &[PathBuf],
-        context: ParseTimeContext,
-    ) -> TimelineEnrichmentReport {
-        self.enrich_legacy_bloodlust_cancellable(retail_log_dirs, context, || false)
-    }
-
-    /// Worker-facing variant. Historical logs can be very large, so shutdown
-    /// and newly queued recording finalization must be able to stop this
-    /// optional one-time maintenance pass between bounded batches of lines.
-    pub(crate) fn enrich_legacy_bloodlust_cancellable(
         &self,
         retail_log_dirs: &[PathBuf],
         context: ParseTimeContext,
@@ -310,9 +300,7 @@ impl Storage {
         targets
     }
 
-    // -----------------------------------------------------------------------
-    // Scan
-    // -----------------------------------------------------------------------
+    // --- Scan ---
 
     /// Read every sidecar at the configured directory level. Unrelated files are
     /// counted, unreadable sidecars are reported, and nothing is repaired.
@@ -429,9 +417,7 @@ impl Storage {
         })
     }
 
-    // -----------------------------------------------------------------------
-    // Finalization
-    // -----------------------------------------------------------------------
+    // --- Finalization ---
 
     /// Turn a finished draft plus its combined media into a library entry:
     /// write the sidecar temp, rename media then sidecar, and only then remove
@@ -534,9 +520,7 @@ impl Storage {
         fs::rename(&sidecar_temp, &entry.sidecar_path)
     }
 
-    // -----------------------------------------------------------------------
-    // Mutation and deletion
-    // -----------------------------------------------------------------------
+    // --- Mutation and deletion ---
 
     /// Rewrite only the sidecar, atomically. A legacy sidecar keeps its original
     /// schema and unknown fields: only the `protected`/`tag` keys are patched so
@@ -637,9 +621,7 @@ impl Storage {
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Storage limit
-    // -----------------------------------------------------------------------
+    // --- Storage limit ---
 
     /// Evict the oldest unprotected recordings until the library fits the limit.
     /// Unlimited returns without eviction; unrecognized files are never touched.
@@ -728,9 +710,7 @@ impl Storage {
         media.saturating_add(sidecar)
     }
 
-    // -----------------------------------------------------------------------
-    // Startup sweep
-    // -----------------------------------------------------------------------
+    // --- Startup sweep ---
 
     /// Quarantine every media/GSR/`.tmp` artifact in the storage, replay,
     /// regular, and staging directories that no sidecar references. Runs once at
@@ -839,9 +819,7 @@ struct LoadedSidecar {
     correlation_start_ms: Option<i64>,
 }
 
-// ---------------------------------------------------------------------------
-// Native sidecar
-// ---------------------------------------------------------------------------
+// --- Native sidecar ---
 
 #[derive(Debug, Serialize, Deserialize)]
 struct NativeSidecar {
@@ -923,9 +901,7 @@ impl NativeSidecar {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Legacy sidecar
-// ---------------------------------------------------------------------------
+// --- Legacy sidecar ---
 
 /// The real legacy JSON written by the Electron application. Private to
 /// storage: it is converted to the clean model and never exposed. Cloud-only
@@ -1156,8 +1132,7 @@ impl LegacySidecar {
             if start_ms > duration_ms {
                 continue;
             }
-            // The legacy segment length is the difference of its ISO log
-            // timestamps, exactly as the current renderer computes it.
+            // A legacy segment's length is the difference of its ISO log stamps.
             let length_ms = match (
                 segment.log_start.as_deref().and_then(iso_epoch_ms),
                 segment.log_end.as_deref().and_then(iso_epoch_ms),
@@ -1238,9 +1213,8 @@ impl LegacySidecar {
         items
     }
 
-    /// Legacy sidecars usually store only `zoneID`/`mapID`; the legacy frontend
-    /// resolved the display name from `instanceNamesByZoneId` at render time.
-    /// Restore it the same way when the sidecar carries no name.
+    /// Legacy sidecars usually store only `zoneID`/`mapID`; resolve the display
+    /// name from the instance table when the sidecar carries no name.
     fn legacy_place_name(&self) -> Option<String> {
         self.zone_name.clone().or_else(|| {
             crate::activity::instance_name(
@@ -1439,11 +1413,9 @@ fn legacy_combatant(combatant: &LegacyCombatant) -> CombatantSummary {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Correlation
-// ---------------------------------------------------------------------------
+// --- Correlation ---
 
-/// WR-000 correlation: identical unique hash and activity start times within one
+/// Correlation: identical unique hash and activity start times within one
 /// minute. Clips, solo shuffle, and manual recordings only ever group with the
 /// literally identical video, which for a local-only library means never.
 fn correlate(entries: &[LibraryEntry], starts: &[Option<i64>]) -> Vec<CorrelatedActivity> {
@@ -1501,9 +1473,7 @@ fn excluded_from_correlation(category: &Category) -> bool {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
+// --- Shared helpers ---
 
 fn historical_log_paths(source: &Path) -> io::Result<Vec<PathBuf>> {
     if source.is_file() {
@@ -1707,8 +1677,8 @@ fn shift_timeline(
     shifted
 }
 
-/// Baseline filename sanitizer: invalid characters become spaces and runs of
-/// spaces collapse.
+/// Filename sanitizer: invalid characters become spaces, runs of spaces
+/// collapse.
 pub fn sanitize_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut last_space = false;
@@ -1757,8 +1727,7 @@ fn default_title(category: &Category) -> String {
     }
 }
 
-/// Era log sources record `Classic` in their metadata, matching the legacy
-/// `EraLogHandler`.
+/// Era log sources record `Classic` in their metadata.
 fn recorded_flavor(flavor: &GameFlavor) -> GameFlavor {
     match flavor {
         GameFlavor::Era => GameFlavor::Classic,
@@ -1775,9 +1744,8 @@ fn seconds_to_ms(seconds: f64) -> u64 {
 
 fn media_has_content(path: &Path) -> Result<bool, String> {
     match fs::metadata(path) {
-        // WR-015's deterministic library corpus deliberately uses zero-byte
-        // placeholders because scanning must not decode media. Real outputs
-        // are still checked as nonzero by the media worker before finalizing.
+        // Scanning must never decode media, so a nonzero length is the only
+        // content check here; the media worker validates real outputs.
         Ok(metadata) if metadata.is_file() => Ok(metadata.len() > 0),
         Ok(_) => Err(format!("media path {} is not a file", path.display())),
         Err(error) => Err(format!("media file {}: {error}", path.display())),
@@ -1847,18 +1815,8 @@ fn iso_epoch_ms(value: &str) -> Option<i64> {
         .get(20..23)
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0);
-    let days = days_from_civil(year, month, day);
+    let days = days_from_civil(year as i32, month as i32, day as i32);
     Some((((days * 24 + hour) * 60 + minute) * 60 + second) * 1000 + millis)
-}
-
-/// Howard Hinnant's days-from-civil algorithm.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
 }
 
 /// Wall-clock milliseconds; used for generated clip dates.
@@ -1917,12 +1875,13 @@ mod tests {
 
         let storage = tree.storage();
         let context = ParseTimeContext::new(2026, 120);
-        let report = storage.enrich_legacy_bloodlust(std::slice::from_ref(&logs), context);
+        let report =
+            storage.enrich_legacy_bloodlust(std::slice::from_ref(&logs), context, || false);
         assert_eq!(report.enriched, 1);
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(
             storage
-                .enrich_legacy_bloodlust(std::slice::from_ref(&logs), context)
+                .enrich_legacy_bloodlust(std::slice::from_ref(&logs), context, || false)
                 .enriched,
             0
         );
@@ -1939,34 +1898,6 @@ mod tests {
         assert_eq!(marker.start_ms(), 37_000);
         assert_eq!(marker.end_ms(), Some(77_000));
         assert_eq!(marker.label(), Some("Fury of the Aspects"));
-    }
-
-    #[test]
-    fn legacy_enrichment_checks_cancellation_while_streaming_historical_logs() {
-        let tree = TempTree::new("bloodlust-cancel");
-        let logs = tree.root.join("logs");
-        fs::create_dir_all(&logs).unwrap();
-        let sidecar = tree.write(
-            "run.json",
-            r#"{"category":"Mythic+","duration":120,"start":1784396963000}"#,
-        );
-        tree.write("run.mp4", "media");
-        fs::write(logs.join("WoWCombatLog.txt"), "irrelevant\n".repeat(2048)).unwrap();
-
-        let mut checks = 0;
-        let report = tree.storage().enrich_legacy_bloodlust_cancellable(
-            std::slice::from_ref(&logs),
-            ParseTimeContext::new(2026, 120),
-            || {
-                checks += 1;
-                checks >= 3
-            },
-        );
-
-        assert_eq!(report.enriched, 0);
-        assert_eq!(checks, 3);
-        let value: Value = serde_json::from_str(&fs::read_to_string(sidecar).unwrap()).unwrap();
-        assert!(value.get("bloodlustTimeline").is_none());
     }
 
     #[test]
@@ -1990,7 +1921,7 @@ mod tests {
         .unwrap();
 
         let mut checks = 0;
-        let report = tree.storage().enrich_legacy_bloodlust_cancellable(
+        let report = tree.storage().enrich_legacy_bloodlust(
             std::slice::from_ref(&logs),
             ParseTimeContext::new(2026, 120),
             || {
@@ -2028,7 +1959,7 @@ mod tests {
         let context = ParseTimeContext::new(2026, 120);
         assert_eq!(
             storage
-                .enrich_legacy_bloodlust(std::slice::from_ref(&logs), context)
+                .enrich_legacy_bloodlust(std::slice::from_ref(&logs), context, || false)
                 .enriched,
             0
         );
@@ -2043,7 +1974,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             storage
-                .enrich_legacy_bloodlust(std::slice::from_ref(&logs), context)
+                .enrich_legacy_bloodlust(std::slice::from_ref(&logs), context, || false)
                 .enriched,
             1
         );

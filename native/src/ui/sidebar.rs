@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The category rail: product mark, status card, category rows in WR-000
-//! order with derived counts, and Settings at the bottom. No Home/Recent
-//! destinations exist.
+//! The category rail: product mark, status card, category rows with derived
+//! counts, and Settings at the bottom.
 
 use std::rc::Rc;
 
@@ -25,9 +24,8 @@ pub struct RowView {
     pub active: bool,
 }
 
-/// WR-000 visibility rule: `hide_empty_categories` hides only categories with
-/// zero entries, only once the library holds any video, and Manual stays
-/// visible whenever manual recording is enabled.
+/// `hide_empty_categories` hides only zero-entry categories, only once the
+/// library holds any video; Manual stays visible while manual recording is on.
 pub fn rows(snapshot: &AppSnapshot) -> Vec<RowView> {
     let total: usize = snapshot
         .category_counts

@@ -624,8 +624,8 @@ impl Inner {
         true
     }
 
-    /// Legacy sidecars do not contain media dimensions. Wait briefly for
-    /// Clapper's decoder to expose the authoritative active-stream size.
+    /// Legacy sidecars carry no media dimensions. Wait briefly for Clapper's
+    /// decoder to expose the authoritative active-stream size.
     fn watch_for_video_dimensions(
         self: &Rc<Self>,
         id: RecordingId,
@@ -846,9 +846,9 @@ impl Inner {
                 self.request_seek(position + SEEK_STEP_SECONDS, SeekMode::Settle);
             }
             gtk4::gdk::Key::comma => {
-                // Previous frame while paused: known FPS, else the legacy
-                // 30 fps assumption. The frame is the whole point here, so
-                // this is the one seek worth decoding exactly.
+                // Previous frame while paused: known FPS, else assume 30. The
+                // frame is the point, so this is the one seek worth decoding
+                // exactly.
                 if !self.playing.get() {
                     let fps = self.fps.get().unwrap_or(30).max(1);
                     self.request_seek(position - 1.0 / f64::from(fps), SeekMode::Exact);

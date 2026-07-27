@@ -23,18 +23,18 @@ CI builds from the locked `native/Cargo.lock` and `flatpak/cargo-sources.json`,
 uses the pinned GNOME 50 SDK/runtime, runs `flatpak-builder-lint` for manifest,
 AppStream, and repository, and exports a signed static OSTree repository plus
 one `.flatpak` bundle. The documented linter exceptions in
-`flatpak/lint-exceptions.json` are intentional: WR-000 fixes the canonical
-reverse-DNS ID, the product is Wayland-only, and the read-only legacy config
-grant is required for one-way migration. Rebuilding from the same commit should produce the same
+`flatpak/lint-exceptions.json` are intentional: the canonical reverse-DNS ID,
+the Wayland-only product scope, and the read-only legacy config grant required
+for one-way migration. Rebuilding from the same commit should produce the same
 application payload; OSTree/bundle container metadata may vary by build time.
 The AppStream screenshot is served from the committed `main` tree, while the
 candidate repository also carries its mirrored `screenshots/x86_64` ref.
 
-## Manual remote publication (WR-015 only)
+## Manual remote publication
 
-Do not run this step for WR-014 or for an unapproved candidate. After WR-015
-approves the exact tested commit, publish the `repo/` directory produced by
-that build to the project GitHub Pages site at the permanent URL. Keep
+Never run this for an unapproved candidate. After a candidate is approved,
+publish the `repo/` directory produced by that build to the project GitHub
+Pages site at the permanent URL. Keep
 `index.flatpakrepo`, `summary`, the signed summary, objects, and static deltas
 together. Verify with only the public key:
 

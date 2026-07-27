@@ -1,21 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Pure suggestion-chip and date-range filtering, ported from the legacy
-//! `VideoFilter`/`VideoTag` behaviour (WR-000 rows 48–49). No GTK here: this
-//! module is table-driven and unit tested on its own.
+//! Pure suggestion-chip and date-range filtering. No GTK here: this module is
+//! table-driven and unit tested on its own.
 //!
-//! A chip is the identity a legacy `VideoTag` encodes: a numeric grouping plus
-//! its label. Icon and colour are a deterministic function of the grouping, so
-//! matching on `(group, label)` is equivalent to the legacy full-string
-//! `encode()` comparison. A correlated row passes only when every selected chip
-//! occurs in the row's primary entry or one of its correlated POVs (AND), and,
-//! when both endpoints exist, its start falls inside the inclusive date range.
+//! A chip is a numeric grouping plus its label; icon and colour are a
+//! deterministic function of the grouping. A correlated row passes only when
+//! every selected chip occurs in the row's primary entry or one of its
+//! correlated POVs (AND), and, when both endpoints exist, its start falls
+//! inside the inclusive date range.
 
 use std::collections::BTreeSet;
 
 use warcraft_recorder::domain::{ActivityDetails, GameFlavor, LibraryEntry, Outcome};
 
-// Legacy `VideoTag` groupings. Distinct groupings keep otherwise-equal labels
+// Chip groupings. Distinct groupings keep otherwise-equal labels
 // (e.g. a "Frost" spec vs a hypothetical zone) from colliding in matching.
 const GROUP_PROTECTION: u16 = 101;
 const GROUP_TAGGED: u16 = 102;
@@ -49,7 +47,7 @@ impl Chip {
     }
 
     /// A stock symbolic icon for the chip's grouping. Game-specific art is not
-    /// redistributable (WR-000 assets report), so chips are icon+text.
+    /// redistributable, so chips are icon+text.
     pub fn icon_name(&self) -> &'static str {
         match self.group {
             GROUP_PROTECTION => "starred-symbolic",
@@ -69,8 +67,7 @@ impl Chip {
         }
     }
 
-    /// A per-grouping tint class for the chip pill, restoring the legacy
-    /// colored-chip identity (colour is a deterministic function of grouping).
+    /// A per-grouping tint class for the chip pill.
     pub fn css_class(&self) -> &'static str {
         match self.group {
             GROUP_NAME => "wr-chip-name",
@@ -124,7 +121,7 @@ pub fn suggestions_for_entry(entry: &LibraryEntry) -> Vec<Chip> {
     }
     match entry.flavor {
         GameFlavor::Retail => chips.push(Chip::new(GROUP_FLAVOUR, "Retail")),
-        // Era recordings persist as Classic, matching the legacy writer.
+        // Era recordings persist as Classic.
         GameFlavor::Classic | GameFlavor::Era => chips.push(Chip::new(GROUP_FLAVOUR, "Classic")),
         GameFlavor::Unknown(_) => {}
     }
@@ -193,8 +190,8 @@ pub fn suggestions_for_entry(entry: &LibraryEntry) -> Vec<Chip> {
             push_named(&mut chips, GROUP_ZONE, map_name.as_deref());
             push_win_loss(&mut chips, entry.outcome);
         }
-        // Clips and manual recordings only carry the generic suggestions plus,
-        // in the legacy catch-all, a win/loss result when one is known.
+        // Clips and manual recordings carry the generic suggestions plus a
+        // win/loss result when one is known.
         _ => push_win_loss(&mut chips, entry.outcome),
     }
 
@@ -225,8 +222,8 @@ fn raid_difficulty(id: u32) -> Option<Chip> {
     }
 }
 
-/// Narrow the available suggestions the way the legacy autocomplete does:
-/// case-insensitive substring on the label, excluding already-selected labels.
+/// Narrow the available suggestions: case-insensitive substring on the label,
+/// excluding already-selected labels.
 /// Typing narrows only; it does not filter rows until a suggestion is chosen.
 pub fn narrow(available: &[Chip], query: &str, selected: &[Chip]) -> Vec<Chip> {
     let needle = query.trim().to_lowercase();
@@ -270,10 +267,10 @@ pub fn combined_suggestions<'a>(
         .collect()
 }
 
-// --- Factual lookup tables reused from the legacy constants -----------------
+// --- Factual lookup tables ---
 
-/// Spec id → spec name (`src/main/constants.ts` `specializationById`).
-/// Public so the multi-POV selector labels viewpoints with the same table.
+/// Spec id → spec name. Public so the multi-POV selector labels viewpoints
+/// with the same table.
 pub fn spec_name(id: u16) -> Option<String> {
     SPEC_NAMES
         .iter()
@@ -281,8 +278,7 @@ pub fn spec_name(id: u16) -> Option<String> {
         .map(|(_, name)| (*name).to_owned())
 }
 
-/// Affix id → affix name (`src/main/constants.ts` `dungeonAffixesById`).
-/// Public so the library's Affixes column shows names, not raw ids.
+/// Affix id → affix name. Public so the library's Affixes column shows names.
 pub fn affix_name(id: u32) -> Option<String> {
     AFFIX_NAMES
         .iter()

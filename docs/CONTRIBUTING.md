@@ -22,9 +22,9 @@ native choosers, GSR, and FFmpeg behavior. Do not add a webview, async
 runtime, database, generic IPC layer, thumbnail cache, or compatibility
 wrapper. JSON sidecars and the filesystem remain the library source of truth.
 
-The native test fixtures and goldens live under `tests/native/`. The historical
-legacy sidecar/config fixtures are retained because they prove the one-way
-import and compatible tag/protection patch behavior.
+The native test fixtures and goldens live under `tests/native/`. The legacy
+sidecar/config fixtures are retained because they prove the one-way import and
+compatible tag/protection patch behavior.
 
 ## Packaging
 
@@ -38,5 +38,4 @@ offline from pinned inputs, runs the three Flatpak Builder lints, signs the
 OSTree repository with the project key held in CI secrets, and uploads a
 candidate bundle. It never publishes the permanent remote automatically.
 
-Preserve English strings next to their widgets, and update the relevant
-evidence report when a Flatpak-facing behavior is changed.
+Keep English strings next to their widgets.

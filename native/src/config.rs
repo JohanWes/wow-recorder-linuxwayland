@@ -1121,37 +1121,26 @@ mod tests {
 
     #[test]
     fn validation_reports_every_constraint_in_stable_field_order() {
+        // Rules the ordered assertion below does not already exercise.
         type Mutation = Box<dyn Fn(&mut Config)>;
-        let cases: Vec<(&str, &'static str, Mutation)> = vec![
-            ("version", "version", Box::new(|config| config.version = 2)),
+        let cases: Vec<(&str, Mutation)> = vec![
             (
-                "missing recording directory",
                 "storage.recording_dir",
                 Box::new(|config| config.storage.recording_dir = AuthorizedPath::unset()),
             ),
             (
-                "inactive recording directory",
-                "storage.recording_dir",
-                Box::new(|config| {
-                    config.storage.recording_dir = AuthorizedPath::imported("/recordings")
-                }),
-            ),
-            (
-                "inconsistent path authorization state",
                 "storage.recording_dir",
                 Box::new(|config| {
                     config.storage.recording_dir.authorization = PathAuthorization::Unset
                 }),
             ),
             (
-                "relative directory",
                 "storage.recording_dir",
                 Box::new(|config| {
                     config.storage.recording_dir = AuthorizedPath::authorized("recordings")
                 }),
             ),
             (
-                "missing separate buffer directory",
                 "storage.buffer_dir",
                 Box::new(|config| {
                     config.storage.separate_buffer_dir = true;
@@ -1159,94 +1148,24 @@ mod tests {
                 }),
             ),
             (
-                "inactive separate buffer directory",
-                "storage.buffer_dir",
-                Box::new(|config| {
-                    config.storage.separate_buffer_dir = true;
-                    config.storage.buffer_dir = AuthorizedPath::imported("/buffer");
-                }),
-            ),
-            (
-                "no enabled flavor",
-                "flavors",
-                Box::new(|config| config.flavors.retail.enabled = false),
-            ),
-            (
-                "enabled flavor missing path",
                 "flavors.retail",
                 Box::new(|config| config.flavors.retail.log_dir = AuthorizedPath::unset()),
             ),
             (
-                "enabled flavor inactive path",
-                "flavors.retail",
-                Box::new(|config| {
-                    config.flavors.retail.log_dir = AuthorizedPath::imported("/wow/Logs")
-                }),
-            ),
-            (
-                "enabled flavor wrong folder",
                 "flavors.retail",
                 Box::new(|config| {
                     config.flavors.retail.log_dir = AuthorizedPath::authorized("/wow/Data")
                 }),
             ),
             (
-                "no automatic activity",
-                "activities",
-                Box::new(disable_automatic_activities),
-            ),
-            (
-                "fps",
-                "capture.fps",
-                Box::new(|config| config.capture.fps = 14),
-            ),
-            (
-                "bitrate",
-                "capture.bitrate_kbps",
-                Box::new(|config| config.capture.bitrate_kbps = 999),
-            ),
-            (
-                "replay buffer",
-                "capture.replay_buffer_seconds",
-                Box::new(|config| config.capture.replay_buffer_seconds = 29),
-            ),
-            (
-                "lead in",
-                "capture.extra_lead_in_seconds",
-                Box::new(|config| config.capture.extra_lead_in_seconds = 31),
-            ),
-            (
-                "audio output",
-                "capture.audio_output",
-                Box::new(|config| config.capture.audio_output.clear()),
-            ),
-            (
-                "empty optional audio input",
                 "capture.audio_input",
                 Box::new(|config| config.capture.audio_input = Some(String::new())),
             ),
             (
-                "empty capture token",
                 "capture.capture_target_token",
                 Box::new(|config| config.capture.capture_target_token = Some(String::new())),
             ),
             (
-                "raid duration",
-                "activities.min_raid_duration_seconds",
-                Box::new(|config| config.activities.min_raid_duration_seconds = 10_001),
-            ),
-            (
-                "raid overrun",
-                "activities.raid_overrun_seconds",
-                Box::new(|config| config.activities.raid_overrun_seconds = 61),
-            ),
-            (
-                "dungeon overrun",
-                "activities.dungeon_overrun_seconds",
-                Box::new(|config| config.activities.dungeon_overrun_seconds = 61),
-            ),
-            (
-                "unknown selected category",
                 "interface.selected_category",
                 Box::new(|config| {
                     config.interface.selected_category = Category::Unknown("future".to_owned())
@@ -1254,15 +1173,15 @@ mod tests {
             ),
         ];
 
-        for (name, expected_field, mutate) in cases {
+        for (expected_field, mutate) in cases {
             let mut config = ready_config();
             mutate(&mut config);
             let problems = config.validate();
             assert!(
-                problems.iter().any(|problem| {
-                    problem.field == expected_field && !problem.message.is_empty()
-                }),
-                "missing field-specific English validation for {name}: {problems:?}"
+                problems
+                    .iter()
+                    .any(|problem| problem.field == expected_field && !problem.message.is_empty()),
+                "missing field-specific validation for {expected_field}: {problems:?}"
             );
         }
 

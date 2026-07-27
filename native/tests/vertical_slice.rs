@@ -3,7 +3,7 @@
 //! Headless vertical slice: config, log polling, activity detection, recorder
 //! control, storage, and media jobs behind the real coordinator.
 //!
-//! The recorder and FFmpeg are replaced by the WR-006/WR-007 fakes; every
+//! The recorder and FFmpeg are replaced by shell fakes; every
 //! other type is the production one operating on a temp directory. The
 //! coordinator core is stepped with `tick()`, so no test sleeps or timing
 //! assertions are needed.
@@ -32,9 +32,7 @@ const SELF_FLAGS: &str = "0x511";
 /// fast. Nothing is asserted about how long a step actually takes.
 const STEP_TIMEOUT: Duration = Duration::from_secs(20);
 
-// ---------------------------------------------------------------------------
-// Harness
-// ---------------------------------------------------------------------------
+// --- Harness ---
 
 struct Harness {
     root: PathBuf,
@@ -246,9 +244,7 @@ fn empty_snapshot() -> AppSnapshot {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Combat-log helpers
-// ---------------------------------------------------------------------------
+// --- Combat-log helpers ---
 
 /// `M/D HH:MM:SS.mmm` in UTC, matching the harness's zero UTC offset.
 fn stamp(unix_ms: i64) -> String {
@@ -337,12 +333,8 @@ fn player_death(at_ms: i64) -> String {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Scenarios
-// ---------------------------------------------------------------------------
+// --- Scenarios ---
 
-/// Automatic PvE: replay lead-in, two-artifact capture, post-trim markers,
-/// tag/protect/bulk delete, and a restart that sweeps and rescans.
 #[test]
 fn automatic_raid_completes_and_survives_a_restart() {
     let mut harness = Harness::new("raid");
@@ -425,8 +417,6 @@ fn automatic_raid_completes_and_survives_a_restart() {
     restarted.pump(|snapshot| snapshot.entries.is_empty());
 }
 
-/// PvP: a solo shuffle force-ended mid-activity is abandoned with zero overrun
-/// and still produces a library entry with its round marker.
 #[test]
 fn force_ended_solo_shuffle_is_abandoned_and_saved() {
     let mut harness = Harness::new("shuffle");
@@ -459,8 +449,6 @@ fn force_ended_solo_shuffle_is_abandoned_and_saved() {
     );
 }
 
-/// Manual start/stop and a test recording reuse the same recorder, finalize,
-/// and storage path.
 #[test]
 fn manual_and_test_recordings_reuse_the_capture_pipeline() {
     let mut harness = Harness::new("manual");
@@ -488,8 +476,6 @@ fn manual_and_test_recordings_reuse_the_capture_pipeline() {
     assert_eq!(harness.entries_of(&Category::Raids).len(), 1);
 }
 
-/// Automatic finalization is dispatched before user transcodes that were
-/// queued in the same tick, and both run on the one serial worker.
 #[test]
 fn finalization_precedes_queued_user_jobs() {
     let mut harness = Harness::new("queue");
@@ -527,9 +513,6 @@ fn finalization_precedes_queued_user_jobs() {
     assert_eq!(order, vec![Category::Raids, Category::Clip]);
 }
 
-/// Ending a capture waits on gpu-screen-recorder flushing and muxing, which
-/// takes as long as it takes. The coordinator owns every piece of UI state, so
-/// it has to keep serving commands and publishing snapshots throughout.
 #[test]
 fn commands_are_served_while_a_capture_is_ending() {
     let mut harness = Harness::new("ending");
@@ -561,8 +544,6 @@ fn commands_are_served_while_a_capture_is_ending() {
     assert_eq!(harness.latest.entries[0].category, Category::Raids);
 }
 
-/// Without a replay artifact the recording still saves, and markers that fall
-/// before the media start are clipped away.
 #[test]
 fn missing_replay_falls_back_to_the_regular_recording() {
     let mut harness = Harness::new("regular-only");
@@ -587,8 +568,6 @@ fn missing_replay_falls_back_to_the_regular_recording() {
     );
 }
 
-/// A missing regular artifact is an actionable problem, not a silently lost
-/// library entry.
 #[test]
 fn missing_regular_artifact_reports_a_problem() {
     let mut harness = Harness::new("failure");
@@ -610,8 +589,6 @@ fn missing_regular_artifact_reports_a_problem() {
     );
 }
 
-/// The production wiring starts, publishes, and shuts down without leaking a
-/// thread or requiring GTK.
 #[test]
 fn production_handle_starts_and_shuts_down() {
     let root = std::env::temp_dir().join(format!("wr-slice-handle-{}", uuid::Uuid::new_v4()));

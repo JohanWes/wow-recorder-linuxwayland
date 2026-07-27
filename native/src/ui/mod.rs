@@ -19,7 +19,6 @@ pub mod settings;
 pub mod sidebar;
 pub mod status;
 pub mod timeline;
-pub mod tray;
 pub mod tray_backend;
 pub mod window;
 
@@ -89,7 +88,7 @@ pub enum ShellAction {
     /// Maps `RecoveryAction::Retry`; the shell retries arming capture.
     Retry,
     OpenSettings,
-    /// Opens the test-recording category chooser (WR-012).
+    /// Opens the test-recording category chooser.
     TestRecording,
     OpenLogs,
     About,
@@ -98,7 +97,7 @@ pub enum ShellAction {
     Quit,
 }
 
-/// Category rail metadata in the exact WR-000 order: label and symbolic icon.
+/// Category rail metadata in rail order: label and symbolic icon.
 pub const CATEGORIES: [(Category, &str, &str); 10] = [
     (Category::TwoVTwo, "2v2", "wr-category-2v2-symbolic"),
     (Category::ThreeVThree, "3v3", "wr-category-3v3-symbolic"),
@@ -128,7 +127,7 @@ pub const CATEGORIES: [(Category, &str, &str); 10] = [
     (Category::Clip, "Clips", "wr-category-clips-symbolic"),
 ];
 
-/// The exact WR-000 test-recording choices, in menu order.
+/// Test-recording choices, in menu order.
 pub const TEST_CATEGORIES: [(Category, &str, &str); 6] = [
     (Category::TwoVTwo, "2v2", "2v2"),
     (Category::ThreeVThree, "3v3", "3v3"),
@@ -201,10 +200,11 @@ pub fn run(
             }
             let shell_ref = shell_cell.borrow();
             let built = shell_ref.as_ref().expect("shell built above");
+            // Only start hidden when a tray watcher can bring the window back.
             let watcher_available = activate_tray
                 .as_ref()
                 .is_some_and(|tray| tray.is_available());
-            if tray::start_hidden(watcher_available, start_minimized) {
+            if watcher_available && start_minimized {
                 built.hide_to_tray();
             } else {
                 built.present();

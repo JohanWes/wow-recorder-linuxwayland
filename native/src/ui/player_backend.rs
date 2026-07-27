@@ -123,8 +123,6 @@ impl PlayerBackend {
             .ok()
     }
 
-    // WR-011 product operations missing from the WR-002 proof surface.
-
     /// Playing or paused with media: seeks/steps are meaningful.
     pub fn is_ready(&self) -> bool {
         matches!(

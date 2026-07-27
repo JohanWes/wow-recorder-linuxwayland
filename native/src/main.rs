@@ -93,7 +93,7 @@ fn config_dir(config_path: &std::path::Path) -> PathBuf {
 }
 
 /// App log size cap; the previous log is kept as `.old`, so on-disk logging
-/// stays bounded to two files (WR-012: stdlib rotation, no tracing-appender).
+/// stays bounded to two files.
 const LOG_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 
 /// `tracing` output goes to `app.log` next to the recorder diagnostics that

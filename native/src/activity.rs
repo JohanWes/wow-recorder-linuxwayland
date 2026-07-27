@@ -2,27 +2,20 @@
 
 //! Activity state transitions and recording actions.
 //!
-//! Translates timestamped parsed events into the automatic-recording actions and
-//! metadata/timeline recorded by WR-000, using deterministic GTK-free state. One
-//! active automatic activity is retained per flavour (`Retail`, `Classic`,
-//! `Era`); retail/classic PTR log sources share their base flavour's state,
-//! matching the legacy single-static-handler behavior for same-flavour sources.
+//! Translates timestamped parsed events into automatic-recording actions and
+//! recording metadata/timeline, using deterministic GTK-free state. One active
+//! automatic activity is retained per flavour (`Retail`, `Classic`, `Era`);
+//! PTR log sources share their base flavour's state.
 //!
-//! Behavior notes recorded against the legacy TypeScript:
-//! - Era log sources apply the Era handler rules and write `Classic` as the
-//!   metadata flavour, exactly like `EraLogHandler`. `GameFlavor::Unknown`
-//!   events are ignored.
-//! - The legacy retail-PTR `isPtr` bypass of the current-raid-only check is not
-//!   rebuilt: PTR sources share the retail state and the configured check
-//!   (default off) applies to them.
-//! - Legacy crash-prone paths that no fixture records (e.g. `CHALLENGE_MODE_*`
-//!   arriving over a different in-flight category) are ignored here rather than
-//!   reproduced as state corruption.
-//! - On a failed `Begin` (recorder error), the coordinator clears the engine's
-//!   active activity with `force_end` and drops the emitted `Abandon` action.
+//! - Era log sources apply the Era rules and write `Classic` as the metadata
+//!   flavour. `GameFlavor::Unknown` events are ignored.
+//! - Events that would corrupt state (e.g. `CHALLENGE_MODE_*` arriving over a
+//!   different in-flight category) are ignored.
+//! - On a failed `Begin`, the coordinator clears the active activity with
+//!   `force_end` and drops the emitted `Abandon` action.
 //! - The coordinator drives data-timeout force ends: retail 10 min, classic/era
 //!   2 min without new log data, ending at last-data time.
-//! - `force_end` reuses the most recent config seen by `handle` so the raid
+//! - `force_end` reuses the most recent config seen by `handle`, so the raid
 //!   minimum-duration discard still applies to force-ended raids.
 
 use std::collections::HashMap;
@@ -65,7 +58,7 @@ fn is_unit_self(flags: u64) -> bool {
     is_unit_friendly(flags) && flags & AFFILIATION_MINE != 0
 }
 
-/// Legacy `ambiguate`: name, realm, region from a `Name-Realm(-x-Region)` string.
+/// Name, realm, region from a `Name-Realm(-x-Region)` string.
 fn ambiguate(name_realm: &str) -> (String, Option<String>, Option<String>) {
     let parts: Vec<&str> = name_realm.split('-').collect();
     let name = parts.first().unwrap_or(&"").to_string();
@@ -379,8 +372,7 @@ struct CombatantState {
 }
 
 impl CombatantState {
-    /// Legacy `isFullyDefined` (its GUID check duplicated teamID, so a GUID is
-    /// not required here either; the map key guarantees one anyway).
+    /// A GUID is not required: the map key guarantees one.
     fn is_fully_defined(&self) -> bool {
         self.team_id.is_some()
             && self.name.is_some()
@@ -539,9 +531,7 @@ fn handle_event(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shared activity helpers
-// ---------------------------------------------------------------------------
+// --- Shared activity helpers ---
 
 fn allow_record(config: &ActivitySettings, category: &Category) -> bool {
     match category {
@@ -658,9 +648,8 @@ fn is_arena_category(category: &Category) -> bool {
     )
 }
 
-/// Legacy base `processCombatant`: player-flag filtering, player-GUID
-/// assignment, create-or-update with name/realm/region fill-in. Returns the
-/// combatant's position when one was recorded.
+/// Player-flag filtering, player-GUID assignment, create-or-update with
+/// name/realm/region fill-in. Returns the combatant's position when recorded.
 fn process_combatant(
     combatants: &mut Combatants,
     player_guid: &mut Option<String>,
@@ -755,9 +744,7 @@ fn current_player_guid(active: &ActiveActivity) -> Option<&String> {
     active.player_guid.as_ref()
 }
 
-// ---------------------------------------------------------------------------
-// Encounter handling (raids and Mythic+ boss segments)
-// ---------------------------------------------------------------------------
+// --- Encounter handling (raids and Mythic+ boss segments) ---
 
 #[allow(clippy::too_many_arguments)]
 fn handle_encounter_start(
@@ -870,7 +857,7 @@ fn start_raid(
     if info.party != PartyType::Raid {
         return;
     }
-    // Era activities record the Classic flavour, like the legacy EraLogHandler.
+    // Era activities record the Classic flavour.
     let flavor = match rules {
         Rules::Retail => GameFlavor::Retail,
         Rules::Classic | Rules::Era => GameFlavor::Classic,
@@ -994,9 +981,7 @@ fn segment_item(started_at_ms: i64, segment: &CmSegment) -> TimelineItem {
     .expect("clamped span bounds")
 }
 
-// ---------------------------------------------------------------------------
-// Challenge mode
-// ---------------------------------------------------------------------------
+// --- Challenge mode ---
 
 #[allow(clippy::too_many_arguments)]
 fn handle_challenge_start(
@@ -1014,9 +999,9 @@ fn handle_challenge_start(
         return;
     }
     if state.active.is_some() {
-        // A subsequent start for the in-flight dungeon is ignored, and no
-        // fixture records a challenge start over another category (the legacy
-        // handler corrupts state there). Either way the active activity stays.
+        // A subsequent start for the in-flight dungeon is ignored, and a
+        // challenge start over another category is not a recorded shape.
+        // Either way the active activity stays.
         return;
     }
     match rules {
@@ -1108,8 +1093,7 @@ fn handle_challenge_end(
         } else {
             0
         });
-        // Legacy `endChallengeMode`: close the last segment, then drop it when
-        // shorter than ten seconds.
+        // Close the last segment, then drop it when shorter than ten seconds.
         if let Some(last) = challenge.segments.last_mut() {
             last.end_ms = Some(at_ms);
         }
@@ -1147,9 +1131,7 @@ fn handle_challenge_end(
     );
 }
 
-// ---------------------------------------------------------------------------
-// Arenas, battlegrounds, solo shuffle
-// ---------------------------------------------------------------------------
+// --- Arenas, battlegrounds, solo shuffle ---
 
 #[allow(clippy::too_many_arguments)]
 fn handle_arena_start(
@@ -1184,7 +1166,7 @@ fn handle_arena_start(
     let category = match match_type {
         "Rated Solo Shuffle" => Category::SoloShuffle,
         "2v2" => Category::TwoVTwo,
-        // 3v3 retail war games are logged as 5v5 (legacy issue 285).
+        // 3v3 retail war games are logged as 5v5.
         "3v3" | "5v5" => Category::ThreeVThree,
         "Skirmish" => Category::Skirmish,
         _ => return,
@@ -1283,7 +1265,7 @@ fn handle_arena_end(
     );
 }
 
-/// Legacy `determineArenaMatchResult`: false when the player is unknown.
+/// False when the player is unknown.
 fn arena_result(active: &ActiveActivity, winning_team_id: u32) -> bool {
     let Some(guid) = current_player_guid(active) else {
         return false;
@@ -1494,7 +1476,7 @@ fn end_classic_arena(
 }
 
 /// Deaths are stored as timeline points: friendly deaths carry `Loss`, enemy
-/// deaths carry `Win` (the legacy marker colors).
+/// deaths carry `Win`.
 fn death_count(active: &ActiveActivity, friendly: bool) -> usize {
     let want = if friendly {
         Outcome::Loss
@@ -1508,9 +1490,7 @@ fn death_count(active: &ActiveActivity, friendly: bool) -> usize {
         .count()
 }
 
-// ---------------------------------------------------------------------------
-// Combatants, player observation, deaths, boss health
-// ---------------------------------------------------------------------------
+// --- Combatants, player observation, deaths, boss health ---
 
 fn handle_combatant_info(
     state: &mut FlavorState,
@@ -1930,9 +1910,7 @@ fn update_boss_status(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Finishing
-// ---------------------------------------------------------------------------
+// --- Finishing ---
 
 fn finish(
     mut active: ActiveActivity,
@@ -1952,8 +1930,8 @@ fn finish(
     }
 
     // Metadata completeness: the recording player must be identified with a
-    // named combatant, and zone-based activities need a nonzero zone. The
-    // legacy app throws building metadata here and drops the video.
+    // named combatant, and zone-based activities need a nonzero zone;
+    // otherwise metadata cannot be built and the video is dropped.
     let zone_ok = match &active.kind {
         ActiveKind::Arena(arena) => arena.zone_id != 0,
         ActiveKind::Battleground { zone_id } => *zone_id != 0,
@@ -2008,9 +1986,8 @@ fn abandon_outcome(active: &ActiveActivity) -> Outcome {
     }
 }
 
-/// Close any open challenge segment as zero length (the force-end path keeps
-/// the legacy raw segment whose logEnd defaults to logStart), and emit
-/// unstarted/unended solo-shuffle rounds as points.
+/// Close any open challenge segment as zero length and emit unstarted or
+/// unended solo-shuffle rounds as points.
 fn finalize_open_items(active: &mut ActiveActivity, actions: &mut Vec<ActivityAction>) {
     let started_at_ms = active.started_at_ms;
     let mut items = Vec::new();
@@ -2180,9 +2157,9 @@ fn build_details(active: &ActiveActivity) -> ActivityDetails {
     }
 }
 
-/// Keystone upgrade from the challenge duration. The legacy comparison uses
-/// the raw table values: retail tables are seconds, classic MoP tables are
-/// minutes (so a completed classic run always scores +3). Kept exactly.
+/// Keystone upgrade from the challenge duration, compared against the raw
+/// table values: retail tables are seconds, classic MoP tables are minutes (so
+/// a completed classic run always scores +3).
 fn upgrade_level(active: &ActiveActivity, challenge: &ChallengeState) -> u8 {
     let timers = if active.flavor == GameFlavor::Classic {
         mop_challenge_mode_timers(challenge.map_id)
@@ -2245,7 +2222,7 @@ fn title_for(active: &ActiveActivity, outcome: Outcome, player: Option<&PlayerSu
                 Category::FiveVFive => "5v5",
                 _ => "Skirmish",
             };
-            // An unknown zone interpolates as "undefined" in the legacy title.
+            // An unknown zone interpolates as "undefined" in the title.
             let zone = arena_zone_name(&active.flavor, arena.zone_id)
                 .unwrap_or_else(|| "undefined".to_string());
             let result_text = if outcome == Outcome::Win {
@@ -2277,9 +2254,9 @@ fn title_for(active: &ActiveActivity, outcome: Outcome, player: Option<&PlayerSu
     }
 }
 
-/// Legacy `getUniqueHash`: MD5 of category, flavour, result and the sorted
-/// combatant names, concatenated without a separator before the names. Solo
-/// shuffle hashes no names (its activity-level map stays empty).
+/// MD5 of category, flavour, result and the sorted combatant names,
+/// concatenated without a separator before the names. Solo shuffle hashes no
+/// names (its activity-level map stays empty).
 fn activity_hash(active: &ActiveActivity, outcome: Outcome) -> String {
     let category = category_hash_name(&active.category);
     let flavor = match active.flavor {
@@ -2350,9 +2327,7 @@ fn round_span(started_at_ms: i64, index: usize, round: &ShuffleRound) -> Timelin
     .expect("clamped span bounds")
 }
 
-// ---------------------------------------------------------------------------
-// Factual data tables (ported from src/main/constants.ts)
-// ---------------------------------------------------------------------------
+// --- Factual data tables (ported from src/main/constants.ts) ---
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PartyType {
@@ -2377,8 +2352,7 @@ struct DifficultyInfo {
 }
 
 impl DifficultyInfo {
-    /// The legacy `orderedDifficulty` index; PvP has no index and never meets
-    /// any raid threshold.
+    /// Ordered difficulty index; PvP has none and never meets a raid threshold.
     fn order(&self) -> Option<u8> {
         match self.mapped {
             MappedDifficulty::Lfr => Some(0),
@@ -2558,7 +2532,7 @@ fn dungeon_encounter_name(encounter_id: u32) -> Option<&'static str> {
         .map(|(_, name)| *name)
 }
 
-/// Retail keystone map membership (legacy `dungeonsByMapId` keys; names unused).
+/// Retail keystone map membership.
 #[rustfmt::skip]
 static RETAIL_DUNGEON_MAP_IDS: &[u32] = &[
     166, 169, 227, 234, 369, 370, 375, 376, 377, 378, 379, 380, 381, 382, 391, 392,
@@ -2735,10 +2709,9 @@ fn arena_zone_name(flavor: &GameFlavor, zone_id: u32) -> Option<String> {
     name.map(str::to_string)
 }
 
-/// Legacy `instanceNamesByZoneId` (battlegrounds, arenas, dungeons) with the
-/// classic MoP challenge-mode fallback, without a default. Public to the crate
-/// because legacy sidecars store only ids; storage restores display names
-/// through this same table, exactly as the legacy frontend did.
+/// Instance names by zone id (battlegrounds, arenas, dungeons) with the classic
+/// MoP challenge-mode fallback, without a default. Crate-public because legacy
+/// sidecars store only ids and storage restores display names from this table.
 pub(crate) fn instance_name(flavor: &GameFlavor, zone_id: u32, map_id: u32) -> Option<String> {
     let merged = retail_battleground_name(zone_id)
         .or_else(|| classic_battleground_name(zone_id))
@@ -2754,7 +2727,7 @@ pub(crate) fn instance_name(flavor: &GameFlavor, zone_id: u32, map_id: u32) -> O
     None
 }
 
-/// `instance_name` with the legacy `Unknown Dungeon` default.
+/// `instance_name` with the `Unknown Dungeon` default.
 fn dungeon_name(flavor: &GameFlavor, zone_id: u32, map_id: u32) -> String {
     instance_name(flavor, zone_id, map_id).unwrap_or_else(|| "Unknown Dungeon".to_string())
 }
@@ -2778,7 +2751,7 @@ static MOP_CHALLENGE_MODES: &[(u32, &str)] = &[
     (76, "Scholomance"), (77, "Scarlet Halls"), (78, "Scarlet Monastery"),
 ];
 
-/// Gold/silver/bronze MoP challenge timers in minutes (legacy unit kept).
+/// Gold/silver/bronze MoP challenge timers, in minutes.
 #[rustfmt::skip]
 static MOP_CHALLENGE_MODE_TIMERS: &[(u32, [f64; 3])] = &[
     (2, [45.0, 25.0, 15.0]),
@@ -2849,9 +2822,7 @@ fn classic_unique_aura(spell: &str) -> Option<u16> {
     spell_lookup(CLASSIC_UNIQUE_SPEC_AURAS, spell)
 }
 
-// ---------------------------------------------------------------------------
-// MD5 (RFC 1321) for the legacy-compatible activity hash
-// ---------------------------------------------------------------------------
+// --- MD5 (RFC 1321) for the legacy-compatible activity hash ---
 
 fn md5_hex(input: &[u8]) -> String {
     const S: [u32; 64] = [
@@ -3088,8 +3059,6 @@ mod tests {
         assert!(duplicate.is_empty());
     }
 
-    /// Retail raid kill: Begin at encounter start, death marker, Complete(Win)
-    /// with the WR-000 metadata golden (title, hash, duration, details).
     #[test]
     fn retail_raid_kill_produces_golden_metadata() {
         let mut engine = ActivityEngine::new();
@@ -3211,8 +3180,6 @@ mod tests {
         assert!(engine.take_finished(&id).is_none());
     }
 
-    /// A short raid wipe (duration + overrun below the configured minimum) is
-    /// discarded, not completed.
     #[test]
     fn short_raid_wipe_is_discarded() {
         let mut engine = ActivityEngine::new();
@@ -3265,8 +3232,6 @@ mod tests {
         );
     }
 
-    /// An activity whose recording player was never identified is discarded
-    /// with the incomplete-metadata reason.
     #[test]
     fn raid_without_identified_player_is_discarded() {
         let mut engine = ActivityEngine::new();
@@ -3295,7 +3260,6 @@ mod tests {
         ));
     }
 
-    /// Raid difficulty below the configured minimum never begins.
     #[test]
     fn raid_below_min_difficulty_is_ignored() {
         let mut engine = ActivityEngine::new();
@@ -3313,7 +3277,6 @@ mod tests {
         assert!(actions.is_empty());
     }
 
-    /// A disabled category toggle suppresses the Begin entirely.
     #[test]
     fn disabled_category_never_begins() {
         let mut engine = ActivityEngine::new();
@@ -3338,8 +3301,6 @@ mod tests {
         assert!(start.is_empty() && end.is_empty());
     }
 
-    /// Retail Mythic+ completion: boss segments bracket trash, the timed run
-    /// records its upgrade level, and the final short segment is dropped.
     #[test]
     fn mythic_plus_completion_builds_segments_and_upgrade() {
         let mut engine = ActivityEngine::new();
@@ -3461,7 +3422,6 @@ mod tests {
         );
     }
 
-    /// An abandoned key completes with the Abandoned outcome and no upgrade.
     #[test]
     fn mythic_plus_abandon_records_abandoned_outcome() {
         let mut engine = ActivityEngine::new();
@@ -3528,8 +3488,6 @@ mod tests {
         );
     }
 
-    /// A raid boss pulled over an in-flight key abandons the key and begins
-    /// the raid encounter without a duplicate session.
     #[test]
     fn raid_encounter_over_mythic_plus_hands_off() {
         let mut engine = ActivityEngine::new();
@@ -3585,7 +3543,6 @@ mod tests {
         );
     }
 
-    /// Retail 2v2: the winner is the recording player's team.
     #[test]
     fn retail_arena_win_and_loss() {
         for (winning_team, expected) in [(0u32, Outcome::Win), (1u32, Outcome::Loss)] {
@@ -3652,9 +3609,6 @@ mod tests {
         }
     }
 
-    /// Solo shuffle: repeated ARENA_MATCH_START adds rounds to one session,
-    /// the first death decides a round, and the game completes as a win with
-    /// per-round details.
     #[test]
     fn solo_shuffle_rounds_and_completion() {
         let mut engine = ActivityEngine::new();
@@ -3800,8 +3754,6 @@ mod tests {
         );
     }
 
-    /// Retail battleground: zone-in begins, deaths estimate the result, and
-    /// zoning out completes with no stored combatant table.
     #[test]
     fn retail_battleground_estimates_result_from_deaths() {
         let mut engine = ActivityEngine::new();
@@ -3872,8 +3824,6 @@ mod tests {
         );
     }
 
-    /// Classic raid: combatants are identified through observed casts and the
-    /// kill completes as a Classic-flavour win.
     #[test]
     fn classic_raid_kill() {
         let mut engine = ActivityEngine::new();
@@ -3928,8 +3878,6 @@ mod tests {
         );
     }
 
-    /// Classic arena: zone-in begins as 2v2, enemies are identified through
-    /// interaction, and killing the whole enemy team ends the match as a win.
     #[test]
     fn classic_arena_death_driven_end() {
         let mut engine = ActivityEngine::new();
@@ -4015,8 +3963,6 @@ mod tests {
         assert_eq!(finished.combatants.len(), 3);
     }
 
-    /// Classic MoP challenge mode: level 0, no affixes, always a completion,
-    /// and the minutes-based timer table yields +3.
     #[test]
     fn classic_challenge_mode_completes() {
         let mut engine = ActivityEngine::new();
@@ -4086,7 +4032,6 @@ mod tests {
         );
     }
 
-    /// Era raid: handled by the Era rules but recorded as Classic flavour.
     #[test]
     fn era_raid_records_classic_flavor() {
         let mut engine = ActivityEngine::new();
@@ -4139,8 +4084,6 @@ mod tests {
         );
     }
 
-    /// Interleaved flavours keep independent state: classic events can never
-    /// terminate the retail activity, and unknown flavours are ignored.
     #[test]
     fn interleaved_flavors_stay_independent() {
         let mut engine = ActivityEngine::new();
@@ -4185,8 +4128,6 @@ mod tests {
         ));
     }
 
-    /// Forced end emits the recorded final action exactly once with zero
-    /// overrun and a loss-style outcome, and repeats produce nothing.
     #[test]
     fn force_end_emits_final_action_once() {
         let mut engine = ActivityEngine::new();

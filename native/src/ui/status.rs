@@ -2,8 +2,8 @@
 
 //! The sidebar status card: recorder state, elapsed time, Force end,
 //! per-flavour advanced-combat-logging warnings, and the bounded recovered
-//! problem list. WR-000 proves the Linux recorder never emits a microphone
-//! state, so no microphone badge exists here.
+//! problem list. The Linux recorder never reports microphone state, so there
+//! is no microphone badge.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -13,6 +13,7 @@ use gtk4::prelude::*;
 use warcraft_recorder::config::Config;
 use warcraft_recorder::coordinator::AppSnapshot;
 use warcraft_recorder::domain::{Problem, RecorderStatus, RecoveryAction};
+use warcraft_recorder::storage::now_unix_ms;
 
 use super::{ActionSink, ShellAction};
 
@@ -162,8 +163,7 @@ pub fn view(snapshot: &AppSnapshot) -> StatusView {
             detail: title.clone(),
             tone: Tone::Recording,
             elapsed_anchor_ms: Some(*started_unix_ms),
-            // Baseline exposes Force end only for automatic recordings;
-            // manual recordings get their own Stop control in WR-012.
+            // Force end is automatic-only; manual recordings get their own Stop.
             show_force_end: !manual,
             show_spinner: false,
         },
@@ -504,19 +504,17 @@ impl StatusCard {
     }
 }
 
-fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis() as i64)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use warcraft_recorder::domain::{Category, Problem};
 
     fn snapshot_with(status: RecorderStatus) -> AppSnapshot {
-        crate::ui::window::tests::snapshot_with(status, Config::default(), Vec::new())
+        snapshot_of(status, Config::default())
+    }
+
+    fn snapshot_of(status: RecorderStatus, config: Config) -> AppSnapshot {
+        crate::ui::window::tests::snapshot_with(status, config, Vec::new())
     }
 
     #[test]
@@ -640,11 +638,7 @@ mod tests {
         let mut config = Config::default();
         config.flavors.retail.enabled = true;
         config.flavors.era.enabled = true;
-        let view = view(&snapshot_with_with_config(RecorderStatus::Ready, config));
+        let view = view(&snapshot_of(RecorderStatus::Ready, config));
         assert_eq!(view.detail, "Watching combat logs: Retail, Era.");
-    }
-
-    fn snapshot_with_with_config(status: RecorderStatus, config: Config) -> AppSnapshot {
-        crate::ui::window::tests::snapshot_with(status, config, Vec::new())
     }
 }

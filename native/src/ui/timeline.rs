@@ -30,7 +30,7 @@ pub struct ClipRangeMs {
     pub end_ms: u64,
 }
 
-/// The legacy initial clip range: current position ±15 s, clamped to media.
+/// Initial clip range: current position ±15 s, clamped to media.
 pub fn initial_clip_range(position_ms: u64, duration_ms: u64) -> ClipRangeMs {
     let start_ms = position_ms.saturating_sub(15_000);
     let end_ms = (position_ms + 15_000).min(duration_ms);
@@ -60,7 +60,7 @@ fn plain_name(name: &str) -> &str {
 }
 
 /// The timeline items the preferences allow for this entry. Clips draw no
-/// markers (legacy: clip metadata is lifted from the parent and bogus here).
+/// markers: their metadata is lifted from the parent and meaningless here.
 pub fn visible_items(entry: &LibraryEntry, prefs: MarkerPrefs) -> Vec<&TimelineItem> {
     if entry.category == Category::Clip {
         return Vec::new();
@@ -150,9 +150,7 @@ pub fn format_mm_ss(ms: u64) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
-// ---------------------------------------------------------------------------
-// Widget
-// ---------------------------------------------------------------------------
+// --- Widget ---
 
 const TRACK_HEIGHT: i32 = 34;
 const HANDLE_RADIUS: f64 = 5.0;
@@ -508,8 +506,7 @@ impl Timeline {
 }
 
 fn draw_death_marker(cr: &gtk4::cairo::Context, x: f64, mid: f64) {
-    // Legacy layout: a white event tick above the rail and the muted
-    // grey-purple gravestone below it.
+    // A white event tick above the rail, a muted grey-purple gravestone below.
     cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
     cr.rectangle(x - 1.0, mid - 4.0, 2.0, 8.0);
     let _ = cr.fill();

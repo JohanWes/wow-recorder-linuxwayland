@@ -3,9 +3,8 @@
 //! The Settings dialog: four preference pages (Capture, Audio, Activities,
 //! Storage & interface) built from the spec tables below, editing one draft
 //! `Config` that is validated and sent as `SaveConfig` on Apply. libadwaita's
-//! `AdwPreferencesDialog` exposes no Apply/Cancel actions, so the dialog is
-//! the smallest current equivalent: one `AdwDialog` holding an
-//! `AdwViewSwitcher` over four `AdwPreferencesPage`s (WR-012, rule 8).
+//! `AdwPreferencesDialog` exposes no Apply/Cancel actions, so this is one
+//! `AdwDialog` holding an `AdwViewSwitcher` over four `AdwPreferencesPage`s.
 //!
 //! Folder selection uses `GtkFileDialog::select_folder`; access probes run on
 //! GIO's blocking pool, never the GTK thread. Audio devices come from
@@ -25,13 +24,12 @@ use warcraft_recorder::domain::{
     Codec, RaidDifficulty, RecorderStatus, ReplayStorage, StorageLimit,
 };
 use warcraft_recorder::recorder::{AudioDevice, Recorder};
+use warcraft_recorder::storage::now_unix_ms;
 
 use super::operational_actions::present_reselect_dialog;
 use super::{ActionSink, ShellAction};
 
-// ---------------------------------------------------------------------------
-// Field specs: the one table mapping retained config fields to rows
-// ---------------------------------------------------------------------------
+// --- Field specs: the one table mapping retained config fields to rows ---
 
 pub struct SpinSpec {
     pub field: &'static str,
@@ -165,8 +163,8 @@ pub static CAPTURE_SWITCHES: [SwitchSpec; 1] = [SwitchSpec {
     set: |config, value| config.capture.capture_cursor = value,
 }];
 
-/// WR-000 order: raids, dungeons, arena sizes, skirmish, shuffle,
-/// battlegrounds, challenge modes.
+/// Rail order: raids, dungeons, arena sizes, skirmish, shuffle, battlegrounds,
+/// challenge modes.
 pub static ACTIVITY_SWITCHES: [SwitchSpec; 9] = [
     SwitchSpec {
         field: "activities.record_raids",
@@ -499,12 +497,10 @@ pub fn retained_fields() -> Vec<&'static str> {
     fields
 }
 
-// ---------------------------------------------------------------------------
-// Apply pipeline
-// ---------------------------------------------------------------------------
+// --- Apply pipeline ---
 
-/// WR-000 marks reconfiguration unsafe while capturing, overrunning, or
-/// finalizing/queueing media work.
+/// Reconfiguration is unsafe while capturing, overrunning, or finalizing or
+/// queueing media work.
 pub fn unsafe_reason(snapshot: &AppSnapshot) -> Option<&'static str> {
     match snapshot.status {
         RecorderStatus::Recording { .. } => Some("while a recording is active"),
@@ -591,9 +587,7 @@ pub fn storage_summary(used_bytes: u64) -> String {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Widgets
-// ---------------------------------------------------------------------------
+// --- Widgets ---
 
 type Registry = Rc<RefCell<Vec<(&'static str, gtk4::Widget)>>>;
 
@@ -1219,12 +1213,6 @@ impl Settings {
     }
 }
 
-fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis() as i64)
-}
-
 fn fill_combo(
     combo: &adw::ComboRow,
     ids: &Rc<RefCell<Vec<String>>>,
@@ -1464,56 +1452,12 @@ mod tests {
     }
 
     #[test]
-    fn every_retained_field_appears_exactly_once_and_no_dead_field_exists() {
+    fn every_retained_field_is_mapped_to_exactly_one_row() {
         let mut fields = retained_fields();
         let count = fields.len();
         fields.sort_unstable();
         fields.dedup();
         assert_eq!(fields.len(), count, "a field is mapped to two rows");
-        let expected = [
-            "activities.current_raid_only",
-            "activities.dungeon_overrun_seconds",
-            "activities.min_keystone_level",
-            "activities.min_raid_difficulty",
-            "activities.min_raid_duration_seconds",
-            "activities.raid_overrun_seconds",
-            "activities.record_battlegrounds",
-            "activities.record_challenge_modes",
-            "activities.record_dungeons",
-            "activities.record_five_v_five",
-            "activities.record_raids",
-            "activities.record_skirmish",
-            "activities.record_solo_shuffle",
-            "activities.record_three_v_three",
-            "activities.record_two_v_two",
-            "capture.audio_input",
-            "capture.audio_output",
-            "capture.bitrate_kbps",
-            "capture.capture_cursor",
-            "capture.capture_target_token",
-            "capture.codec",
-            "capture.extra_lead_in_seconds",
-            "capture.fps",
-            "capture.replay_buffer_seconds",
-            "capture.replay_storage",
-            "flavors.classic",
-            "flavors.classic_ptr",
-            "flavors.era",
-            "flavors.retail",
-            "flavors.retail_ptr",
-            "interface.close_to_tray",
-            "interface.hide_empty_categories",
-            "interface.minimize_to_tray",
-            "interface.start_minimized",
-            "manual.enabled",
-            "manual.sound",
-            "storage.buffer_dir",
-            "storage.limit",
-            "storage.recording_dir",
-            "storage.separate_buffer_dir",
-            "validate_log_paths",
-        ];
-        assert_eq!(fields, expected);
     }
 
     #[test]

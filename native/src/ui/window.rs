@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The one `AdwApplicationWindow`: `AdwNavigationSplitView` with the compact
-//! sidebar and a content pane holding banners, the player placeholder above a
-//! draggable divider, and the toolbar/table placeholders below. Full table,
-//! player, and settings behavior arrive with WR-010–012.
+//! sidebar and a content pane holding banners, the player above a draggable
+//! divider, and the library toolbar/table below.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -19,6 +18,7 @@ use warcraft_recorder::coordinator::{AppSnapshot, Command, CoordinatorHandle};
 use warcraft_recorder::domain::RecoveryAction;
 
 use warcraft_recorder::domain::RecorderStatus;
+use warcraft_recorder::storage::now_unix_ms;
 
 use super::library::{Library, Selection};
 use super::operational_actions::{ManualBar, present_test_dialog, present_update_dialog};
@@ -26,14 +26,12 @@ use super::player::Player;
 use super::settings::Settings;
 use super::sidebar::Sidebar;
 use super::tray_backend::TrayBackend;
-use super::{ActionSink, ShellAction, category_label, install_actions, primary_menu, tray};
+use super::{ActionSink, ShellAction, category_label, install_actions, primary_menu};
 
 /// The content pane as rendered from one snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContentView {
     pub title: String,
-    /// The newest entry the player will open once WR-011 lands, if any.
-    pub player_hint: Option<String>,
     pub table_empty: bool,
     pub setup_banner: Option<String>,
     pub problem_banner: Option<ProblemBanner>,
@@ -47,15 +45,13 @@ pub struct ProblemBanner {
 
 pub fn content_view(snapshot: &AppSnapshot) -> ContentView {
     let selected = &snapshot.config.interface.selected_category;
-    let newest = snapshot
+    let table_empty = !snapshot
         .entries
         .iter()
-        .filter(|entry| &entry.category == selected)
-        .max_by_key(|entry| entry.start_unix_ms);
+        .any(|entry| &entry.category == selected);
     ContentView {
         title: category_label(selected).to_owned(),
-        player_hint: newest.map(|entry| format!("Newest: {}", entry.title)),
-        table_empty: newest.is_none(),
+        table_empty,
         setup_banner: snapshot
             .setup_problems
             .first()
@@ -75,12 +71,6 @@ fn recovery_label(action: RecoveryAction) -> &'static str {
         RecoveryAction::OpenLogs => "Open logs",
         RecoveryAction::Quit => "Quit",
     }
-}
-
-fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis() as i64)
 }
 
 /// Viewport height that shows `video_width`x`video_height` without side bars.
@@ -237,7 +227,7 @@ impl Shell {
             });
         }
 
-        // The Clapper player pane (WR-011) above the library table (WR-010).
+        // The Clapper player pane above the library table.
         let player = Rc::new(Player::new(Rc::clone(&sink)));
         player.install_shortcuts(window.upcast_ref());
         player.widget.set_height_request(240);
@@ -331,7 +321,7 @@ impl Shell {
         banner_box.append(&setup_banner);
         banner_box.append(&problem_banner);
         banner_box.append(&busy_banner);
-        // The WR-000-approved Manual-category start/stop entry (WR-012).
+        // The Manual-category start/stop entry.
         let manual_bar = ManualBar::new(Rc::clone(&sink));
         // One container for everything above the paned, so fullscreen can hide
         // it without fighting the banners'/manual bar's own visibility logic.
@@ -417,11 +407,10 @@ impl Shell {
         if let Some(settings) = self.settings.borrow().as_ref() {
             settings.set_tray_available(available);
         }
-        // If the tray vanished while the window was hidden to it, the window is
-        // the only way back in — reveal it so the process can't be stranded
-        // with no visible window and no tray menu (WR-009 step 11). Bind the
-        // borrow to a local first so it is released before `present` takes the
-        // guard mutably.
+        // If the tray vanished while the window was hidden, the window is the
+        // only way back in — reveal it so the process can't be stranded. Bind
+        // the borrow to a local first so it is released before `present` takes
+        // the guard mutably.
         let hidden = self.hold_guard.borrow().is_some();
         if !available && hidden {
             self.present();
@@ -472,7 +461,8 @@ impl Shell {
         let hold_guard = Rc::clone(&self.hold_guard);
         let player = Rc::clone(&self.player);
         self.window.connect_close_request(move |window| {
-            if tray::close_hides(tray_available.get(), close_to_tray.get()) {
+            // Never hide the only window when no tray watcher can restore it.
+            if tray_available.get() && close_to_tray.get() {
                 hide_and_hold(window, &hold_guard, &player);
                 gtk4::glib::Propagation::Stop
             } else {
@@ -499,7 +489,7 @@ impl Shell {
                 let minimized = toplevel
                     .state()
                     .contains(gtk4::gdk::ToplevelState::MINIMIZED);
-                if minimized && tray::minimize_hides(tray_available.get(), minimize_to_tray.get()) {
+                if minimized && tray_available.get() && minimize_to_tray.get() {
                     hide_and_hold(&window, &hold_guard, &player);
                 }
             });
@@ -783,29 +773,12 @@ pub(crate) mod tests {
         let view = content_view(&snapshot);
         assert_eq!(view.title, "3v3");
         assert!(view.table_empty);
-        assert_eq!(view.player_hint, None);
 
         let mut snapshot = snapshot_with_entries(vec![entry(Category::Raids, "Boss", 10)]);
         snapshot.config.interface.selected_category = Category::Raids;
         let view = content_view(&snapshot);
         assert_eq!(view.title, "Raids");
         assert!(!view.table_empty);
-        assert_eq!(view.player_hint.as_deref(), Some("Newest: Boss"));
-    }
-
-    #[test]
-    fn player_hint_uses_the_newest_entry_of_the_category() {
-        let entries = vec![
-            entry(Category::Raids, "Older", 10),
-            entry(Category::Raids, "Newest", 99),
-            entry(Category::MythicPlus, "Other category", 100),
-        ];
-        let mut snapshot = snapshot_with_entries(entries);
-        snapshot.config.interface.selected_category = Category::Raids;
-        assert_eq!(
-            content_view(&snapshot).player_hint.as_deref(),
-            Some("Newest: Newest")
-        );
     }
 
     #[test]
@@ -858,31 +831,5 @@ pub(crate) mod tests {
                 action: Some(RecoveryAction::OpenLogs),
             })
         );
-    }
-
-    #[test]
-    fn a_two_thousand_entry_snapshot_maps_without_rework() {
-        let entries: Vec<LibraryEntry> = (0..2_000)
-            .map(|index| {
-                let category = if index % 2 == 0 {
-                    Category::Raids
-                } else {
-                    Category::MythicPlus
-                };
-                entry(category, "Recording", i64::from(index))
-            })
-            .collect();
-        let mut snapshot = snapshot_with_entries(entries);
-        snapshot.config.interface.selected_category = Category::Raids;
-
-        let view = content_view(&snapshot);
-        assert!(!view.table_empty);
-        assert_eq!(view.player_hint.as_deref(), Some("Newest: Recording"));
-        let rows = super::super::sidebar::rows(&snapshot);
-        let raids = rows
-            .iter()
-            .find(|row| row.category == Category::Raids)
-            .expect("raids row");
-        assert_eq!(raids.count, 1_000);
     }
 }

@@ -3,17 +3,15 @@
 //! gpu-screen-recorder lifecycle adapter.
 //!
 //! One long-lived GSR replay-buffer child, at most one active recording, and
-//! the WR-000 signal/hook protocol: SIGUSR1 saves the replay pre-roll,
-//! SIGRTMIN toggles the regular recording, and a generated `-sc` hook script
-//! appends `epoch_ms<TAB>kind<TAB>path` records that `poll`/`end` correlate
-//! against the configured replay/regular directories.
+//! the signal/hook protocol: SIGUSR1 saves the replay pre-roll, SIGRTMIN
+//! toggles the regular recording, and a generated `-sc` hook script appends
+//! `epoch_ms<TAB>kind<TAB>path` records that `poll`/`end` correlate against the
+//! configured replay/regular directories.
 //!
-//! Behavior notes recorded against the legacy TypeScript and WR-000/WR-002:
-//! - The hook receives `$1 = saved artifact path, $2 = event kind` (the real
-//!   GSR `-sc` argv; WR-006's illustrative snippet had them swapped).
-//! - Restart delays are 2, 4, 8, 16, then capped 30 seconds indefinitely.
-//!   Per WR-000, a successful automatic respawn does not reset the attempt
-//!   counter; only a deliberate `arm` does.
+//! - The hook receives `$1 = saved artifact path, $2 = event kind`.
+//! - Restart delays are 2, 4, 8, 16, then capped 30 seconds indefinitely. A
+//!   successful automatic respawn does not reset the attempt counter; only a
+//!   deliberate `arm` does.
 //! - Crash recovery of interrupted recordings is not Recorder's job; the only
 //!   persistent state is the truncate-on-arm events file.
 
@@ -54,7 +52,7 @@ pub enum RecordingMode {
 #[derive(Clone, Debug)]
 pub struct StartRequest {
     pub id: RecordingId,
-    /// Detection delay plus lead-in, already clamped by WR-008.
+    /// Detection delay plus lead-in, already clamped by the coordinator.
     pub requested_replay_ms: u64,
     pub mode: RecordingMode,
 }
@@ -68,8 +66,7 @@ pub struct CaptureStarted {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureArtifacts {
-    /// GSR-saved replay pre-roll; missing becomes WR-007's regular-only
-    /// fallback.
+    /// GSR-saved replay pre-roll; missing falls back to regular-only.
     pub replay: Option<PathBuf>,
     pub regular: PathBuf,
     pub requested_replay_ms: u64,
@@ -147,8 +144,7 @@ pub enum RecorderEvent {
     Diagnostic(String),
 }
 
-/// Bounded waits from the proven baseline. Tests shrink them; production uses
-/// the defaults.
+/// Bounded waits. Tests shrink them; production uses the defaults.
 #[derive(Clone, Copy, Debug)]
 pub struct Timeouts {
     /// Post-spawn stability check before arm is considered successful.
@@ -539,9 +535,9 @@ impl Recorder {
         events.push(RecorderEvent::CaptureEnded { artifacts });
     }
 
-    /// WR-002's token contract: stop the child, invalidate the token only
-    /// after it exited, and re-arm to trigger portal selection. A denied
-    /// selection restores the previous usable token.
+    /// Token contract: stop the child, invalidate the token only after it
+    /// exited, and re-arm to trigger portal selection. A denied selection
+    /// restores the previous usable token.
     pub fn reselect_target(
         &mut self,
         config: &CaptureConfig,
@@ -681,8 +677,8 @@ impl Recorder {
             self.restart_at_ms = None;
             let config = self.config.clone().expect("desired_running implies config");
             match self.spawn_child(&config) {
-                // Per WR-000 the attempt counter survives an automatic
-                // respawn; only a deliberate arm resets it.
+                // The attempt counter survives an automatic respawn; only a
+                // deliberate arm resets it.
                 Ok(()) => events.push(RecorderEvent::Restarted),
                 Err(error) => {
                     events.push(RecorderEvent::RestartFailed {
@@ -811,8 +807,7 @@ impl Recorder {
     }
 }
 
-/// Exact WR-000 argv order. Paths and devices stay single `OsString`
-/// arguments; no shell is involved.
+/// Paths and devices stay single `OsString` arguments; no shell is involved.
 fn build_gsr_args(config: &CaptureConfig) -> Vec<OsString> {
     let settings = &config.settings;
     let codec = match settings.codec {
@@ -917,7 +912,7 @@ fn text_tail(text: &str) -> String {
     String::from_utf8_lossy(&text.as_bytes()[start..]).into_owned()
 }
 
-/// Legacy `parseGsrAudioDevices`: sectioned `--list-audio-devices` output,
+/// Sectioned `--list-audio-devices` output:
 /// `default_output`/`default_input`/`device:<nonspace>` values, de-duplicated,
 /// with defaults always present.
 fn parse_audio_devices(text: &str) -> AudioDevices {

@@ -3,8 +3,7 @@ set -euo pipefail
 
 # Final AppImage migration helper. It intentionally performs only a user-level
 # Flatpak install; the permanent remote and the desktop software center own
-# future updates. This script stays behind the WR-015 release gate until the
-# stable remote is published.
+# future updates.
 
 REMOTE_NAME="warcraft-recorder"
 REMOTE_DESCRIPTOR="${WARCRAFTRECORDER_REMOTE_DESCRIPTOR:-https://johanwes.github.io/wow-recorder-linuxwayland/index.flatpakrepo}"

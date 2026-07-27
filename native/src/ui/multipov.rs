@@ -20,8 +20,8 @@ pub struct Pov {
     pub player: Option<String>,
 }
 
-/// Distinct local POVs for a correlated activity, baseline-sorted: primary
-/// first, then the correlated order, deduplicated by player label.
+/// Distinct local POVs for a correlated activity: primary first, then the
+/// correlated order, deduplicated by player label.
 pub fn povs(entries: &[&LibraryEntry]) -> Vec<Pov> {
     let mut out: Vec<Pov> = Vec::new();
     for entry in entries {

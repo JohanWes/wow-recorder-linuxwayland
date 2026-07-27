@@ -1,14 +1,9 @@
-# Logs
+# Logs and runtime data
 *.log
-
-# Runtime data
-pids
 *.pid
 *.seed
 
-# OSX
 .DS_Store
-
 .idea
 
 # Native/Flatpak generated output
@@ -26,14 +21,4 @@ pids
 *.flatpakrepo
 *.flatpak.sha256
 
-# Python crap
-*cpython*
-*__pycache__*
-
-# Rust/proof build and generated spike artifacts
-/spikes/**/target/
-spikes/*/artifacts/
-spikes/*/media/
-/spikes/**/work/
-spikes/*/fixture-logs/
-spikes/*/notify-logs/
+__pycache__/

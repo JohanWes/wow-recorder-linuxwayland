@@ -149,10 +149,6 @@ impl LogTailer {
         &self.path
     }
 
-    pub fn set_time_context(&mut self, time_context: ParseTimeContext) {
-        self.time_context = time_context;
-    }
-
     pub fn poll(&mut self) -> Result<Vec<ParsedEvent>, LogError> {
         self.refresh_active_file()?;
         let current_metadata = metadata(&self.path)?;
@@ -523,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn live_context_is_explicit_non_utc_and_refreshable() {
+    fn live_tailing_uses_the_explicit_non_utc_time_context() {
         let directory = test_directory();
         let path = directory.join("WoWCombatLog.txt");
         fs::write(&path, "existing").unwrap();
@@ -535,13 +531,8 @@ mod tests {
         .unwrap();
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(EVENT.as_bytes()).unwrap();
-        let first = tailer.poll().unwrap();
-        assert_eq!(first[0].occurred_at_ms, 1_775_755_633_200);
-
-        tailer.set_time_context(ParseTimeContext::new(2027, -300));
-        file.write_all(EVENT.as_bytes()).unwrap();
-        let second = tailer.poll().unwrap();
-        assert_eq!(second[0].occurred_at_ms, 1_807_316_833_200);
+        let events = tailer.poll().unwrap();
+        assert_eq!(events[0].occurred_at_ms, 1_775_755_633_200);
         fs::remove_dir_all(directory).unwrap();
     }
 

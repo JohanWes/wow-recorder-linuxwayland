@@ -10,15 +10,11 @@
 //! handle and dispatches at most one job at a time so automatic finalization
 //! always precedes queued user transcodes.
 //!
-//! Behavior notes recorded against WR-000 and the legacy TypeScript:
+//! Notes:
 //! - Advanced-combat-logging status is read from `<log dir>/../WTF/Config.wtf`
-//!   when the tailers are (re)opened. The legacy per-file watcher is not
-//!   rebuilt; the status refreshes on arm/save.
+//!   when the tailers are (re)opened; it refreshes on arm/save.
 //! - Test recordings synthesize the minimum parsed events for the chosen
-//!   category rather than replaying the legacy `testButtonData` log dumps,
-//!   which existed only to populate the legacy UI.
-//! - The legacy Ctrl+Alt "test without an end line" variant is not rebuilt;
-//!   `ForceEnd` already covers stopping a running test.
+//!   category. `ForceEnd` stops a running test.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -43,13 +39,10 @@ use crate::recorder::{
 };
 use crate::storage::{EntryUpdate, LibraryIndex, Storage, now_unix_ms};
 
-/// Force-end an automatic recording after this long without new log data. This
-/// is only a crash/alt-F4 safety net — normal activities end on explicit combat
-/// log events. WoW buffers the combat log and flushes it to disk in bursts, so
-/// the window must sit well above that flush cadence or a live activity gets
-/// force-ended inside a flush gap and discarded before its player is
-/// identified. Values match legacy `RetailLogHandler`/`ClassicLogHandler`,
-/// which pass 10 and 2 *minutes* respectively to `CombatLogWatcher`.
+/// Force-end an automatic recording after this long without new log data — a
+/// crash/alt-F4 safety net only. WoW flushes the combat log in bursts, so the
+/// window must sit well above that cadence or a live activity gets force-ended
+/// inside a flush gap and discarded before its player is identified.
 const RETAIL_DATA_TIMEOUT_MS: i64 = 10 * 60_000;
 const CLASSIC_DATA_TIMEOUT_MS: i64 = 2 * 60_000;
 /// Commands handled per tick before the loop returns to polling.
@@ -64,9 +57,7 @@ const MAX_MEDIA_QUEUE: usize = 16;
 /// that closing the window never looks hung.
 const QUIT_END_GRACE: Duration = Duration::from_secs(5);
 
-// ---------------------------------------------------------------------------
-// Public interface
-// ---------------------------------------------------------------------------
+// --- Public interface ---
 
 /// Ranges are milliseconds into the source recording's media.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,8 +201,7 @@ pub struct Setup {
     pub recorder_timeouts: Timeouts,
     /// Idle pacing for one coordinator tick.
     pub poll_interval: Duration,
-    /// Test-recording length; raids run four times as long, exactly like the
-    /// legacy 5 s / 20 s pair.
+    /// Test-recording length; raids run four times as long.
     pub test_duration: Duration,
 }
 
@@ -260,9 +250,7 @@ pub fn start(setup: Setup, wake: Box<dyn Fn() + Send>) -> CoordinatorHandle {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Coordinator state
-// ---------------------------------------------------------------------------
+// --- Coordinator state ---
 
 /// The recording the coordinator is currently driving.
 struct ActiveRecording {
@@ -526,9 +514,7 @@ impl Coordinator {
         false
     }
 
-    // -----------------------------------------------------------------------
-    // Commands
-    // -----------------------------------------------------------------------
+    // --- Commands ---
 
     fn handle_command(&mut self, command: Command) {
         self.dirty = true;
@@ -574,9 +560,7 @@ impl Coordinator {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Recorder lifecycle
-    // -----------------------------------------------------------------------
+    // --- Recorder lifecycle ---
 
     fn capture_config(&self) -> CaptureConfig {
         CaptureConfig {
@@ -711,9 +695,7 @@ impl Coordinator {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Log polling and the activity engine
-    // -----------------------------------------------------------------------
+    // --- Log polling and the activity engine ---
 
     fn open_tailers(&mut self) -> bool {
         self.tailers.clear();
@@ -948,9 +930,7 @@ impl Coordinator {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Manual and test recordings
-    // -----------------------------------------------------------------------
+    // --- Manual and test recordings ---
 
     fn start_manual(&mut self) {
         if self.capture_in_flight() || !self.armed || !self.config.manual.enabled {
@@ -1029,9 +1009,7 @@ impl Coordinator {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Ending a capture
-    // -----------------------------------------------------------------------
+    // --- Ending a capture ---
 
     fn check_deadlines(&mut self) {
         let now_ms = now_unix_ms();
@@ -1125,10 +1103,9 @@ impl Coordinator {
         // back to the real activity start.
         self.begin(*deferred.draft, now_unix_ms());
         // It already ended too. The capture had to start anyway so the replay
-        // buffer is written; stop it on the same overrun the live path would
-        // have used, anchored to when the activity actually ended rather than
-        // to whenever the previous flush finished. A deadline already in the
-        // past simply stops on the next tick.
+        // buffer is written; stop it on the overrun the live path would have
+        // used, anchored to when the activity actually ended. A deadline
+        // already in the past simply stops on the next tick.
         if deferred.finished
             && let Some(active) = self.active.as_mut()
         {
@@ -1170,9 +1147,7 @@ impl Coordinator {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Media jobs
-    // -----------------------------------------------------------------------
+    // --- Media jobs ---
 
     /// Finalization is always chosen before queued user work, and only one job
     /// is in flight at a time. A capture that has been asked to stop counts as
@@ -1283,9 +1258,7 @@ impl Coordinator {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Library mutations
-    // -----------------------------------------------------------------------
+    // --- Library mutations ---
 
     fn entry(&self, id: &RecordingId) -> Option<&LibraryEntry> {
         self.index.entries.iter().find(|entry| &entry.id == id)
@@ -1389,9 +1362,7 @@ impl Coordinator {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Configuration
-    // -----------------------------------------------------------------------
+    // --- Configuration ---
 
     fn restart_media_worker(&mut self) -> Result<(), String> {
         let _ = self.media_control.try_send(MediaControl::Shutdown {
@@ -1415,10 +1386,8 @@ impl Coordinator {
     /// UI-only fields: adopt, show, then save atomically; reconfigure nothing.
     ///
     /// Persisting first would put two `fsync`s in front of every category
-    /// click, and on a disk busy with the replay buffer that is exactly when
-    /// they are slowest. Nothing rereads the file at runtime, so the snapshot
-    /// can go out first; a failed write rolls the preference back so the UI
-    /// never keeps showing something the next launch will not have.
+    /// click. Nothing rereads the file at runtime, so the snapshot can go out
+    /// first; a failed write rolls the preference back.
     fn patch_config(&mut self, draft: Config) {
         let previous = std::mem::replace(&mut self.config, draft);
         self.dirty = true;
@@ -1523,9 +1492,7 @@ impl Coordinator {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Snapshot and problems
-    // -----------------------------------------------------------------------
+    // --- Snapshot and problems ---
 
     fn push_problem(
         &mut self,
@@ -1677,9 +1644,7 @@ impl Coordinator {
         (self.wake)();
     }
 
-    // -----------------------------------------------------------------------
-    // Shutdown
-    // -----------------------------------------------------------------------
+    // --- Shutdown ---
 
     fn shutdown(&mut self) {
         if self.stopping {
@@ -1738,9 +1703,7 @@ impl Drop for Coordinator {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Free helpers
-// ---------------------------------------------------------------------------
+// --- Free helpers ---
 
 fn make_problem(
     summary: impl Into<String>,
@@ -1811,8 +1774,8 @@ fn enabled_log_sources(config: &Config) -> Vec<(&'static str, GameFlavor, PathBu
     .collect()
 }
 
-/// Legacy `checkAdvancedCombatLogging`: the `Config.wtf` next to the Logs
-/// folder must contain `SET advancedCombatLogging "1"`.
+/// The `Config.wtf` next to the Logs folder must contain
+/// `SET advancedCombatLogging "1"`.
 fn advanced_logging_enabled(log_dir: &Path) -> bool {
     let Some(parent) = log_dir.parent() else {
         return false;

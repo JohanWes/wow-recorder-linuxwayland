@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Operational controls outside Settings: the Manual-category Start/Stop
-//! toolbar (the WR-000-approved native entry for manual recording), the
-//! test-recording category chooser, and the capture-reselection explanation.
+//! toolbar, the test-recording category chooser, and the capture-reselection
+//! explanation.
 //!
-//! The legacy manual-recording sound assets were rejected for native
-//! redistribution (WR-000 assets/licenses report), so the retained
-//! `manual.sound` setting plays the display bell instead of bundling audio.
+//! The legacy manual-recording sound assets are not redistributable, so the
+//! retained `manual.sound` setting rings the display bell instead.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -17,6 +16,7 @@ use libadwaita::prelude::*;
 
 use warcraft_recorder::coordinator::{AppSnapshot, Command};
 use warcraft_recorder::domain::{Category, RecorderStatus};
+use warcraft_recorder::storage::now_unix_ms;
 
 use super::status::elapsed_label;
 use super::{ActionSink, ShellAction, TEST_CATEGORIES};
@@ -196,14 +196,8 @@ fn bell(widget: &impl IsA<gtk4::Widget>) {
     }
 }
 
-fn now_unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis() as i64)
-}
-
-/// The window-menu/Settings test-recording chooser: the exact WR-000 category
-/// list, the duration explanation, and one Start that sends `RunTest`.
+/// The window-menu/Settings test-recording chooser: category list, duration
+/// explanation, and one Start that sends `RunTest`.
 pub fn present_test_dialog(parent: &gtk4::Widget, sink: ActionSink, ready: bool) {
     let dialog = adw::AlertDialog::new(Some("Test recording"), Some(TEST_EXPLANATION));
     let labels: Vec<&str> = TEST_CATEGORIES.iter().map(|(_, label, _)| *label).collect();
@@ -349,8 +343,8 @@ fn run_update(parent: &gtk4::Widget) {
     });
 }
 
-/// The capture-reselection explanation: the platform portal prompt follows,
-/// and cancelling it keeps the previous usable selection (WR-006 contract).
+/// The capture-reselection explanation: the portal prompt follows, and
+/// cancelling it keeps the previous usable selection.
 pub fn present_reselect_dialog(parent: &gtk4::Widget, sink: ActionSink) {
     let dialog = adw::AlertDialog::new(
         Some("Reselect capture target"),

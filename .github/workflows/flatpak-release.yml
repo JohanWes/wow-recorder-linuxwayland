@@ -7,7 +7,6 @@ on:
       - 'native/**'
       - 'flatpak/**'
       - 'data/**'
-      - 'implementation_docs/reports/wr-014-release.md'
   push:
     branches: [main]
     tags: ['v*']
