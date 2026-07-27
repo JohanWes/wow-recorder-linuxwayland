@@ -15,11 +15,12 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use warcraft_recorder::coordinator::{AppSnapshot, Command, CoordinatorHandle};
+use warcraft_recorder::domain::RecoveryAction;
 
 use warcraft_recorder::domain::RecorderStatus;
 
 use super::library::{Library, Selection};
-use super::operational_actions::{ManualBar, present_test_dialog};
+use super::operational_actions::{ManualBar, present_test_dialog, present_update_dialog};
 use super::player::Player;
 use super::settings::Settings;
 use super::sidebar::Sidebar;
@@ -34,6 +35,13 @@ pub struct ContentView {
     pub player_hint: Option<String>,
     pub table_empty: bool,
     pub setup_banner: Option<String>,
+    pub problem_banner: Option<ProblemBanner>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProblemBanner {
+    pub summary: String,
+    pub action: Option<RecoveryAction>,
 }
 
 pub fn content_view(snapshot: &AppSnapshot) -> ContentView {
@@ -50,11 +58,21 @@ pub fn content_view(snapshot: &AppSnapshot) -> ContentView {
         setup_banner: snapshot
             .setup_problems
             .first()
-            .map(|problem| problem.message.clone())
-            .or_else(|| {
-                matches!(&snapshot.status, RecorderStatus::SetupRequired)
-                    .then(|| "Finish setup in Settings.".to_owned())
-            }),
+            .map(|problem| problem.message.clone()),
+        problem_banner: snapshot.problems.last().map(|problem| ProblemBanner {
+            summary: problem.summary.clone(),
+            action: problem.recovery_action,
+        }),
+    }
+}
+
+fn recovery_label(action: RecoveryAction) -> &'static str {
+    match action {
+        RecoveryAction::OpenSettings => "Open Settings",
+        RecoveryAction::ReselectCaptureTarget => "Reselect capture target",
+        RecoveryAction::Retry => "Try again",
+        RecoveryAction::OpenLogs => "Open logs",
+        RecoveryAction::Quit => "Quit",
     }
 }
 
@@ -116,6 +134,7 @@ pub struct Shell {
     title: adw::WindowTitle,
     nav_page: adw::NavigationPage,
     setup_banner: adw::Banner,
+    problem_banner: adw::Banner,
     library: Library,
     player: Rc<Player>,
     manual_bar: ManualBar,
@@ -193,13 +212,27 @@ impl Shell {
         header.set_title_widget(Some(&title));
         header.pack_end(&menu_button);
 
-        // The setup blocker and one transient Busy notice.
+        // Banners: setup, newest problem, and one transient Busy notice.
         let setup_banner = adw::Banner::new("");
         setup_banner.set_button_label(Some("Open Settings"));
         {
             let sink = Rc::clone(&sink);
             setup_banner.connect_button_clicked(move |_| {
                 sink(ShellAction::OpenSettings);
+            });
+        }
+        let problem_banner = adw::Banner::new("");
+        {
+            let sink = Rc::clone(&sink);
+            let banner = problem_banner.clone();
+            problem_banner.connect_button_clicked(move |_| {
+                if let Some(action) = banner
+                    .button_label()
+                    .as_deref()
+                    .and_then(recovery_from_label)
+                {
+                    sink(recovery_shell_action(action));
+                }
             });
         }
 
@@ -295,6 +328,7 @@ impl Shell {
 
         let banner_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         banner_box.append(&setup_banner);
+        banner_box.append(&problem_banner);
         banner_box.append(&busy_banner);
         // The WR-000-approved Manual-category start/stop entry (WR-012).
         let manual_bar = ManualBar::new(Rc::clone(&sink));
@@ -346,6 +380,7 @@ impl Shell {
             title,
             nav_page,
             setup_banner,
+            problem_banner,
             library,
             player,
             manual_bar,
@@ -418,6 +453,15 @@ impl Shell {
         self.setup_banner.set_revealed(view.setup_banner.is_some());
         if let Some(message) = &view.setup_banner {
             self.setup_banner.set_title(message);
+        }
+        match &view.problem_banner {
+            Some(problem) => {
+                self.problem_banner.set_title(&problem.summary);
+                self.problem_banner
+                    .set_button_label(problem.action.map(recovery_label));
+                self.problem_banner.set_revealed(true);
+            }
+            None => self.problem_banner.set_revealed(false),
         }
     }
 
@@ -536,6 +580,10 @@ fn make_sink(
                 present_about(&window, &application);
                 return true;
             }
+            ShellAction::CheckForUpdates => {
+                present_update_dialog(window.upcast_ref());
+                return true;
+            }
             ShellAction::Quit => Command::Shutdown,
         };
         let sent = coordinator.borrow().send(command);
@@ -550,6 +598,29 @@ fn make_sink(
     });
     *sink_cell.borrow_mut() = Some(Rc::clone(&sink));
     sink
+}
+
+fn recovery_from_label(label: &str) -> Option<RecoveryAction> {
+    match label {
+        "Open Settings" => Some(RecoveryAction::OpenSettings),
+        "Reselect capture target" => Some(RecoveryAction::ReselectCaptureTarget),
+        "Try again" => Some(RecoveryAction::Retry),
+        "Open logs" => Some(RecoveryAction::OpenLogs),
+        "Quit" => Some(RecoveryAction::Quit),
+        _ => None,
+    }
+}
+
+fn recovery_shell_action(action: RecoveryAction) -> ShellAction {
+    match action {
+        RecoveryAction::OpenSettings => ShellAction::OpenSettings,
+        RecoveryAction::ReselectCaptureTarget => {
+            ShellAction::Command(Command::ReselectCaptureTarget)
+        }
+        RecoveryAction::Retry => ShellAction::Retry,
+        RecoveryAction::OpenLogs => ShellAction::OpenLogs,
+        RecoveryAction::Quit => ShellAction::Quit,
+    }
 }
 
 /// Open (or re-present) the one Settings dialog against the newest snapshot.
@@ -637,7 +708,7 @@ pub(crate) mod tests {
     use warcraft_recorder::config::Config;
     use warcraft_recorder::domain::{
         ActivityDetails, Category, Codec, CorrelatedActivity, GameFlavor, LibraryEntry, MediaFacts,
-        Outcome, RecorderStatus, RecordingId, StorageLimit,
+        Outcome, Problem, RecorderStatus, RecordingId, StorageLimit,
     };
 
     pub(crate) fn entry(category: Category, title: &str, start_unix_ms: i64) -> LibraryEntry {
@@ -745,14 +816,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn setup_banner_uses_the_first_setup_problem() {
+    fn banners_come_from_setup_problems_and_the_newest_problem() {
         let mut snapshot = snapshot_with_entries(Vec::new());
         assert_eq!(content_view(&snapshot).setup_banner, None);
-        snapshot.status = RecorderStatus::SetupRequired;
-        assert_eq!(
-            content_view(&snapshot).setup_banner.as_deref(),
-            Some("Finish setup in Settings.")
-        );
+        assert_eq!(content_view(&snapshot).problem_banner, None);
 
         snapshot.setup_problems = vec![
             warcraft_recorder::config::ValidationProblem {
@@ -764,10 +831,31 @@ pub(crate) mod tests {
                 message: "Enable at least one World of Warcraft flavor.".to_owned(),
             },
         ];
-
+        snapshot.problems = vec![
+            Problem {
+                summary: "older".to_owned(),
+                safe_detail: None,
+                occurred_unix_ms: 1,
+                recovery_action: None,
+            },
+            Problem {
+                summary: "newest".to_owned(),
+                safe_detail: None,
+                occurred_unix_ms: 2,
+                recovery_action: Some(RecoveryAction::OpenLogs),
+            },
+        ];
+        let view = content_view(&snapshot);
         assert_eq!(
-            content_view(&snapshot).setup_banner.as_deref(),
+            view.setup_banner.as_deref(),
             Some("Choose a recording directory.")
+        );
+        assert_eq!(
+            view.problem_banner,
+            Some(ProblemBanner {
+                summary: "newest".to_owned(),
+                action: Some(RecoveryAction::OpenLogs),
+            })
         );
     }
 

@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The library view: one virtualized `GtkColumnView` with the category column
-//! set, suggestion-chip + paired-date filtering, a single playback selection,
-//! and explicit checkbox-driven bulk protect/delete actions (WR-010).
+//! set, suggestion-chip + paired-date filtering, native multiselect, and the
+//! local protect/tag/reveal/delete actions (WR-010).
 //!
 //! Model pipeline (GTK-native, no bespoke collection):
 //!
 //! `gio::ListStore` (one boxed row per correlated activity of the selected
 //! category, newest first) → `FilterListModel` (chips + date) → `SortListModel`
-//! (the column-view sorter) → `SingleSelection` → `ColumnView`.
+//! (the column-view sorter) → `MultiSelection` → `ColumnView`.
 //!
 //! Row data is immutable `Rc<RowModel>` wrapped in `glib::BoxedAnyObject`; the
 //! coordinator snapshot is authoritative, so a changed snapshot rebuilds the
-//! store rather than mutating widgets in place. Playback identity and checked
-//! bulk ids are retained separately by recording id across those rebuilds.
+//! store rather than mutating widgets in place. The GTK thread does no file or
+//! parsing work here.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -33,15 +33,15 @@ use warcraft_recorder::domain::{ActivityDetails, Category, LibraryEntry, Outcome
 use super::filters::{self, Chip};
 use super::{ActionSink, ShellAction};
 
-/// Recording identity and local viewpoints passed to the player when a row
-/// becomes the active playback selection.
+/// What the player area needs when a single row is chosen. WR-011 turns this
+/// into an actual playback load; today the shell only shows the title.
+// ponytail: `media_path`/`viewpoints` are the WR-011 player seam the ticket
+// mandates ("load the preferred/default local POV"); unread until that lands.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Selection {
     pub id: RecordingId,
     pub title: String,
-    pub identity_title: String,
-    pub identity_detail: String,
     pub media_path: PathBuf,
     /// Correlated local POV ids (primary first) for the viewpoint selector.
     pub viewpoints: Vec<RecordingId>,
@@ -203,8 +203,7 @@ fn win_loss(outcome: Outcome) -> String {
     match outcome {
         Outcome::Win => "Win",
         Outcome::Loss => "Loss",
-        Outcome::Unknown => "Unknown",
-        Outcome::Complete | Outcome::Abandoned => "",
+        _ => "",
     }
     .to_owned()
 }
@@ -393,33 +392,6 @@ fn category_fields(entry: &LibraryEntry, family: Family) -> CategoryFields {
     )
 }
 
-#[derive(Default)]
-struct BulkSelection {
-    ids: HashSet<RecordingId>,
-}
-
-impl BulkSelection {
-    fn set_checked(&mut self, id: RecordingId, checked: bool) {
-        if checked {
-            self.ids.insert(id);
-        } else {
-            self.ids.remove(&id);
-        }
-    }
-
-    fn clear(&mut self) {
-        self.ids.clear();
-    }
-
-    fn contains(&self, id: &RecordingId) -> bool {
-        self.ids.contains(id)
-    }
-
-    fn retain_visible(&mut self, visible: &HashSet<RecordingId>) {
-        self.ids.retain(|id| visible.contains(id));
-    }
-}
-
 /// Shared mutable view state referenced by every widget callback.
 struct State {
     selected_chips: RefCell<Vec<Chip>>,
@@ -429,9 +401,6 @@ struct State {
     suggestions_active: Cell<bool>,
     rebuilding_store: Cell<bool>,
     category: RefCell<Option<Category>>,
-    active_id: RefCell<Option<RecordingId>>,
-    syncing_active: Cell<bool>,
-    bulk: RefCell<BulkSelection>,
     signature: Cell<u64>,
     /// A protect/tag/delete is in flight; the bulk bar stays disabled until the
     /// authoritative snapshot arrives.
@@ -454,7 +423,7 @@ struct Inner {
     store: gio::ListStore,
     filter: gtk4::CustomFilter,
     filter_model: gtk4::FilterListModel,
-    selection: gtk4::SingleSelection,
+    selection: gtk4::MultiSelection,
     column_view: gtk4::ColumnView,
     stack: gtk4::Stack,
     chips_box: gtk4::Box,
@@ -463,7 +432,6 @@ struct Inner {
     suggestion_popover: gtk4::Popover,
     suggestion_model: gio::ListStore,
     suggestion_list: gtk4::ListView,
-    suggestion_feedback: gtk4::Label,
     date_label: gtk4::Label,
     from_calendar: gtk4::Calendar,
     to_calendar: gtk4::Calendar,
@@ -480,14 +448,11 @@ impl Library {
         let filter = gtk4::CustomFilter::new(|_| true);
         let filter_model = gtk4::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
         let sort_model = gtk4::SortListModel::new(Some(filter_model.clone()), None::<gtk4::Sorter>);
-        let selection = gtk4::SingleSelection::new(Some(sort_model.clone()));
-        selection.set_autoselect(false);
-        selection.set_can_unselect(false);
+        let selection = gtk4::MultiSelection::new(Some(sort_model.clone()));
         let column_view = gtk4::ColumnView::new(Some(selection.clone()));
         column_view.set_hexpand(true);
         column_view.set_vexpand(true);
         column_view.add_css_class("data-table");
-        column_view.add_css_class("wr-recording-library");
         sort_model.set_sorter(column_view.sorter().as_ref());
 
         let scroll = gtk4::ScrolledWindow::new();
@@ -502,7 +467,9 @@ impl Library {
         empty.set_vexpand(true);
         let filtered_empty = adw::StatusPage::new();
         filtered_empty.set_title("No matches");
-        filtered_empty.set_description(Some("No recordings match the selected filters."));
+        filtered_empty.set_description(Some(
+            "The selected chips and date range removed every recording.",
+        ));
         filtered_empty.set_vexpand(true);
 
         let stack = gtk4::Stack::new();
@@ -511,10 +478,9 @@ impl Library {
         stack.add_named(&filtered_empty, Some("filtered-empty"));
         stack.set_visible_child_name("empty");
 
-        // Toolbar: suggested recording filters, date-range popover, clear.
+        // Toolbar: search entry, date-range popover, clear.
         let search = gtk4::SearchEntry::new();
-        search.set_placeholder_text(Some("Add filter…"));
-        search.update_property(&[gtk4::accessible::Property::Label("Add recording filter")]);
+        search.set_placeholder_text(Some("Search recordings"));
         search.set_hexpand(true);
         let suggestion_model = gio::ListStore::new::<BoxedAnyObject>();
         let suggestion_selection = gtk4::NoSelection::new(Some(suggestion_model.clone()));
@@ -530,26 +496,12 @@ impl Library {
         suggestion_scroll.set_max_content_height(280);
         suggestion_scroll.set_propagate_natural_height(true);
         suggestion_scroll.set_child(Some(&suggestion_list));
-        let suggestion_feedback = gtk4::Label::new(Some(
-            "Choose a suggested filter; typing only narrows this list.",
-        ));
-        suggestion_feedback.set_xalign(0.0);
-        suggestion_feedback.set_wrap(true);
-        suggestion_feedback.add_css_class("caption");
-        suggestion_feedback.add_css_class("dim-label");
-        suggestion_feedback.set_margin_top(6);
-        suggestion_feedback.set_margin_bottom(4);
-        suggestion_feedback.set_margin_start(8);
-        suggestion_feedback.set_margin_end(8);
-        let suggestion_content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        suggestion_content.append(&suggestion_feedback);
-        suggestion_content.append(&suggestion_scroll);
         let suggestion_popover = gtk4::Popover::new();
         suggestion_popover.set_parent(&search);
         suggestion_popover.set_autohide(false);
         suggestion_popover.set_has_arrow(false);
         suggestion_popover.set_position(gtk4::PositionType::Bottom);
-        suggestion_popover.set_child(Some(&suggestion_content));
+        suggestion_popover.set_child(Some(&suggestion_scroll));
 
         let date = build_date_control();
         let date_label = date.label.clone();
@@ -577,7 +529,7 @@ impl Library {
         chips_row.append(&clear_button);
         chips_row.set_visible(false);
 
-        // Bulk action bar (revealed only for explicitly checked visible rows).
+        // Bulk action bar (revealed while rows are selected).
         let bulk_count = gtk4::Label::new(Some("Selection"));
         bulk_count.set_hexpand(true);
         bulk_count.set_xalign(0.0);
@@ -618,7 +570,6 @@ impl Library {
             suggestion_popover,
             suggestion_model,
             suggestion_list,
-            suggestion_feedback,
             date_label,
             from_calendar,
             to_calendar,
@@ -634,9 +585,6 @@ impl Library {
                 suggestions_active: Cell::new(false),
                 rebuilding_store: Cell::new(false),
                 category: RefCell::new(None),
-                active_id: RefCell::new(None),
-                syncing_active: Cell::new(false),
-                bulk: RefCell::new(BulkSelection::default()),
                 signature: Cell::new(0),
                 mutation_pending: Cell::new(false),
                 entries: RefCell::new(None),
@@ -692,21 +640,20 @@ impl Inner {
             this.state.suggestions_active.set(search.has_focus());
             this.refresh_suggestion_popover();
         });
-        // Enter accepts the top suggestion narrowed by the current text.
+        // Enter accepts the top narrowed suggestion, matching legacy Tab/Enter.
         let this = Rc::clone(self);
         self.search.connect_activate(move |_| {
             this.accept_first_suggestion();
         });
-        // Tab accepts only when that same current query has a match. Otherwise
-        // focus traversal proceeds normally instead of becoming trapped.
+        // Tab also accepts the active suggestion instead of moving focus.
         let key = gtk4::EventControllerKey::new();
         let this = Rc::clone(self);
         key.connect_key_pressed(move |_, keyval, _, _| {
-            if keyval == gtk4::gdk::Key::Tab && this.accept_first_suggestion() {
-                glib::Propagation::Stop
-            } else {
-                glib::Propagation::Proceed
+            if keyval == gtk4::gdk::Key::Tab && !this.state.available_narrowed().is_empty() {
+                this.accept_first_suggestion();
+                return glib::Propagation::Stop;
             }
+            glib::Propagation::Proceed
         });
         self.search.add_controller(key);
 
@@ -721,13 +668,7 @@ impl Inner {
     fn connect_selection(self: &Rc<Self>) {
         let this = Rc::clone(self);
         self.selection.connect_selection_changed(move |_, _, _| {
-            this.after_active_selection_change();
-        });
-        let this = Rc::clone(self);
-        self.selection.connect_items_changed(move |_, _, _, _| {
-            if !this.state.rebuilding_store.get() {
-                this.sync_active_selection_to_visible();
-            }
+            this.after_selection_change();
         });
     }
 
@@ -738,7 +679,7 @@ impl Inner {
         });
         let this = Rc::clone(self);
         self.delete_button.connect_clicked(move |_| {
-            this.confirm_bulk_delete();
+            this.confirm_delete(this.selected_rows());
         });
         let this = Rc::clone(self);
         clear_button.connect_clicked(move |_| {
@@ -764,14 +705,11 @@ impl Inner {
     // --- filtering feedback -------------------------------------------------
 
     fn after_filter_change(self: &Rc<Self>) {
-        self.prune_bulk_to_visible();
-        self.sync_active_selection_to_visible();
         self.state.suggestions_dirty.set(true);
         if self.state.suggestions_active.get() {
             self.refresh_available_suggestions();
         }
         self.update_stack();
-        self.update_bulk_bar();
         self.refresh_suggestion_popover();
     }
 
@@ -814,20 +752,10 @@ impl Inner {
         if self.state.suggestions_dirty.get() {
             self.refresh_available_suggestions();
         }
-        let query = self.search.text();
-        self.rebuild_suggestion_model(&query);
-        let has_suggestions = self.suggestion_model.n_items() > 0;
-        self.suggestion_list.set_visible(has_suggestions);
-        self.suggestion_feedback.set_text(if has_suggestions {
-            "Choose a suggested filter; typing only narrows this list."
-        } else if query.trim().is_empty() {
-            "No recording filters are available."
-        } else {
-            "No matching recording filters."
-        });
-        if self.search.has_focus() {
+        self.rebuild_suggestion_model(&self.search.text());
+        if self.search.has_focus() && self.suggestion_model.n_items() > 0 {
             self.suggestion_popover.popup();
-        } else {
+        } else if self.suggestion_model.n_items() == 0 {
             self.suggestion_popover.popdown();
         }
     }
@@ -843,12 +771,14 @@ impl Inner {
             .splice(0, self.suggestion_model.n_items(), &suggestions);
     }
 
-    fn accept_first_suggestion(self: &Rc<Self>) -> bool {
-        let Some(chip) = self.state.first_available_with(&self.search.text()) else {
-            return false;
-        };
-        self.add_chip(chip);
-        true
+    fn accept_first_suggestion(self: &Rc<Self>) {
+        if let Some(chip) = self
+            .state
+            .available_narrowed_with(&self.search.text())
+            .first()
+        {
+            self.add_chip(chip.clone());
+        }
     }
 
     // --- chips and dates ----------------------------------------------------
@@ -935,112 +865,38 @@ impl Inner {
         self.chips_row.set_visible(has_filter);
     }
 
-    // --- active playback and checked bulk state -----------------------------
+    // --- selection and player load -----------------------------------------
 
-    fn after_active_selection_change(self: &Rc<Self>) {
-        if self.state.syncing_active.get() {
-            return;
+    fn after_selection_change(self: &Rc<Self>) {
+        let selected = self.selected_rows();
+        let count = selected.len();
+        // Load the sole selection into the player; multiselect does not load.
+        if count == 1 {
+            let row = &selected[0];
+            (self.on_select)(Some(Selection {
+                id: row.id.clone(),
+                title: row.details.clone(),
+                media_path: row.media_path.clone(),
+                viewpoints: row.correlated_ids.clone(),
+            }));
         }
-        let Some(item) = self.selection.selected_item() else {
-            // Filtering can temporarily hide the playback row. Keep its id so
-            // clearing the filter restores the truthful active-row highlight.
-            return;
-        };
-        let row = row_of(&item);
-        if self.state.active_id.borrow().as_ref() == Some(&row.id) {
-            return;
+        self.update_bulk_bar(&selected);
+    }
+
+    fn selected_rows(&self) -> Vec<Rc<RowModel>> {
+        let bitset = self.selection.selection();
+        let mut rows = Vec::new();
+        for index in 0..self.selection.n_items() {
+            if bitset.contains(index)
+                && let Some(item) = self.selection.item(index)
+            {
+                rows.push(row_of(&item));
+            }
         }
-        *self.state.active_id.borrow_mut() = Some(row.id.clone());
-        (self.on_select)(Some(self.selection_for(&row)));
+        rows
     }
 
-    fn selection_for(&self, row: &RowModel) -> Selection {
-        let category = self.state.category.borrow();
-        let category = category
-            .as_ref()
-            .expect("a visible library row has a selected category");
-        let (identity_title, identity_detail) = selection_identity(row, category);
-        Selection {
-            id: row.id.clone(),
-            title: row.details.clone(),
-            identity_title,
-            identity_detail,
-            media_path: row.media_path.clone(),
-            viewpoints: row.correlated_ids.clone(),
-        }
-    }
-
-    fn activate_position(&self, position: u32) {
-        let Some(item) = self.selection.item(position) else {
-            return;
-        };
-        let row = row_of(&item);
-        let selection = self.selection_for(&row);
-        *self.state.active_id.borrow_mut() = Some(row.id.clone());
-        self.state.syncing_active.set(true);
-        self.selection.set_selected(position);
-        self.state.syncing_active.set(false);
-        (self.on_select)(Some(selection));
-    }
-
-    fn sync_active_selection_to_visible(&self) {
-        let target = self
-            .state
-            .active_id
-            .borrow()
-            .as_ref()
-            .and_then(|id| self.visible_position(id))
-            .unwrap_or(gtk4::INVALID_LIST_POSITION);
-        if self.selection.selected() == target {
-            return;
-        }
-        self.state.syncing_active.set(true);
-        self.selection.set_selected(target);
-        self.state.syncing_active.set(false);
-    }
-
-    fn visible_position(&self, id: &RecordingId) -> Option<u32> {
-        (0..self.selection.n_items()).find(|&position| {
-            self.selection
-                .item(position)
-                .is_some_and(|item| &row_of(&item).id == id)
-        })
-    }
-
-    fn store_contains(&self, id: &RecordingId) -> bool {
-        (0..self.store.n_items()).any(|position| {
-            self.store
-                .item(position)
-                .is_some_and(|item| &row_of(&item).id == id)
-        })
-    }
-
-    fn bulk_rows(&self) -> Vec<Rc<RowModel>> {
-        let checked = self.state.bulk.borrow();
-        (0..self.selection.n_items())
-            .filter_map(|position| self.selection.item(position))
-            .map(|item| row_of(&item))
-            .filter(|row| checked.contains(&row.id))
-            .collect()
-    }
-
-    fn set_bulk_checked(&self, id: RecordingId, checked: bool) {
-        self.state.bulk.borrow_mut().set_checked(id, checked);
-        self.update_bulk_bar();
-    }
-
-    fn prune_bulk_to_visible(&self) {
-        let visible: HashSet<RecordingId> = (0..self.filter_model.n_items())
-            .filter_map(|position| self.filter_model.item(position))
-            .map(|item| row_of(&item).id.clone())
-            .collect();
-        self.state.bulk.borrow_mut().retain_visible(&visible);
-    }
-
-    fn update_bulk_bar(&self) {
-        // Recompute through the visible sorted model at the action boundary:
-        // stale or filtered ids can never reach Protect/Delete.
-        let selected = self.bulk_rows();
+    fn update_bulk_bar(&self, selected: &[Rc<RowModel>]) {
         if selected.is_empty() {
             self.bulk_bar.set_reveal_child(false);
             return;
@@ -1049,6 +905,8 @@ impl Inner {
         let rows = selected.len();
         self.bulk_count
             .set_text(&format!("{rows} recording{} selected", plural(rows)));
+        // Legacy rule: unless every selected viewpoint is protected, the action
+        // is Protect; only an all-protected selection unprotects.
         let all_protected = selected.iter().all(|row| row.all_protected);
         self.protect_button.set_label(if all_protected {
             "Unprotect"
@@ -1061,7 +919,7 @@ impl Inner {
     }
 
     fn bulk_set_protected(self: &Rc<Self>) {
-        let selected = self.bulk_rows();
+        let selected = self.selected_rows();
         if selected.is_empty() {
             return;
         }
@@ -1070,21 +928,11 @@ impl Inner {
         self.send_mutation(Command::SetProtected { ids, value });
     }
 
-    fn confirm_bulk_delete(self: &Rc<Self>) {
-        self.confirm_delete_rows(self.bulk_rows(), true);
-    }
-
     fn confirm_delete(self: &Rc<Self>, selected: Vec<Rc<RowModel>>) {
-        self.confirm_delete_rows(selected, false);
-    }
-
-    fn confirm_delete_rows(self: &Rc<Self>, selected: Vec<Rc<RowModel>>, revalidate_bulk: bool) {
         if selected.is_empty() {
             return;
         }
         let ids = viewpoint_ids(&selected);
-        let confirmed_bulk_ids: HashSet<RecordingId> =
-            selected.iter().map(|row| row.id.clone()).collect();
         let rows = selected.len();
         let body = format!(
             "Delete {rows} recording{} and their {} viewpoint file{}? This permanently \
@@ -1101,21 +949,8 @@ impl Inner {
         dialog.set_close_response("cancel");
         let this = Rc::clone(self);
         dialog.connect_response(None, move |_, response| {
-            if response != "delete" {
-                return;
-            }
-            let current_ids = if revalidate_bulk {
-                let still_confirmed: Vec<Rc<RowModel>> = this
-                    .bulk_rows()
-                    .into_iter()
-                    .filter(|row| confirmed_bulk_ids.contains(&row.id))
-                    .collect();
-                viewpoint_ids(&still_confirmed)
-            } else {
-                ids.clone()
-            };
-            if !current_ids.is_empty() {
-                this.send_mutation(Command::Delete { ids: current_ids });
+            if response == "delete" {
+                this.send_mutation(Command::Delete { ids: ids.clone() });
             }
         });
         dialog.present(Some(&self.widget_root()));
@@ -1211,7 +1046,7 @@ impl Inner {
             // change the library.  In particular, do not rebuild suggestion
             // sets or touch the virtualized store while FFmpeg reports work.
             self.state.mutation_pending.set(false);
-            self.update_bulk_bar();
+            self.update_bulk_bar(&self.selected_rows());
             return;
         }
         *self.state.entries.borrow_mut() = Some(Arc::clone(&snapshot.entries));
@@ -1220,50 +1055,55 @@ impl Inner {
         let rows = build_rows(snapshot, &category);
         let signature = rows_signature(&rows);
         if !category_changed && signature == self.state.signature.get() {
-            // Nothing the table shows changed; re-enable checked-row actions.
-            self.update_bulk_bar();
+            // Nothing the table shows changed; re-enable the bulk bar only.
+            self.update_bulk_bar(&self.selected_rows());
             return;
         }
         self.state.signature.set(signature);
 
+        // Remember the selection so a snapshot-driven rebuild (tag/protect/new
+        // finalize) does not silently jump the player to a different recording.
+        let previously: HashSet<RecordingId> = self
+            .selected_rows()
+            .iter()
+            .map(|row| row.id.clone())
+            .collect();
+
         let rows: Vec<BoxedAnyObject> = rows.into_iter().map(BoxedAnyObject::new).collect();
         self.state.rebuilding_store.set(true);
-        self.state.syncing_active.set(true);
         self.store.splice(0, self.store.n_items(), &rows);
-        self.state.syncing_active.set(false);
         self.state.rebuilding_store.set(false);
         self.after_filter_change();
 
-        // Playback follows its id through authoritative rebuilds. A surviving
-        // filtered row remains loaded but unhighlighted; a deleted playback row
-        // falls back to the first visible row (newest under the default sort).
-        let active_id = self.state.active_id.borrow().clone();
-        let active_survives = active_id.as_ref().is_some_and(|id| self.store_contains(id));
-        if active_survives {
-            self.sync_active_selection_to_visible();
-        } else if self.selection.n_items() > 0 {
-            self.activate_position(0);
-        } else if active_id.is_some() {
-            self.state.active_id.borrow_mut().take();
-            (self.on_select)(None);
+        // Re-select the surviving rows. If none survive — a fresh category, or
+        // the selection was deleted/filtered out — open the newest by default,
+        // matching the current app.
+        let mut reselected = false;
+        if !previously.is_empty() {
+            for index in 0..self.selection.n_items() {
+                if let Some(item) = self.selection.item(index)
+                    && previously.contains(&row_of(&item).id)
+                {
+                    self.selection.select_item(index, !reselected);
+                    reselected = true;
+                }
+            }
         }
-        self.update_bulk_bar();
+        if !reselected && self.selection.n_items() > 0 {
+            self.selection.select_item(0, true);
+        }
+        self.update_bulk_bar(&self.selected_rows());
     }
 
     fn reset_for_category(self: &Rc<Self>, category: &Category) {
-        // Category change clears filters, active playback, checked ids, and any
-        // active sort before swapping in the family's columns.
+        // Category change clears chips, dates, selection, and any active sort,
+        // and swaps in the family's columns (WR-000 baseline).
         self.state.selected_chips.borrow_mut().clear();
         self.state.date_range.set(None);
-        self.state.bulk.borrow_mut().clear();
-        self.state.active_id.borrow_mut().take();
         self.search.set_text("");
         self.date_label.set_text("Date range");
         self.rebuild_chip_row();
-        self.state.syncing_active.set(true);
-        self.selection.set_selected(gtk4::INVALID_LIST_POSITION);
-        self.state.syncing_active.set(false);
-        self.update_bulk_bar();
+        self.selection.unselect_all();
         self.column_view
             .sort_by_column(None::<&gtk4::ColumnViewColumn>, gtk4::SortType::Ascending);
         self.rebuild_columns(family_of(category));
@@ -1283,11 +1123,7 @@ impl Inner {
     }
 
     fn columns_for(self: &Rc<Self>, family: Family) -> Vec<gtk4::ColumnViewColumn> {
-        let mut columns = vec![
-            self.checkbox_column(),
-            self.star_column(),
-            self.details_column(),
-        ];
+        let mut columns = vec![self.star_column(), self.details_column()];
         match family {
             Family::Raid => {
                 columns.push(text_column(
@@ -1297,8 +1133,9 @@ impl Inner {
                     sort_by(|r| r.encounter.clone()),
                 ));
                 columns.push(result_column());
-                columns.push(numeric_column(
+                columns.push(text_column(
                     "Pull",
+                    false,
                     |r| r.pull.clone(),
                     sort_by(|r| r.pull.parse::<i64>().unwrap_or(0)),
                 ));
@@ -1319,7 +1156,12 @@ impl Inner {
                     sort_by(|r| r.place.clone()),
                 ));
                 columns.push(result_column());
-                columns.push(numeric_column("Level", level_label, sort_by(|r| r.level)));
+                columns.push(text_column(
+                    "Level",
+                    false,
+                    level_label,
+                    sort_by(|r| r.level),
+                ));
                 columns.push(text_column(
                     "Affixes",
                     false,
@@ -1371,8 +1213,9 @@ impl Inner {
     }
 
     fn duration_column(&self) -> gtk4::ColumnViewColumn {
-        numeric_column(
+        text_column(
             "Duration",
+            false,
             |r| format_duration(r.duration_ms),
             sort_by(|r| r.duration_ms),
         )
@@ -1382,8 +1225,7 @@ impl Inner {
         let factory = gtk4::SignalListItemFactory::new();
         factory.connect_setup(|_, item| {
             let label = gtk4::Label::new(None);
-            label.set_xalign(1.0);
-            label.add_css_class("wr-numeric");
+            label.set_xalign(0.0);
             label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
             // Keep the final text column clear of the vertical scrollbar.
             label.set_margin_end(6);
@@ -1400,50 +1242,6 @@ impl Inner {
         let column = gtk4::ColumnViewColumn::new(Some("Date"), Some(factory));
         column.set_resizable(true);
         column.set_sorter(Some(&sort_by(|r| r.date_ms)));
-        column
-    }
-
-    fn checkbox_column(self: &Rc<Self>) -> gtk4::ColumnViewColumn {
-        let factory = gtk4::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
-            let checkbox = gtk4::CheckButton::new();
-            checkbox.set_halign(gtk4::Align::Center);
-            checkbox.set_valign(gtk4::Align::Center);
-            item.downcast_ref::<gtk4::ListItem>()
-                .unwrap()
-                .set_child(Some(&checkbox));
-        });
-        let this = Rc::clone(self);
-        factory.connect_bind(move |_, item| {
-            let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-            // Gtk resets this on every bind. Keep checkbox interaction from
-            // changing the independent playback selection for the row.
-            item.set_selectable(false);
-            item.set_activatable(false);
-            let checkbox = item.child().and_downcast::<gtk4::CheckButton>().unwrap();
-            let row = row_of(&item.item().unwrap());
-            checkbox.set_active(this.state.bulk.borrow().contains(&row.id));
-            let label = format!("Select {} for bulk actions", row.details);
-            checkbox.set_tooltip_text(Some(&label));
-            checkbox.update_property(&[gtk4::accessible::Property::Label(&label)]);
-            let this = Rc::clone(&this);
-            let id = row.id.clone();
-            let handler = checkbox.connect_toggled(move |checkbox| {
-                this.set_bulk_checked(id.clone(), checkbox.is_active());
-            });
-            unsafe { checkbox.set_data("wr-bulk-handler", handler) };
-        });
-        factory.connect_unbind(|_, item| {
-            let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-            let checkbox = item.child().and_downcast::<gtk4::CheckButton>().unwrap();
-            if let Some(handler) =
-                unsafe { checkbox.steal_data::<glib::SignalHandlerId>("wr-bulk-handler") }
-            {
-                checkbox.disconnect(handler);
-            }
-        });
-        let column = gtk4::ColumnViewColumn::new(Some("Select"), Some(factory));
-        column.set_fixed_width(54);
         column
     }
 
@@ -1628,16 +1426,12 @@ impl Inner {
 }
 
 impl State {
-    fn available_narrowed_with(&self, query: &str) -> Vec<Chip> {
-        filters::narrow(
-            &self.available.borrow(),
-            query,
-            &self.selected_chips.borrow(),
-        )
+    fn available_narrowed(&self) -> Vec<Chip> {
+        self.available_narrowed_with("")
     }
 
-    fn first_available_with(&self, query: &str) -> Option<Chip> {
-        first_matching_suggestion(
+    fn available_narrowed_with(&self, query: &str) -> Vec<Chip> {
+        filters::narrow(
             &self.available.borrow(),
             query,
             &self.selected_chips.borrow(),
@@ -1646,69 +1440,6 @@ impl State {
 }
 
 // --- free helpers -----------------------------------------------------------
-fn first_matching_suggestion(available: &[Chip], query: &str, selected: &[Chip]) -> Option<Chip> {
-    filters::narrow(available, query, selected)
-        .into_iter()
-        .next()
-}
-
-fn selection_identity(row: &RowModel, category: &Category) -> (String, String) {
-    let category_label = super::category_label(category);
-    let fallback = format!("{category_label} recording");
-    let title = match family_of(category) {
-        Family::Raid => first_nonempty(&[&row.encounter, &row.place, &row.details], &fallback),
-        Family::Dungeon | Family::Pvp => first_nonempty(&[&row.place, &row.details], &fallback),
-        Family::Clip => first_nonempty(&[&row.source, &row.details, &row.kind], &fallback),
-        Family::Manual => first_nonempty(&[&row.details, &row.kind], &fallback),
-    };
-
-    let mut detail = Vec::with_capacity(6);
-    push_identity_part(&mut detail, &title, category_label);
-    match family_of(category) {
-        Family::Raid => {
-            push_identity_part(&mut detail, &title, &row.place);
-            push_identity_part(&mut detail, &title, &row.difficulty);
-            if !row.pull.is_empty() {
-                push_identity_part(&mut detail, &title, format!("Pull {}", row.pull));
-            }
-            push_identity_part(&mut detail, &title, &row.result);
-        }
-        Family::Dungeon => {
-            if row.level > 0 {
-                push_identity_part(&mut detail, &title, format!("+{}", row.level));
-            }
-            push_identity_part(&mut detail, &title, &row.result);
-        }
-        Family::Pvp => push_identity_part(&mut detail, &title, &row.result),
-        Family::Clip => push_identity_part(&mut detail, &title, &row.kind),
-        Family::Manual => {}
-    }
-    push_identity_part(&mut detail, &title, &row.details);
-    push_identity_part(&mut detail, &title, format_date(row.date_ms));
-    if detail.is_empty() {
-        detail.push(fallback);
-    }
-    (title, detail.join(" · "))
-}
-
-fn first_nonempty(values: &[&str], fallback: &str) -> String {
-    values
-        .iter()
-        .map(|value| value.trim())
-        .find(|value| !value.is_empty())
-        .unwrap_or(fallback)
-        .to_owned()
-}
-
-fn push_identity_part(parts: &mut Vec<String>, title: &str, value: impl AsRef<str>) {
-    let value = value.as_ref().trim();
-    if !value.is_empty()
-        && value != title
-        && !parts.iter().any(|existing| existing.as_str() == value)
-    {
-        parts.push(value.to_owned());
-    }
-}
 
 fn viewpoint_ids(rows: &[Rc<RowModel>]) -> Vec<RecordingId> {
     let mut ids = Vec::new();
@@ -1780,32 +1511,11 @@ fn text_column(
     getter: impl Fn(&RowModel) -> String + 'static,
     sorter: gtk4::CustomSorter,
 ) -> gtk4::ColumnViewColumn {
-    label_column(title, expand, false, getter, sorter)
-}
-
-fn numeric_column(
-    title: &str,
-    getter: impl Fn(&RowModel) -> String + 'static,
-    sorter: gtk4::CustomSorter,
-) -> gtk4::ColumnViewColumn {
-    label_column(title, false, true, getter, sorter)
-}
-
-fn label_column(
-    title: &str,
-    expand: bool,
-    numeric: bool,
-    getter: impl Fn(&RowModel) -> String + 'static,
-    sorter: gtk4::CustomSorter,
-) -> gtk4::ColumnViewColumn {
     let getter = Rc::new(getter);
     let factory = gtk4::SignalListItemFactory::new();
-    factory.connect_setup(move |_, item| {
+    factory.connect_setup(|_, item| {
         let label = gtk4::Label::new(None);
-        label.set_xalign(if numeric { 1.0 } else { 0.0 });
-        if numeric {
-            label.add_css_class("wr-numeric");
-        }
+        label.set_xalign(0.0);
         label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
         item.downcast_ref::<gtk4::ListItem>()
             .unwrap()
@@ -1824,46 +1534,30 @@ fn label_column(
     column
 }
 
-/// The Result column pairs a stock outcome glyph with its text. Semantic
-/// success/error color reinforces real outcomes; the label carries meaning.
+/// The Result column: same text cell as `text_column`, plus the win/loss
+/// outcome color the legacy table used (label conveys the meaning; color is
+/// reinforcement only).
 fn result_column() -> gtk4::ColumnViewColumn {
     let factory = gtk4::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
-        let icon = gtk4::Image::new();
         let label = gtk4::Label::new(None);
         label.set_xalign(0.0);
         label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        let content = gtk4::Box::new(gtk4::Orientation::Horizontal, 5);
-        content.set_valign(gtk4::Align::Center);
-        content.append(&icon);
-        content.append(&label);
         item.downcast_ref::<gtk4::ListItem>()
             .unwrap()
-            .set_child(Some(&content));
+            .set_child(Some(&label));
     });
     factory.connect_bind(move |_, item| {
         let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-        let content = item.child().and_downcast::<gtk4::Box>().unwrap();
-        let icon = content.first_child().and_downcast::<gtk4::Image>().unwrap();
-        let label = icon.next_sibling().and_downcast::<gtk4::Label>().unwrap();
+        let label = item.child().and_downcast::<gtk4::Label>().unwrap();
         let row = row_of(&item.item().unwrap());
-        label.set_text(if row.result.is_empty() {
-            "Unknown"
-        } else {
-            &row.result
-        });
-        content.remove_css_class("wr-result-win");
-        content.remove_css_class("wr-result-loss");
+        label.set_text(&row.result);
+        label.remove_css_class("wr-result-win");
+        label.remove_css_class("wr-result-loss");
         match row.outcome_order {
-            0 => {
-                icon.set_icon_name(Some("object-select-symbolic"));
-                content.add_css_class("wr-result-win");
-            }
-            1 => {
-                icon.set_icon_name(Some("window-close-symbolic"));
-                content.add_css_class("wr-result-loss");
-            }
-            _ => icon.set_icon_name(Some("dialog-question-symbolic")),
+            0 => label.add_css_class("wr-result-win"),
+            1 => label.add_css_class("wr-result-loss"),
+            _ => {}
         }
     });
     let column = gtk4::ColumnViewColumn::new(Some("Result"), Some(factory));
@@ -1989,102 +1683,6 @@ fn labelled_calendar(title: &str, calendar: &gtk4::Calendar) -> gtk4::Box {
     container.append(&heading);
     container.append(calendar);
     container
-}
-
-#[cfg(test)]
-mod state_tests {
-    use super::*;
-
-    fn row() -> RowModel {
-        let id = RecordingId::new();
-        RowModel {
-            id: id.clone(),
-            media_path: PathBuf::from("/recording.mkv"),
-            correlated_ids: vec![id],
-            protected: false,
-            all_protected: false,
-            tag: None,
-            details: "Alyx".to_owned(),
-            result: "Wipe".to_owned(),
-            date_ms: 1,
-            duration_ms: 1,
-            encounter: "Queen Ansurek".to_owned(),
-            place: "Nerub-ar Palace".to_owned(),
-            pull: "12".to_owned(),
-            difficulty: "Mythic".to_owned(),
-            difficulty_order: 3,
-            level: 0,
-            affixes: String::new(),
-            kind: String::new(),
-            source: String::new(),
-            outcome_order: 1,
-            class_css: None,
-            combined: BTreeSet::new(),
-        }
-    }
-
-    #[test]
-    fn checked_ids_are_pruned_by_visibility_and_not_position() {
-        let first = RecordingId::new();
-        let second = RecordingId::new();
-        let hidden = RecordingId::new();
-        let mut bulk = BulkSelection::default();
-        bulk.set_checked(first.clone(), true);
-        bulk.set_checked(second.clone(), true);
-        bulk.set_checked(hidden.clone(), true);
-
-        // The visible set deliberately has no row-order semantics: a sort
-        // cannot change which ids are checked.
-        bulk.retain_visible(&HashSet::from([second.clone(), first.clone()]));
-        assert!(bulk.contains(&first));
-        assert!(bulk.contains(&second));
-        assert!(!bulk.contains(&hidden));
-
-        bulk.set_checked(first.clone(), false);
-        assert!(!bulk.contains(&first));
-        bulk.clear();
-        assert!(!bulk.contains(&second));
-    }
-
-    #[test]
-    fn suggestion_acceptance_uses_the_current_query() {
-        let available = vec![
-            Chip {
-                group: 1,
-                label: "Victory".to_owned(),
-            },
-            Chip {
-                group: 1,
-                label: "Mythic".to_owned(),
-            },
-        ];
-        assert_eq!(
-            first_matching_suggestion(&available, "vict", &[])
-                .map(|chip| chip.label)
-                .as_deref(),
-            Some("Victory")
-        );
-        assert!(first_matching_suggestion(&available, "missing", &[]).is_none());
-    }
-
-    #[test]
-    fn selection_identity_is_category_aware_and_nonempty() {
-        let raid = row();
-        let (title, detail) = selection_identity(&raid, &Category::Raids);
-        assert_eq!(title, "Queen Ansurek");
-        assert!(detail.starts_with("Raids · Nerub-ar Palace · Mythic · Pull 12 · Wipe · Alyx · "));
-        assert!(detail.ends_with(&format_date(raid.date_ms)));
-
-        let mut manual = row();
-        manual.details.clear();
-        manual.encounter.clear();
-        manual.place.clear();
-        manual.kind = "Manual".to_owned();
-        manual.result.clear();
-        let (title, detail) = selection_identity(&manual, &Category::Manual);
-        assert!(!title.is_empty());
-        assert!(!detail.is_empty());
-    }
 }
 
 #[cfg(test)]
@@ -2257,7 +1855,7 @@ mod release_gate_tests {
             .inner
             .column_view
             .columns()
-            .item(2)
+            .item(1)
             .expect("details column")
             .downcast::<gtk4::ColumnViewColumn>()
             .expect("column type");
