@@ -136,8 +136,10 @@ pub struct AppSnapshot {
     pub config: Config,
     pub setup_problems: Vec<ValidationProblem>,
     /// One entry per enabled flavour: its config field name and whether
-    /// advanced combat logging is on.
-    pub advanced_logging: Vec<(&'static str, bool)>,
+    /// advanced combat logging is on. `None` when `Config.wtf` could not be
+    /// read, which is the normal case in the sandbox: the portal exports the
+    /// chosen Logs folder alone, never its `WTF` sibling.
+    pub advanced_logging: Vec<(&'static str, Option<bool>)>,
     pub problems: Vec<Problem>,
     pub work: Option<WorkProgress>,
     pub queued_jobs: usize,
@@ -320,7 +322,7 @@ pub struct Coordinator {
 
     problems: Vec<Problem>,
     setup_problems: Vec<ValidationProblem>,
-    advanced_logging: Vec<(&'static str, bool)>,
+    advanced_logging: Vec<(&'static str, Option<bool>)>,
     storage_used_bytes: u64,
     protected_over_limit: bool,
 
@@ -1429,7 +1431,7 @@ impl Coordinator {
         }
     }
 
-    fn save_config(&mut self, draft: Config) {
+    fn save_config(&mut self, mut draft: Config) {
         if self.capture_in_flight()
             || self.media_busy.is_some()
             || !self.finalize_queue.is_empty()
@@ -1442,6 +1444,11 @@ impl Coordinator {
             );
             return;
         }
+        // Settings never owns the migration notice. Its draft was cloned from
+        // a snapshot taken while the notice was still up -- the notice itself
+        // offers the button that opens Settings -- so honouring the draft here
+        // resurrects a notice the user already dismissed, on every save.
+        draft.migration_notice_pending = self.config.migration_notice_pending;
         let problems = draft.validate();
         if !problems.is_empty() {
             self.setup_problems = problems;
@@ -1796,19 +1803,18 @@ fn enabled_log_sources(config: &Config) -> Vec<(&'static str, GameFlavor, PathBu
     .collect()
 }
 
-/// The `Config.wtf` next to the Logs folder must contain
-/// `SET advancedCombatLogging "1"`.
-fn advanced_logging_enabled(log_dir: &Path) -> bool {
-    let Some(parent) = log_dir.parent() else {
-        return false;
-    };
-    let Ok(text) = std::fs::read_to_string(parent.join("WTF").join("Config.wtf")) else {
-        return false;
-    };
-    text.lines().any(|line| {
+/// Whether the `Config.wtf` beside the Logs folder carries
+/// `SET advancedCombatLogging "1"`. `None` means the file could not be read
+/// rather than that the setting is off: the folder portal exports the chosen
+/// Logs directory on its own, so the `WTF` sibling is outside the sandbox and
+/// a failed read says nothing about the game's configuration.
+fn advanced_logging_enabled(log_dir: &Path) -> Option<bool> {
+    let parent = log_dir.parent()?;
+    let text = std::fs::read_to_string(parent.join("WTF").join("Config.wtf")).ok()?;
+    Some(text.lines().any(|line| {
         let line = line.trim();
         line.starts_with("SET advancedCombatLogging") && line.rsplit(' ').next() == Some("\"1\"")
-    })
+    }))
 }
 
 fn category_counts(entries: &[LibraryEntry]) -> Vec<(Category, usize)> {

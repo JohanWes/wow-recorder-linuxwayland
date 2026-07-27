@@ -637,6 +637,11 @@ impl Settings {
                 let draft = draft.borrow();
                 for (field, widget) in registry.borrow().iter() {
                     widget.set_sensitive(row_sensitive(field, &draft));
+                    if path_needs_attention(field, &draft) {
+                        widget.add_css_class("wr-needs-attention");
+                    } else {
+                        widget.remove_css_class("wr-needs-attention");
+                    }
                 }
             })
         };
@@ -1304,6 +1309,23 @@ fn combo_row(
     row
 }
 
+/// A required folder that is unset, or one whose authorization did not
+/// survive the move into the sandbox, is the only thing standing between a
+/// fresh or freshly migrated install and a working recorder. A disabled
+/// flavour needs nothing, so it stays quiet.
+fn path_needs_attention(field: &str, config: &Config) -> bool {
+    let Some(spec) = PATHS.iter().find(|spec| spec.field == field) else {
+        return false;
+    };
+    if let Some(enabled) = &spec.enabled
+        && !(enabled.get)(config)
+    {
+        return false;
+    }
+    let path = (spec.get)(config);
+    path.path.as_os_str().is_empty() || path_state(path).1
+}
+
 /// A directory row: optional flavour switch, path/authorization subtitle, and
 /// the native folder chooser. Selection probes access on GIO's blocking pool
 /// and stores an authorized path only when the probe passes; cancellation
@@ -1348,6 +1370,7 @@ fn path_row(
         let row = row.clone();
         let parent = parent.clone();
         let button = select.clone();
+        let refresh = Rc::clone(refresh);
         select.connect_clicked(move |_| {
             let chooser = gtk4::FileDialog::new();
             chooser.set_title(&format!("Choose the {} folder", spec.title));
@@ -1358,6 +1381,7 @@ fn path_row(
             let draft = Rc::clone(&draft);
             let row = row.clone();
             let button = button.clone();
+            let refresh = Rc::clone(&refresh);
             chooser.select_folder(
                 Some(&parent),
                 None::<&gtk4::gio::Cancellable>,
@@ -1373,6 +1397,7 @@ fn path_row(
                     let draft = Rc::clone(&draft);
                     let row = row.clone();
                     let button = button.clone();
+                    let refresh = Rc::clone(&refresh);
                     gtk4::glib::spawn_future_local(async move {
                         let probed = gtk4::gio::spawn_blocking(move || {
                             probe_folder(&probe_path, spec.needs_write)
@@ -1389,6 +1414,7 @@ fn path_row(
                                 let (subtitle, _) = path_state((spec.get)(&draft.borrow()));
                                 row.set_subtitle(&subtitle);
                                 button.set_label("Select folder…");
+                                refresh();
                             }
                             Err(message) => {
                                 row.add_css_class("error");

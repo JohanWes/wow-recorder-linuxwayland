@@ -77,12 +77,14 @@ pub fn enabled_flavors(config: &Config) -> Vec<&'static str> {
 }
 
 /// The `advanced_logging` snapshot field carries short field names; these
-/// are the per-flavour warning rows the card renders for `false` entries.
+/// are the per-flavour warning rows the card renders. Only a `Config.wtf`
+/// that was read and says "off" warrants a warning; an unreadable one is
+/// unknown, not off, and must stay silent.
 pub fn advanced_logging_warnings(snapshot: &AppSnapshot) -> Vec<String> {
     snapshot
         .advanced_logging
         .iter()
-        .filter(|(_, enabled)| !enabled)
+        .filter(|(_, enabled)| *enabled == Some(false))
         .map(|(field, _)| {
             let flavor = match *field {
                 "retail" => "Retail",
@@ -617,13 +619,17 @@ mod tests {
     }
 
     #[test]
-    fn advanced_logging_warnings_cover_each_disabled_flavour() {
+    fn advanced_logging_warns_only_when_config_wtf_says_off() {
         let mut snapshot = snapshot_with(RecorderStatus::Ready);
-        snapshot.advanced_logging = vec![("retail", false), ("classic", true), ("era", false)];
+        // Read and off, read and on, and unreadable: only the first warns.
+        snapshot.advanced_logging = vec![
+            ("retail", Some(false)),
+            ("classic", Some(true)),
+            ("era", None),
+        ];
         let warnings = advanced_logging_warnings(&snapshot);
-        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Retail"));
-        assert!(warnings[1].contains("Era"));
     }
 
     #[test]

@@ -572,6 +572,27 @@ fn the_migration_notice_survives_a_restart_and_one_dismissal_ends_it() {
             .migration_notice_pending,
         "the dismissal must outlive the process"
     );
+
+    // The notice offers the button that opens Settings, so the draft a save
+    // carries was cloned while the notice was still pending. Applying it must
+    // not bring the notice back, or it reappears on every later start.
+    let mut stale = harness.latest.config.clone();
+    stale.migration_notice_pending = true;
+    stale.capture.fps = 30;
+    harness.send(Command::SaveConfig {
+        draft: Box::new(stale),
+    });
+    harness.pump(|snapshot| snapshot.config.capture.fps == 30);
+    assert!(
+        !harness.latest.config.migration_notice_pending,
+        "a settings save must not resurrect the dismissed notice"
+    );
+    assert!(
+        !Config::load(&config_path)
+            .expect("reload after the settings save")
+            .migration_notice_pending,
+        "the resurrected notice must not reach disk either"
+    );
 }
 
 #[test]
