@@ -111,12 +111,14 @@ Publish `v1.0.0` first (that tag drives the signed build), then create the
 latest one. The native application never checks GitHub, so nothing regresses
 by keeping a 7.x tag as the repository's latest release.
 
-`install.sh` then installs the Flatpak, deletes the AppImage, replaces
+`install.sh` is also the installer the README hands to new users, so the
+AppImage steps run only when an AppImage install is actually present. In that
+case it installs the Flatpak, deletes the AppImage, replaces
 `~/.local/bin/warcraftrecorder` with a shim that runs the Flatpak, deletes the
 AppImage menu entry and icon, repoints any "run at start-up" entry, launches
 the native app, and closes the running AppImage. Without `flatpak` on the host
-it changes nothing, prints manual instructions, and exits nonzero, which the
-updater shows as an error.
+it changes nothing, prints the distribution commands that install it, and
+exits nonzero, which the updater shows as an error.
 
 That last step sweeps by executable rather than signalling one process: on a
 successful update the 7.7.1 updater relaunches itself *after* this script

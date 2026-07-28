@@ -7,6 +7,17 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## Unreleased
+
+### Changed
+- `install.sh` is the documented one-command install: on a machine without an
+  AppImage it only adds the remote, installs the app, and starts it, and a
+  re-run updates an existing install instead of failing. Missing Flatpak now
+  prints the command that installs it, and an X11 session is called out.
+- README rewritten for players: one install command, the three things the
+  system needs, first-run steps, and measured footprint against the Electron
+  build.
+
 ## 1.0.2 - 2026-07-28
 
 ### Added

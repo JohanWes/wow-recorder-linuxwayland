@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Final AppImage migration helper. It performs a user-level Flatpak install,
-# uninstalls the AppImage it replaces, and starts the native app. The permanent
-# remote and the desktop software center own every update after this one.
+# Installer for the Warcraft Recorder Flatpak. Safe to pipe into bash: it adds
+# the project remote, installs the app, and starts it. Re-running it updates an
+# existing install.
 #
-# The final AppImage's updater pipes this script into bash and may append its
-# own `--prefix <dir>` argument. Arguments are deliberately ignored: there is
-# no prefix to install into any more.
+# It doubles as the final AppImage's migration helper. When it finds the old
+# AppImage install it also removes it and closes the running copy. The final
+# AppImage's updater pipes this script into bash and may append its own
+# `--prefix <dir>` argument. Arguments are deliberately ignored: there is no
+# prefix to install into any more.
 
 REMOTE_NAME="warcraft-recorder"
 REMOTE_DESCRIPTOR="${WARCRAFTRECORDER_REMOTE_DESCRIPTOR:-https://johanwes.github.io/wow-recorder-linuxwayland/index.flatpakrepo}"
 FLATHUB_DESCRIPTOR="${WARCRAFTRECORDER_FLATHUB_DESCRIPTOR:-https://dl.flathub.org/repo/flathub.flatpakrepo}"
-INSTALL_PAGE="${WARCRAFTRECORDER_INSTALL_PAGE:-https://github.com/JohanWes/wow-recorder-linuxwayland#install-and-update}"
+INSTALL_PAGE="${WARCRAFTRECORDER_INSTALL_PAGE:-https://github.com/JohanWes/wow-recorder-linuxwayland#install}"
 APP_ID="io.github.JohanWes.WarcraftRecorder"
 # Always address the published branch: a leftover development install of the
 # same application ID would otherwise make a bare `flatpak run` ambiguous.
@@ -43,6 +45,26 @@ manual_instructions() {
 
 fail_with_manual_instructions() {
   manual_instructions
+  return 1
+}
+
+# Only an actual AppImage install triggers the migration steps. The shim a
+# previous migration left behind is not one.
+migrating_from_appimage() {
+  [[ -f "$RETIRED_APPIMAGE" ]] && return 0
+  [[ -f "$LEGACY_BIN" ]] && ! grep -q "flatpak run ${APP_ID}" "$LEGACY_BIN" 2>/dev/null
+}
+
+# Flatpak itself is the one thing this script cannot install: it needs the
+# distribution's package manager and a password.
+require_flatpak() {
+  command -v flatpak >/dev/null 2>&1 && return 0
+  printf '[install] Flatpak is required and is not installed.\n' >&2
+  printf '[install] Install it, log out and back in, then run this again:\n' >&2
+  printf '  Arch, CachyOS, SteamOS:  sudo pacman -S flatpak\n' >&2
+  printf '  Fedora, Nobara, Bazzite: sudo dnf install flatpak\n' >&2
+  printf '  Ubuntu, Debian, Mint:    sudo apt install flatpak\n' >&2
+  printf '[install] Installation page: %s\n' "$INSTALL_PAGE" >&2
   return 1
 }
 
@@ -147,13 +169,23 @@ done'
   log "Closing the retired AppImage."
 }
 
-if ! command -v flatpak >/dev/null 2>&1; then
-  fail_with_manual_instructions
+require_flatpak
+
+if migrating_from_appimage; then
+  migrating=yes
+  # Keep this marker shape compatible with the final AppImage updater's legacy
+  # parser. It describes a migration phase, not a new AppImage download.
+  log "Downloading WarcraftRecorder.AppImage migration instructions..."
+else
+  migrating=no
+  log "Installing Warcraft Recorder..."
 fi
 
-# Keep these marker shapes compatible with the final AppImage updater's
-# legacy parser. They describe migration phases, not a new AppImage download.
-log "Downloading WarcraftRecorder.AppImage migration instructions..."
+# The app is a Wayland-only build, so an X11 login session gets it installed but
+# not started. Say so now rather than let the launch fail silently.
+if [[ -n "${XDG_SESSION_TYPE:-}" && "$XDG_SESSION_TYPE" != wayland ]]; then
+  warn "this looks like an X11 session; Warcraft Recorder needs a Wayland session"
+fi
 
 ensure_runtime_source
 
@@ -161,26 +193,36 @@ if ! flatpak remote-add --user --if-not-exists "$REMOTE_NAME" "$REMOTE_DESCRIPTO
   fail_with_manual_instructions
 fi
 
-# `--or-update` keeps a repeated migration (or a plain update) from failing on
-# an already-installed application.
-if ! flatpak install --user --assumeyes --or-update "$REMOTE_NAME" "$APP_REF"; then
+# Re-running this script is the documented way to update, and an install
+# command fails on an application that is already there — including one that
+# came from a bundle, whose origin is not this remote.
+if flatpak info "$APP_REF" >/dev/null 2>&1; then
+  log "Warcraft Recorder is already installed; updating it."
+  if ! flatpak update --assumeyes "$APP_REF"; then
+    fail_with_manual_instructions
+  fi
+elif ! flatpak install --user --assumeyes "$REMOTE_NAME" "$APP_REF"; then
   fail_with_manual_instructions
 fi
 
-log "Checksum verified (Flatpak remote signature verified by Flatpak)."
-log "Installed binary: Flatpak $APP_ID"
+if [[ "$migrating" == yes ]]; then
+  log "Checksum verified (Flatpak remote signature verified by Flatpak)."
+  log "Installed binary: Flatpak $APP_ID"
+  remove_appimage_install
+fi
 
-remove_appimage_install
-
-# Start the native app here. stdio goes to /dev/null: the updater waits for this
-# script's pipes to close before it reports success.
-log "Launching the native app..."
+# Start the app here. stdio goes to /dev/null: the AppImage updater waits for
+# this script's pipes to close before it reports success.
+log "Launching Warcraft Recorder..."
 if command -v setsid >/dev/null 2>&1; then
   setsid flatpak run "$APP_REF" >/dev/null 2>&1 </dev/null &
 else
   flatpak run "$APP_REF" >/dev/null 2>&1 </dev/null &
 fi
 
-close_running_appimage
-
-log "Done. Warcraft Recorder is now a Flatpak and updates through it."
+if [[ "$migrating" == yes ]]; then
+  close_running_appimage
+  log "Done. Warcraft Recorder is now a Flatpak and updates through it."
+else
+  log "Done. Warcraft Recorder is installed and updates through Flatpak."
+fi
