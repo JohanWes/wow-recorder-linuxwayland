@@ -12,8 +12,11 @@ fi
 
 work_dir=$(mktemp -d)
 remote_name="wr014-candidate-${BASHPID}"
+installed_here=0
 cleanup() {
-  flatpak uninstall --user --assumeyes "$app_ref" >/dev/null 2>&1 || true
+  if [[ "$installed_here" == 1 ]]; then
+    flatpak uninstall --user --assumeyes "$app_ref" >/dev/null 2>&1 || true
+  fi
   flatpak remote-delete --user "$remote_name" >/dev/null 2>&1 || true
   rm -rf "$work_dir"
 }
@@ -25,6 +28,15 @@ fi
 
 app_ref="$app_id//stable"
 
+# This installs, launches and removes the app. Doing that on top of a real
+# install would take the user's deployment away with it, so refuse instead;
+# WR_FLATPAK_USER_DIR points the whole run at a throwaway installation.
+if flatpak info --user "$app_ref" >/dev/null 2>&1; then
+  printf '%s is already installed for this user; set WR_FLATPAK_USER_DIR to a scratch installation\n' \
+    "$app_ref" >&2
+  exit 1
+fi
+
 remote_args=(--user)
 if [[ -n "${FLATPAK_GPG_PUBLIC_KEY:-}" ]]; then
   remote_args+=(--gpg-import="$FLATPAK_GPG_PUBLIC_KEY")
@@ -34,6 +46,7 @@ fi
 
 flatpak remote-add "${remote_args[@]}" "$remote_name" "$repo_dir"
 flatpak install --user --assumeyes "$remote_name" "$app_ref"
+installed_here=1
 first_commit=$(flatpak info --user --show-commit "$app_ref")
 test -n "$first_commit"
 flatpak run --user --command=true "$app_ref"
