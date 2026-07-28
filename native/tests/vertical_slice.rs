@@ -596,6 +596,52 @@ fn the_migration_notice_survives_a_restart_and_one_dismissal_ends_it() {
 }
 
 #[test]
+fn dismissing_the_release_notes_records_the_running_version_for_good() {
+    let harness = Harness::new("release-notes");
+    let config_path = harness.root.join("config.json");
+    let mut config = Config::load(&config_path).expect("load the harness config");
+    // What an install updated from an earlier version looks like: the field
+    // is missing from its config file, so it deserializes empty.
+    config.last_seen_version = String::new();
+    config.save(&config_path).expect("clear the seen version");
+    let (root, library, capture_root, log_file) = (
+        harness.root.clone(),
+        harness.library.clone(),
+        harness.capture_root.clone(),
+        harness.log_file.clone(),
+    );
+    drop(harness);
+
+    let mut harness = Harness::attach(root, library, capture_root, log_file);
+    assert!(harness.latest.config.last_seen_version.is_empty());
+
+    harness.send(Command::DismissReleaseNotes);
+    harness.pump(|snapshot| snapshot.config.last_seen_version == warcraft_recorder::VERSION);
+    assert_eq!(
+        Config::load(&config_path)
+            .expect("reload the saved config")
+            .last_seen_version,
+        warcraft_recorder::VERSION,
+        "the acknowledgement must outlive the process"
+    );
+
+    // Settings dialogs opened before the notes were closed carry a draft that
+    // still has the old value; applying it must not replay the dialog.
+    let mut stale = harness.latest.config.clone();
+    stale.last_seen_version = String::new();
+    stale.capture.fps = 30;
+    harness.send(Command::SaveConfig {
+        draft: Box::new(stale),
+    });
+    harness.pump(|snapshot| snapshot.config.capture.fps == 30);
+    assert_eq!(
+        harness.latest.config.last_seen_version,
+        warcraft_recorder::VERSION,
+        "a settings save must not resurrect the dismissed notes"
+    );
+}
+
+#[test]
 fn a_dragged_layout_outlives_the_process() {
     let mut harness = Harness::new("layout");
     assert_eq!(

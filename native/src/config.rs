@@ -286,6 +286,11 @@ pub struct Config {
     /// the sandbox needs re-picked.
     #[serde(default)]
     pub migration_notice_pending: bool,
+    /// The version whose release notes were last acknowledged. Empty until
+    /// the user closes the "What's new" dialog, so an install that predates
+    /// the dialog still gets one for the version it just updated to.
+    #[serde(default)]
+    pub last_seen_version: String,
 }
 
 impl Default for Config {
@@ -301,6 +306,8 @@ impl Default for Config {
             validate_log_paths: true,
             first_time_setup_complete: false,
             migration_notice_pending: false,
+            // A clean install has no earlier version to report on.
+            last_seen_version: crate::VERSION.to_owned(),
         }
     }
 }
@@ -865,6 +872,9 @@ fn import_legacy(values: &Map<String, Value>) -> LegacyImport {
         first_time_setup_complete: !reader.boolean("firstTimeSetup", true),
         // Only an import raises this: a clean install has nothing to explain.
         migration_notice_pending: true,
+        // Left unset: the migration notice owns this launch, and the release
+        // notes then introduce the native version on the next one.
+        last_seen_version: String::new(),
     };
 
     if !config.validate().is_empty() {

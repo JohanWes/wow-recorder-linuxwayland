@@ -109,6 +109,8 @@ pub enum Command {
     },
     /// The user acknowledged the post-migration notice; never show it again.
     DismissMigrationNotice,
+    /// The user closed the "What's new" dialog for the running version.
+    DismissReleaseNotes,
     Shutdown,
 }
 
@@ -577,6 +579,13 @@ impl Coordinator {
                 if self.config.migration_notice_pending {
                     let mut draft = self.config.clone();
                     draft.migration_notice_pending = false;
+                    self.patch_config(draft);
+                }
+            }
+            Command::DismissReleaseNotes => {
+                if self.config.last_seen_version != crate::VERSION {
+                    let mut draft = self.config.clone();
+                    draft.last_seen_version = crate::VERSION.to_owned();
                     self.patch_config(draft);
                 }
             }
@@ -1444,11 +1453,13 @@ impl Coordinator {
             );
             return;
         }
-        // Settings never owns the migration notice. Its draft was cloned from
-        // a snapshot taken while the notice was still up -- the notice itself
-        // offers the button that opens Settings -- so honouring the draft here
-        // resurrects a notice the user already dismissed, on every save.
+        // Settings never owns the dismissal flags. Its draft was cloned from
+        // a snapshot taken while a notice was still up -- the migration notice
+        // itself offers the button that opens Settings -- so honouring the
+        // draft here resurrects a notice the user already dismissed, on every
+        // save.
         draft.migration_notice_pending = self.config.migration_notice_pending;
+        draft.last_seen_version = self.config.last_seen_version.clone();
         let problems = draft.validate();
         if !problems.is_empty() {
             self.setup_problems = problems;

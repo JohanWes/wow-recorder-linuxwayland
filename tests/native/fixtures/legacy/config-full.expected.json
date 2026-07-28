@@ -101,5 +101,6 @@
   },
   "validate_log_paths": false,
   "first_time_setup_complete": false,
-  "migration_notice_pending": true
+  "migration_notice_pending": true,
+  "last_seen_version": ""
 }
