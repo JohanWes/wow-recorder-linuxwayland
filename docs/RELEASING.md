@@ -8,14 +8,20 @@ Flatpak is the only native release format. The stable application ID is
 
 1. Update `native/Cargo.toml` and the first `<release version="...">` in
    `data/io.github.JohanWes.WarcraftRecorder.metainfo.xml` to the same version.
-2. Run the four standard Rust checks from the root.
-3. Create an annotated tag whose name is exactly `v<version>` and push it. The
-   tag workflow rejects mismatches before building.
-4. Configure the `release` environment secrets:
+2. Run `bash scripts/generate-release-notes.sh <version>` as the last thing
+   before the release commit. It prepends the commit subjects since the
+   previous tag to `data/release-notes.md`, which is compiled into the binary
+   and shown once, after the update, by the "What's new" dialog. The release
+   commit itself is not in the list; keep it a version-bump-only commit.
+3. Run the four standard Rust checks from the root.
+4. Create an annotated tag whose name is exactly `v<version>` and push it. The
+   tag workflow rejects a version whose Cargo, AppStream, or release-notes
+   entries disagree before building.
+5. Configure the `release` environment secrets:
    `FLATPAK_GPG_PRIVATE_KEY` contains the armored private key and
    `FLATPAK_GPG_KEY_ID` contains only its public key ID. Never commit the key
    or print either secret.
-5. Download the workflow's release-candidate artifact and verify the recorded
+6. Download the workflow's release-candidate artifact and verify the recorded
    SHA-256. The bundle is suitable for disposable-user testing and does not
    configure a remote.
 
