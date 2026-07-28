@@ -7,6 +7,13 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## 1.0.2 - 2026-07-28
+
+### Added
+- A "What's new" dialog on the first start after an update, listing the
+  commits between the previous release and the installed version. Closing it
+  records the version, so it appears once per update.
+
 ## 1.0.1 - 2026-07-28
 
 ### Fixed
