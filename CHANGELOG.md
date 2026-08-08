@@ -7,13 +7,21 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
-## Unreleased
+## 1.0.3 - 2026-08-08
+
+### Fixed
+- Restarting the media worker no longer deadlocks when the worker is busy:
+  the shutdown request now waits to be delivered instead of being dropped.
+- Folder validation no longer overwrites an existing probe file: the write
+  probe uses an exclusive unique name and reports write failures.
 
 ### Changed
 - `install.sh` is the documented one-command install: on a machine without an
   AppImage it only adds the remote, installs the app, and starts it, and a
   re-run updates an existing install instead of failing. Missing Flatpak now
-  prints the command that installs it, and an X11 session is called out.
+  prints the command that installs it, and the installer warns when the
+  session cannot record: X11, no screen-capture portal, or no PipeWire, each
+  with the fix spelled out.
 - README rewritten for players: one install command, the three things the
   system needs, first-run steps, and measured footprint against the Electron
   build.

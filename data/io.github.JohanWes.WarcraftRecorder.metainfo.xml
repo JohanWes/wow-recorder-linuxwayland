@@ -34,6 +34,17 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.3" date="2026-08-08">
+      <description>
+        <p>
+          The installer now checks that the session can record before it
+          finishes: X11 sessions, a missing screen-capture portal, and a
+          stopped PipeWire are each called out with the fix. Restarting the
+          media worker no longer deadlocks when it is busy, and folder
+          validation no longer overwrites existing probe files.
+        </p>
+      </description>
+    </release>
     <release version="1.0.2" date="2026-07-28">
       <description>
         <p>
