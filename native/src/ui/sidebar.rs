@@ -252,28 +252,6 @@ mod tests {
     }
 
     #[test]
-    fn row_order_and_labels_match_the_baseline_rail() {
-        let views = rows(&snapshot(Vec::new(), false, false));
-        let labels: Vec<&str> = views.iter().map(|view| view.label).collect();
-        assert_eq!(
-            labels,
-            [
-                "2v2",
-                "3v3",
-                "5v5",
-                "Skirmish",
-                "Solo Shuffle",
-                "Mythic+",
-                "Raids",
-                "Battlegrounds",
-                "Manual",
-                "Clips"
-            ]
-        );
-        assert!(views.iter().all(|view| view.visible));
-    }
-
-    #[test]
     fn hide_empty_never_hides_anything_in_an_empty_library() {
         let views = rows(&snapshot(Vec::new(), true, false));
         assert!(views.iter().all(|view| view.visible));

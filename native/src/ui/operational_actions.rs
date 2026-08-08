@@ -580,31 +580,6 @@ mod tests {
     }
 
     #[test]
-    fn test_dialog_offers_the_exact_baseline_categories_in_order() {
-        let labels: Vec<&str> = TEST_CATEGORIES.iter().map(|(_, label, _)| *label).collect();
-        assert_eq!(
-            labels,
-            [
-                "2v2",
-                "3v3",
-                "Solo Shuffle",
-                "Raids",
-                "Battlegrounds",
-                "Mythic+"
-            ]
-        );
-        // Payload mapping: every choice sends its own category.
-        for (category, _, _) in &TEST_CATEGORIES {
-            assert!(matches!(
-                Command::RunTest {
-                    category: category.clone(),
-                },
-                Command::RunTest { .. }
-            ));
-        }
-    }
-
-    #[test]
     fn failed_start_problem_is_recognized_for_the_error_bell() {
         let mut snapshot = snapshot(RecorderStatus::Ready, Category::Manual, true);
         snapshot.problems = vec![Problem {

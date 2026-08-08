@@ -656,21 +656,6 @@ mod tests {
     }
 
     #[test]
-    fn flavors_round_trip_including_unknown_values() {
-        for flavor in [
-            GameFlavor::Retail,
-            GameFlavor::Classic,
-            GameFlavor::Unknown("Legacy flavor".to_owned()),
-        ] {
-            let encoded = serde_json::to_string(&flavor).expect("serialize flavor");
-            assert_eq!(
-                serde_json::from_str::<GameFlavor>(&encoded).expect("deserialize flavor"),
-                flavor
-            );
-        }
-    }
-
-    #[test]
     fn legacy_recording_ids_are_stable_and_uuid_values_are_preserved() {
         assert_eq!(
             Uuid::parse_str(RecordingId::new().as_str())

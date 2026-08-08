@@ -10,8 +10,8 @@
 //! never spawns a process.
 //!
 //! `finalize` takes the already-combined media produced by the media worker, so
-//! storage stays process-free. `update`, `delete`, `reveal_path`, and
-//! `enforce_limit` take the scanned `LibraryEntry`, which already carries its
+//! storage stays process-free. `update`, `delete`, and `enforce_limit` take
+//! the scanned `LibraryEntry`, which already carries its
 //! sidecar/media paths, so no second in-memory index is needed.
 
 use std::collections::{HashMap, HashSet};
@@ -161,11 +161,6 @@ impl Storage {
     pub fn prepare(&self) -> io::Result<()> {
         fs::create_dir_all(&self.root)?;
         fs::create_dir_all(&self.staging_dir)
-    }
-
-    /// The path the UI reveals in a file manager.
-    pub fn reveal_path(entry: &LibraryEntry) -> &Path {
-        &entry.media_path
     }
 
     /// Add Bloodlust timestamps to legacy sidecars from their original retail

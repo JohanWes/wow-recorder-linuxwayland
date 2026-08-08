@@ -238,15 +238,6 @@ pub fn narrow(available: &[Chip], query: &str, selected: &[Chip], limit: usize) 
         .collect()
 }
 
-/// True when `start_unix_ms` falls inside the inclusive range, or when the
-/// range is absent. Endpoints are only supplied when both exist.
-pub fn within_range(start_unix_ms: i64, range: Option<(i64, i64)>) -> bool {
-    match range {
-        Some((start, end)) => start_unix_ms >= start && start_unix_ms <= end,
-        None => true,
-    }
-}
-
 /// A row passes when every selected chip occurs in its combined suggestion set
 /// (primary + POVs) and its start is inside the date range.
 pub fn row_matches(
@@ -255,7 +246,8 @@ pub fn row_matches(
     selected: &[Chip],
     range: Option<(i64, i64)>,
 ) -> bool {
-    within_range(start_unix_ms, range) && selected.iter().all(|chip| combined.contains(chip))
+    range.is_none_or(|(start, end)| start_unix_ms >= start && start_unix_ms <= end)
+        && selected.iter().all(|chip| combined.contains(chip))
 }
 
 /// The union of suggestions over an activity's primary entry and its POVs.
