@@ -34,6 +34,15 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.4" date="2026-08-09">
+      <description>
+        <p>
+          Combat-log timestamps now follow the system timezone and daylight
+          saving time instead of UTC, and a stale saved-recording event can no
+          longer be attached to a newer recording.
+        </p>
+      </description>
+    </release>
     <release version="1.0.3" date="2026-08-08">
       <description>
         <p>

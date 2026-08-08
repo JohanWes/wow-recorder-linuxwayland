@@ -7,6 +7,14 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## 1.0.4 - 2026-08-09
+
+### Fixed
+- Combat-log timestamps now use the system timezone and daylight-saving
+  changes instead of UTC.
+- A stale saved-recording event can no longer be attached to a newer
+  recording.
+
 ## 1.0.3 - 2026-08-08
 
 ### Fixed
