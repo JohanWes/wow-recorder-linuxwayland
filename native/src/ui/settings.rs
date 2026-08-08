@@ -11,6 +11,8 @@
 //! `Recorder::audio_devices` the same way.
 
 use std::cell::RefCell;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -539,10 +541,22 @@ pub fn apply_outcome(draft: &Config, unsafe_reason: Option<&'static str>) -> App
 pub fn probe_folder(path: &Path, needs_write: bool) -> Result<(), String> {
     std::fs::read_dir(path).map_err(|error| format!("The folder cannot be read: {error}"))?;
     if needs_write {
-        let probe = path.join(".warcraft-recorder-probe");
-        std::fs::write(&probe, b"probe")
+        let probe = path.join(format!(".warcraft-recorder-probe-{}", uuid::Uuid::new_v4()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
             .map_err(|error| format!("The folder cannot be written: {error}"))?;
-        let _ = std::fs::remove_file(&probe);
+        let write_error = file
+            .write_all(b"probe")
+            .err()
+            .map(|error| format!("The folder cannot be written: {error}"));
+        drop(file);
+        match (write_error, std::fs::remove_file(&probe).err()) {
+            (Some(error), _) => return Err(error),
+            (None, Some(error)) => return Err(format!("The folder cannot be written: {error}")),
+            (None, None) => {}
+        }
     }
     Ok(())
 }
@@ -1690,8 +1704,14 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&directory).expect("create probe directory");
+        let sentinel = directory.join(".warcraft-recorder-probe");
+        std::fs::write(&sentinel, b"sentinel").expect("write sentinel file");
         assert_eq!(probe_folder(&directory, false), Ok(()));
         assert_eq!(probe_folder(&directory, true), Ok(()));
+        assert_eq!(
+            std::fs::read(&sentinel).expect("read sentinel file"),
+            b"sentinel"
+        );
         assert!(probe_folder(&directory.join("missing"), false).is_err());
         std::fs::remove_dir_all(&directory).expect("remove probe directory");
     }
