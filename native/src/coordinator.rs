@@ -1398,7 +1398,7 @@ impl Coordinator {
     // --- Configuration ---
 
     fn restart_media_worker(&mut self) -> Result<(), String> {
-        let _ = self.media_control.try_send(MediaControl::Shutdown {
+        let _ = self.media_control.send(MediaControl::Shutdown {
             pending_finalizations: Vec::new(),
         });
         if let Some(join) = self.media_join.take() {
