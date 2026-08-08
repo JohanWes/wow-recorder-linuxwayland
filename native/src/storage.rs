@@ -14,7 +14,7 @@
 //! `enforce_limit` take the scanned `LibraryEntry`, which already carries its
 //! sidecar/media paths, so no second in-memory index is needed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -1421,46 +1421,38 @@ fn legacy_combatant(combatant: &LegacyCombatant) -> CombatantSummary {
 fn correlate(entries: &[LibraryEntry], starts: &[Option<i64>]) -> Vec<CorrelatedActivity> {
     let mut correlated: Vec<CorrelatedActivity> = Vec::new();
     let mut primary_starts: Vec<i64> = Vec::new();
-    let mut primary_categories: Vec<&Category> = Vec::new();
-    let mut primary_hashes: Vec<Option<&str>> = Vec::new();
+    let mut primaries_by_hash: HashMap<&str, Vec<usize>> = HashMap::new();
 
     for (entry, start) in entries.iter().zip(starts.iter()) {
-        let correlatable = entry.activity_hash.as_ref().zip(*start);
-        let Some((hash, start)) = correlatable else {
-            correlated.push(CorrelatedActivity {
-                primary_id: entry.id.clone(),
-                local_pov_ids: Vec::new(),
+        let matched = entry
+            .activity_hash
+            .as_deref()
+            .zip(*start)
+            .filter(|_| !excluded_from_correlation(&entry.category))
+            .and_then(|(hash, start)| {
+                primaries_by_hash.get(hash).and_then(|positions| {
+                    positions.iter().copied().find(|position| {
+                        (primary_starts[*position] - start).abs() <= CORRELATION_TOLERANCE_MS
+                    })
+                })
             });
-            primary_starts.push(entry.start_unix_ms);
-            primary_categories.push(&entry.category);
-            primary_hashes.push(entry.activity_hash.as_deref());
+
+        if let Some(position) = matched {
+            correlated[position].local_pov_ids.push(entry.id.clone());
             continue;
-        };
+        }
 
-        let matched = if excluded_from_correlation(&entry.category) {
-            None
-        } else {
-            correlated.iter().enumerate().position(|(position, _)| {
-                !excluded_from_correlation(primary_categories[position])
-                    && primary_hashes[position] == Some(hash.as_str())
-            })
-        };
-
-        match matched {
-            Some(position)
-                if (primary_starts[position] - start).abs() <= CORRELATION_TOLERANCE_MS =>
-            {
-                correlated[position].local_pov_ids.push(entry.id.clone());
-            }
-            _ => {
-                correlated.push(CorrelatedActivity {
-                    primary_id: entry.id.clone(),
-                    local_pov_ids: Vec::new(),
-                });
-                primary_starts.push(start);
-                primary_categories.push(&entry.category);
-                primary_hashes.push(entry.activity_hash.as_deref());
-            }
+        let position = correlated.len();
+        correlated.push(CorrelatedActivity {
+            primary_id: entry.id.clone(),
+            local_pov_ids: Vec::new(),
+        });
+        primary_starts.push(start.unwrap_or(entry.start_unix_ms));
+        if !excluded_from_correlation(&entry.category)
+            && let Some(hash) = entry.activity_hash.as_deref()
+            && start.is_some()
+        {
+            primaries_by_hash.entry(hash).or_default().push(position);
         }
     }
     correlated

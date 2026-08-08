@@ -225,7 +225,7 @@ fn raid_difficulty(id: u32) -> Option<Chip> {
 /// Narrow the available suggestions: case-insensitive substring on the label,
 /// excluding already-selected labels.
 /// Typing narrows only; it does not filter rows until a suggestion is chosen.
-pub fn narrow(available: &[Chip], query: &str, selected: &[Chip]) -> Vec<Chip> {
+pub fn narrow(available: &[Chip], query: &str, selected: &[Chip], limit: usize) -> Vec<Chip> {
     let needle = query.trim().to_lowercase();
     available
         .iter()
@@ -233,6 +233,7 @@ pub fn narrow(available: &[Chip], query: &str, selected: &[Chip]) -> Vec<Chip> {
             !selected.iter().any(|s| s.label == chip.label)
                 && (needle.is_empty() || chip.label.to_lowercase().contains(&needle))
         })
+        .take(limit)
         .cloned()
         .collect()
 }
@@ -477,7 +478,7 @@ mod tests {
             Chip::new(GROUP_SPEC, "Frost"),
         ];
         let selected = vec![Chip::new(GROUP_NAME, "Bob")];
-        let narrowed = narrow(&available, "o", &selected);
+        let narrowed = narrow(&available, "o", &selected, usize::MAX);
         // "Bob" excluded (selected); "Frost" matches the "o".
         assert_eq!(labels(&narrowed), vec!["Frost"]);
     }

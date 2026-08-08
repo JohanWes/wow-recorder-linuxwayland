@@ -33,6 +33,8 @@ use warcraft_recorder::domain::{ActivityDetails, Category, LibraryEntry, Outcome
 use super::filters::{self, Chip};
 use super::{ActionSink, LayoutStore, ShellAction};
 
+const MAX_VISIBLE_SUGGESTIONS: usize = 100;
+
 /// What the player area needs when a single row is chosen.
 #[derive(Clone, Debug)]
 pub struct Selection {
@@ -1459,6 +1461,7 @@ impl State {
             &self.available.borrow(),
             query,
             &self.selected_chips.borrow(),
+            MAX_VISIBLE_SUGGESTIONS,
         )
     }
 }

@@ -186,7 +186,7 @@ impl LogTailer {
             let read_start = self.offset;
             self.offset += bytes_read as u64;
             remaining -= bytes_read as u64;
-            events.extend(self.consume(buffer[..bytes_read].to_vec(), read_start)?);
+            events.extend(self.consume(&buffer[..bytes_read], read_start)?);
         }
         self.checkpoint = read_checkpoint(&self.path, self.offset)?;
         Ok(events)
@@ -239,7 +239,7 @@ impl LogTailer {
 
     fn consume(
         &mut self,
-        mut bytes: Vec<u8>,
+        mut bytes: &[u8],
         mut read_start: u64,
     ) -> Result<Vec<ParsedEvent>, LogError> {
         if self.discarding_long_line {
@@ -249,20 +249,18 @@ impl LogTailer {
             };
             self.discarding_long_line = false;
             self.line_number += 1;
-            bytes.drain(..=end);
+            bytes = &bytes[end + 1..];
             read_start += end as u64 + 1;
         }
-        if self.incomplete.is_empty() {
+        let mut pending = std::mem::take(&mut self.incomplete);
+        if pending.is_empty() {
             self.incomplete_offset = read_start;
         }
-        self.incomplete.extend_from_slice(&bytes);
+        pending.extend_from_slice(bytes);
         let mut events = Vec::new();
         let mut consumed = 0;
 
-        while let Some(relative_end) = self.incomplete[consumed..]
-            .iter()
-            .position(|byte| *byte == b'\n')
-        {
+        while let Some(relative_end) = pending[consumed..].iter().position(|byte| *byte == b'\n') {
             let end = consumed + relative_end;
             let offset = self.incomplete_offset + consumed as u64;
             self.line_number += 1;
@@ -277,23 +275,25 @@ impl LogTailer {
                 consumed = end + 1;
                 continue;
             }
-            let line_end = if self.incomplete.get(end.wrapping_sub(1)) == Some(&b'\r') {
+            let line_end = if pending.get(end.wrapping_sub(1)) == Some(&b'\r') {
                 end - 1
             } else {
                 end
             };
-            let line = self.incomplete[consumed..line_end].to_vec();
+            let line = &pending[consumed..line_end];
             if !line.is_empty() {
-                self.consume_line(&line, offset, &mut events);
+                self.consume_line(line, offset, &mut events);
             }
             consumed = end + 1;
         }
 
         if consumed != 0 {
-            self.incomplete.drain(..consumed);
+            let remaining = pending.len() - consumed;
+            pending.copy_within(consumed.., 0);
+            pending.truncate(remaining);
             self.incomplete_offset += consumed as u64;
         }
-        if self.incomplete.len() > MAX_LINE_BYTES {
+        if pending.len() > MAX_LINE_BYTES {
             self.push_diagnostic(LogDiagnostic {
                 kind: DiagnosticKind::LineTooLong,
                 file: self.path.clone(),
@@ -301,10 +301,11 @@ impl LogTailer {
                 line_number: self.line_number + 1,
                 byte_offset: self.incomplete_offset,
             });
-            self.incomplete.clear();
+            pending.clear();
             self.incomplete_offset = self.offset;
             self.discarding_long_line = true;
         }
+        self.incomplete = pending;
         Ok(events)
     }
 
