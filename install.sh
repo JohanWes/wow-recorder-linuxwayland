@@ -75,12 +75,53 @@ ensure_runtime_source() {
   if flatpak info "$RUNTIME_REF" >/dev/null 2>&1; then
     return 0
   fi
-  if flatpak remotes --columns=name | grep -qx flathub; then
+  if flatpak remotes --user --columns=name | grep -qx flathub; then
     return 0
   fi
   log "Adding Flathub for the GNOME runtime..."
   flatpak remote-add --user --if-not-exists flathub "$FLATHUB_DESCRIPTOR" ||
     warn "could not add Flathub; the runtime must come from an existing remote"
+}
+
+# Capture goes through the desktop's xdg-desktop-portal ScreenCast backend,
+# and the frames arrive over PipeWire. Both are host components the Flatpak
+# cannot carry, and a missing one shows up as a failed recording long after
+# the install looked fine. A backend advertises the interfaces it implements
+# in its `.portal` file; xdg-desktop-portal-gtk alone is not enough, because
+# it does not implement ScreenCast.
+screencast_backend_present() {
+  local dir
+  local -a data_dirs
+  # Quoted iteration: a data dir is allowed to contain glob characters.
+  IFS=: read -ra data_dirs <<<"${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  for dir in "${data_dirs[@]}"; do
+    if grep -qrs 'org\.freedesktop\.impl\.portal\.ScreenCast' \
+      "${dir}/xdg-desktop-portal/portals"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Warnings only. None of this stops the app from installing or updating, and
+# a user who fixes the session afterwards needs no second install.
+check_session() {
+  # Only x11 is a diagnosable problem. An unset or `tty` session type means
+  # this is not running from the desktop the app will launch into, so the
+  # checks below have nothing trustworthy to look at either.
+  if [[ "${XDG_SESSION_TYPE:-}" == x11 ]]; then
+    warn "this looks like an X11 session; Warcraft Recorder needs a Wayland session"
+    return 0
+  fi
+  [[ -n "${WAYLAND_DISPLAY:-}" ]] || return 0
+  if ! screencast_backend_present; then
+    warn "no screen-capture portal found; recording will fail until you install the"
+    warn "  xdg-desktop-portal backend for your desktop, for example"
+    warn "  xdg-desktop-portal-kde or xdg-desktop-portal-hyprland"
+  fi
+  if [[ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pipewire-0" ]]; then
+    warn "PipeWire does not look like it is running; the portal needs it to send frames"
+  fi
 }
 
 # One launcher, one app. The AppImage is deleted rather than parked: leaving a
@@ -181,12 +222,6 @@ else
   log "Installing Warcraft Recorder..."
 fi
 
-# The app is a Wayland-only build, so an X11 login session gets it installed but
-# not started. Say so now rather than let the launch fail silently.
-if [[ -n "${XDG_SESSION_TYPE:-}" && "$XDG_SESSION_TYPE" != wayland ]]; then
-  warn "this looks like an X11 session; Warcraft Recorder needs a Wayland session"
-fi
-
 ensure_runtime_source
 
 if ! flatpak remote-add --user --if-not-exists "$REMOTE_NAME" "$REMOTE_DESCRIPTOR"; then
@@ -210,6 +245,10 @@ if [[ "$migrating" == yes ]]; then
   log "Installed binary: Flatpak $APP_ID"
   remove_appimage_install
 fi
+
+# Report session problems here rather than earlier: these do not block the
+# install, and next to the launch is where they are still on screen.
+check_session
 
 # Start the app here. stdio goes to /dev/null: the AppImage updater waits for
 # this script's pipes to close before it reports success.

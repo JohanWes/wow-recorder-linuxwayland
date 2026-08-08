@@ -34,13 +34,20 @@ flatpak install --user warcraft-recorder io.github.JohanWes.WarcraftRecorder
   installer tells you the one command for your distribution
   (`sudo pacman -S flatpak`, `sudo dnf install flatpak`,
   `sudo apt install flatpak`).
-- **A GPU that can encode video**, which any AMD, Intel or NVIDIA card from the
-  last decade can.
+- **Desktop screen sharing**, meaning `xdg-desktop-portal` and PipeWire. This
+  is how a sandboxed app is allowed to see your screen, and every mainstream
+  desktop already sets it up. A hand-assembled Hyprland or wlroots session may
+  still need its own portal package.
+- **A GPU with hardware video encoding**, which most AMD, Intel and NVIDIA
+  cards from the last decade have.
 
-That is the whole list. The recorder (`gpu-screen-recorder`), the video player
-and FFmpeg are all inside the Flatpak, so there is nothing else to install and
-nothing to keep in sync. Flatpak downloads the shared GNOME runtime on first
-install if you do not already have it.
+If your session is missing Wayland, the portal or PipeWire, the installer says
+so.
+
+The recorder (`gpu-screen-recorder`), the video player and FFmpeg are all
+inside the Flatpak, so there is nothing else to install and nothing to keep in
+sync. Flatpak also downloads the shared GNOME runtime if you do not already
+have it: that is a set of libraries, not the GNOME desktop.
 
 ## First run
 
@@ -52,8 +59,11 @@ install if you do not already have it.
    Network), and use an addon such as
    [SimpleCombatLogger](https://www.curseforge.com/wow/addons/simplecombatlogger)
    so logging starts on its own when you enter an instance.
-3. Play. The app records in the background from its tray icon, and each
-   activity shows up in the library when it ends.
+3. Play. Each activity shows up in the library when it ends. Closing the window
+   keeps recording from the tray icon, so long as your desktop has a tray:
+   GNOME needs the
+   [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/)
+   for one, and without it, closing the window quits the app.
 
 ## Update and uninstall
 
