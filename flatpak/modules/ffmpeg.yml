@@ -75,8 +75,11 @@ modules:
       - install -Dm644 COPYING /app/share/licenses/$FLATPAK_ID/x264-COPYING
     sources:
       # code.videolan.org is the upstream host but has a history of
-      # connectivity failures; the GitHub mirror carries the same pinned
-      # commit, and a divergent mirror fails loudly on the commit check.
-      - type: git
-        url: https://github.com/mirror/x264.git
-        commit: b35605ace3ddf7c1a5d67a2eb553f034aef41d55
+      # connectivity failures, and the github.com/mirror/x264 mirror's full
+      # history is tree-incomplete (a treeless-clone artifact), so a git
+      # checkout of this commit fails there. The mirror's commit archive
+      # carries the identical tree (verified against the pinned commit) and
+      # is served from GitHub.
+      - type: archive
+        url: https://github.com/mirror/x264/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.gz
+        sha256: cd71a7515b0e9a012e1ac9b1f8415bebcaf6fc97d4db32286642ac4c0fbe24f9
