@@ -143,7 +143,15 @@ impl Harness {
         }
         let path = self.capture_root.join(format!("regular/Video_{index}.mkv"));
         fs::write(&path, b"regular media").unwrap();
-        writeln!(file, "{}\tregular\t{}", now_unix_ms(), path.display()).unwrap();
+        // The regular hook fires after the subsequent stop signal; this
+        // fixture emits both artifacts before it drives that signal.
+        writeln!(
+            file,
+            "{}\tregular\t{}",
+            now_unix_ms() + 1_000,
+            path.display()
+        )
+        .unwrap();
     }
 
     fn entries_of(&self, category: &Category) -> Vec<&warcraft_recorder::domain::LibraryEntry> {

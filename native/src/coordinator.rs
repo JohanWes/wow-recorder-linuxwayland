@@ -219,6 +219,7 @@ pub struct Setup {
 
 impl Setup {
     pub fn from_environment() -> Result<Self, ConfigError> {
+        let (year, utc_offset_minutes) = local_clock();
         Ok(Self {
             config_path: crate::config::config_path_from_environment()?,
             legacy_config_path: crate::config::legacy_config_path_from_environment()?,
@@ -227,8 +228,11 @@ impl Setup {
                 .unwrap_or(Path::new("."))
                 .join("recorder"),
             gsr_binary: PathBuf::from("gpu-screen-recorder"),
-            media: MediaConfig::default(),
-            year: local_year(),
+            media: MediaConfig {
+                utc_offset_minutes,
+                ..MediaConfig::default()
+            },
+            year,
             recorder_timeouts: Timeouts::default(),
             poll_interval: Duration::from_millis(50),
             test_duration: Duration::from_secs(5),
@@ -1842,6 +1846,20 @@ fn category_counts(entries: &[LibraryEntry]) -> Vec<(Category, usize)> {
     counts
 }
 
+fn local_clock() -> (i32, i32) {
+    let seconds = now_unix_ms().div_euclid(1_000) as libc::time_t;
+    let mut local = unsafe { std::mem::zeroed::<libc::tm>() };
+    // `localtime_r` follows the system's configured zone, including DST.
+    if unsafe { libc::localtime_r(&seconds, &mut local) }.is_null() {
+        return (local_year(), 0);
+    }
+    (local.tm_year + 1900, utc_offset_minutes(local.tm_gmtoff))
+}
+
+fn utc_offset_minutes(seconds: libc::c_long) -> i32 {
+    (seconds / 60) as i32
+}
+
 fn local_year() -> i32 {
     // Days since the epoch to a civil year, without pulling in a date crate.
     let days = now_unix_ms().div_euclid(86_400_000);
@@ -1976,4 +1994,15 @@ fn test_events(
         ),
     ];
     Some((start_events, retail(end, end_ms)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utc_offset_minutes;
+
+    #[test]
+    fn timezone_offset_converts_seconds_to_minutes() {
+        assert_eq!(utc_offset_minutes(7_200), 120);
+        assert_eq!(utc_offset_minutes(-12_600), -210);
+    }
 }

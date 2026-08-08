@@ -174,6 +174,7 @@ const LOG_TAIL_BYTES: u64 = 8 * 1024;
 const MAX_RESTART_DELAY_SECONDS: u64 = 30;
 
 struct GsrEvent {
+    timestamp_ms: i64,
     kind: String,
     path: PathBuf,
 }
@@ -191,6 +192,7 @@ struct PendingEnd {
     config: CaptureConfig,
     active: ActiveCapture,
     regular_deadline: Instant,
+    regular_stopped_at_ms: i64,
     regular: Option<PathBuf>,
 }
 
@@ -431,6 +433,10 @@ impl Recorder {
             Some(_) => {}
         }
         let child = self.live_child()?;
+        // The stop timestamp is sampled before the signal: the hook event
+        // that arrives later is admitted against this bound, never a clock
+        // read taken while the end resolves.
+        let regular_stopped_at_ms = now_wall_ms();
         process::send_signal(child, process::sigrtmin())?;
         let config = self.config.clone().expect("armed with config");
         let active = self.active.take().expect("checked above");
@@ -438,6 +444,7 @@ impl Recorder {
             config,
             active,
             regular_deadline: Instant::now() + self.timeouts.regular_event,
+            regular_stopped_at_ms,
             regular: None,
         });
         Ok(())
@@ -487,7 +494,16 @@ impl Recorder {
             .as_ref()
             .is_some_and(|ending| ending.regular.is_none())
         {
-            let regular = self.take_event("regular", &Self::regular_dir(&config));
+            let regular_stopped_at_ms = self
+                .ending
+                .as_ref()
+                .map(|ending| ending.regular_stopped_at_ms)
+                .expect("checked above");
+            let regular = self.take_event(
+                "regular",
+                &Self::regular_dir(&config),
+                regular_stopped_at_ms,
+            );
             let ending = self.ending.as_mut().expect("checked above");
             ending.regular = regular;
             if ending.regular.is_none() {
@@ -498,7 +514,8 @@ impl Recorder {
                 // first so it is not counted as unexpected noise; without a
                 // regular recording it is discarded either way, and the
                 // coordinator's sweep quarantines the file.
-                let _ = self.take_event("replay", &Self::replay_dir(&config));
+                let replay_bound = ending.active.regular_started_at_ms;
+                let _ = self.take_event("replay", &Self::replay_dir(&config), replay_bound);
                 self.resolve_end(None, events);
                 return;
             }
@@ -510,7 +527,13 @@ impl Recorder {
             .expect("regular resolution keeps the pending end")
             .active
             .replay_deadline;
-        let replay = self.take_event("replay", &Self::replay_dir(&config));
+        let replay_bound = self
+            .ending
+            .as_ref()
+            .expect("regular resolution keeps the pending end")
+            .active
+            .regular_started_at_ms;
+        let replay = self.take_event("replay", &Self::replay_dir(&config), replay_bound);
         if replay.is_none() && now < replay_deadline {
             return;
         }
@@ -522,7 +545,7 @@ impl Recorder {
             return;
         };
         // Any event still pending after the session was noise (wrong kind,
-        // duplicate, or outside the managed directories).
+        // stale, duplicate, or outside the managed directories).
         self.ignored_events += self.pending.len() as u32;
         self.pending.clear();
         let artifacts = ending.regular.map(|regular| CaptureArtifacts {
@@ -530,7 +553,7 @@ impl Recorder {
             regular,
             requested_replay_ms: ending.active.requested_replay_ms,
             regular_started_at_ms: ending.active.regular_started_at_ms,
-            regular_stopped_at_ms: now_wall_ms(),
+            regular_stopped_at_ms: ending.regular_stopped_at_ms,
         });
         events.push(RecorderEvent::CaptureEnded { artifacts });
     }
@@ -769,14 +792,16 @@ impl Recorder {
             let timestamp = fields.next().unwrap_or("");
             let kind = fields.next().unwrap_or("");
             let path = fields.next().unwrap_or("");
-            if timestamp.parse::<i64>().is_err()
-                || path.is_empty()
-                || !matches!(kind, "regular" | "replay" | "screenshot")
-            {
+            let Ok(timestamp_ms) = timestamp.parse::<i64>() else {
+                self.ignored_events += 1;
+                continue;
+            };
+            if path.is_empty() || !matches!(kind, "regular" | "replay" | "screenshot") {
                 self.ignored_events += 1;
                 continue;
             }
             self.pending.push(GsrEvent {
+                timestamp_ms,
                 kind: kind.to_string(),
                 path: PathBuf::from(path),
             });
@@ -784,13 +809,16 @@ impl Recorder {
         Ok(())
     }
 
-    /// Consume the already-read hook event of `kind` written into `directory`.
-    /// Anything unconsumed of that kind came from somewhere else and is
-    /// rejected with the same bounded diagnostic the caller always used.
-    fn take_event(&mut self, kind: &str, directory: &Path) -> Option<PathBuf> {
+    /// Consume the already-read hook event of `kind` written into `directory`
+    /// with a timestamp at or after `lower_bound_ms`. Candidates are scanned
+    /// in arrival order, skipping stale or wrong-directory events of the same
+    /// kind; on a miss nothing is removed or counted here, and `resolve_end`
+    /// remains the sole cleanup/count point for the pending end.
+    fn take_event(&mut self, kind: &str, directory: &Path, lower_bound_ms: i64) -> Option<PathBuf> {
         let canonical_dir = directory.canonicalize().ok()?;
         let matched = self.pending.iter().position(|event| {
             event.kind == kind
+                && event.timestamp_ms >= lower_bound_ms
                 && event
                     .path
                     .parent()
@@ -800,9 +828,6 @@ impl Recorder {
         if let Some(index) = matched {
             return Some(self.pending.remove(index).path);
         }
-        let before = self.pending.len();
-        self.pending.retain(|event| event.kind != kind);
-        self.ignored_events += (before - self.pending.len()) as u32;
         None
     }
 }
@@ -1049,13 +1074,18 @@ mod tests {
         }
     }
 
-    fn append_event(config: &CaptureConfig, kind: &str, path: &Path) {
+    fn append_event_at(config: &CaptureConfig, timestamp_ms: i64, kind: &str, path: &Path) {
         use std::io::Write;
         let mut file = fs::OpenOptions::new()
             .append(true)
             .open(Recorder::events_path(config))
             .unwrap();
-        writeln!(file, "{}\t{}\t{}", now_wall_ms(), kind, path.display()).unwrap();
+        writeln!(file, "{timestamp_ms}\t{kind}\t{}", path.display()).unwrap();
+    }
+
+    /// Append an event stamped with the current wall clock.
+    fn append_event(config: &CaptureConfig, kind: &str, path: &Path) {
+        append_event_at(config, now_wall_ms(), kind, path);
     }
 
     fn touch(path: &Path) {
@@ -1172,9 +1202,11 @@ mod tests {
         append_event(&config, "replay", &config.capture_root.join("Replay_x.mkv"));
         append_event(&config, "replay", &replay);
         append_event(&config, "replay", &replay);
-        append_event(&config, "regular", &regular);
 
         recorder.request_end(&id).unwrap();
+        // The regular post-save event arrives after the stop signal; its
+        // timestamp must clear the stop bound.
+        append_event(&config, "regular", &regular);
         assert!(recorder.is_ending());
         let artifacts = end_artifacts(&mut recorder);
         let artifacts = artifacts.expect("regular artifact");
@@ -1208,8 +1240,10 @@ mod tests {
             .unwrap();
         let regular = Recorder::regular_dir(&config).join("Video_1.mkv");
         touch(&regular);
-        append_event(&config, "regular", &regular);
         recorder.request_end(&id).unwrap();
+        // The regular post-save event arrives after the stop signal; its
+        // timestamp must clear the stop bound.
+        append_event(&config, "regular", &regular);
         let artifacts = end_artifacts(&mut recorder).expect("regular artifact");
         assert_eq!(artifacts.replay, None);
         assert_eq!(artifacts.regular, regular);
@@ -1236,6 +1270,53 @@ mod tests {
                 mode: RecordingMode::Manual,
             })
             .unwrap();
+        recorder.shutdown().unwrap();
+    }
+
+    #[test]
+    fn stale_same_directory_regular_does_not_win_and_current_artifacts_do() {
+        let mut recorder = Recorder::with_timeouts(test_timeouts());
+        let config = test_config("stale");
+        recorder.arm(&config).unwrap();
+
+        let id = RecordingId::new();
+        let started = recorder
+            .begin(StartRequest {
+                id: id.clone(),
+                requested_replay_ms: 12_000,
+                mode: RecordingMode::Automatic,
+            })
+            .unwrap();
+        let stale_regular = Recorder::regular_dir(&config).join("Video_stale.mkv");
+        let current_regular = Recorder::regular_dir(&config).join("Video_current.mkv");
+        let replay = Recorder::replay_dir(&config).join("Replay_1.mkv");
+        touch(&stale_regular);
+        touch(&current_regular);
+        touch(&replay);
+        // A stale regular event from a previous session shares the canonical
+        // regular directory, so only its timestamp distinguishes it.
+        append_event_at(&config, 0, "regular", &stale_regular);
+        // The pre-roll event arrives exactly when the recording began.
+        append_event_at(&config, started.regular_started_at_ms, "replay", &replay);
+
+        recorder.request_end(&id).unwrap();
+        let stopped_at_ms = recorder.ending.as_ref().unwrap().regular_stopped_at_ms;
+        // The current regular event arrives exactly at the stop bound; the
+        // inclusive lower bound must admit it.
+        append_event_at(&config, stopped_at_ms, "regular", &current_regular);
+
+        let artifacts = end_artifacts(&mut recorder).expect("current regular artifact");
+        assert_eq!(artifacts.regular, current_regular);
+        assert_eq!(artifacts.replay.as_deref(), Some(replay.as_path()));
+        assert_eq!(artifacts.regular_stopped_at_ms, stopped_at_ms);
+        // The stale regular event is noise, reported by the next normal poll.
+        let events = recorder.poll(now_wall_ms());
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RecorderEvent::Diagnostic(_))),
+            "expected diagnostic, got {events:?}"
+        );
         recorder.shutdown().unwrap();
     }
 
