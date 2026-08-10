@@ -633,7 +633,7 @@ impl Coordinator {
                 self.clear_recovered_capture_problems();
             }
             Err(error) => {
-                self.armed = false;
+                self.refresh_recorder_health();
                 self.push_recorder_problem(&error);
             }
         }
@@ -664,7 +664,6 @@ impl Coordinator {
             return;
         }
         let config = self.capture_config();
-        let was_armed = self.armed;
         match self.recorder.reselect_target(&config) {
             Ok(selection) => {
                 self.armed = true;
@@ -674,7 +673,7 @@ impl Coordinator {
                 }
             }
             Err(error) => {
-                self.armed = was_armed;
+                self.refresh_recorder_health();
                 self.push_recorder_problem(&error);
             }
         }
@@ -701,18 +700,13 @@ impl Coordinator {
                 RecorderEvent::CaptureEnded { artifacts } => self.capture_ended(artifacts),
                 RecorderEvent::RestartFailed { message } => {
                     self.armed = false;
-                    self.push_problem(
-                        CAPTURE_RESTART_FAILED_PROBLEM,
-                        Some(message),
-                        Some(RecoveryAction::ReselectCaptureTarget),
-                    );
+                    self.push_capture_problem(CAPTURE_RESTART_FAILED_PROBLEM, Some(message));
                 }
                 RecorderEvent::ChildExited { code } => {
                     self.armed = false;
-                    self.push_problem(
+                    self.push_capture_problem(
                         CAPTURE_STOPPED_PROBLEM,
                         Some(format!("gpu-screen-recorder exited with code {code:?}")),
-                        Some(RecoveryAction::ReselectCaptureTarget),
                     );
                     if let Some(active) = self.active.take() {
                         self.pending_test_end = None;
@@ -1562,6 +1556,23 @@ impl Coordinator {
         if clear_recovered_capture_problems(&mut self.problems) {
             self.dirty = true;
         }
+    }
+
+    fn refresh_recorder_health(&mut self) {
+        self.armed = self.recorder.is_running();
+        if self.armed {
+            self.clear_recovered_capture_problems();
+        }
+    }
+
+    fn push_capture_problem(&mut self, summary: &'static str, safe_detail: Option<String>) {
+        self.problems
+            .retain(|problem| problem.summary.as_str() != summary);
+        self.push_problem(
+            summary,
+            safe_detail,
+            Some(RecoveryAction::ReselectCaptureTarget),
+        );
     }
 
     fn push_recorder_problem(&mut self, error: &RecorderError) {

@@ -450,6 +450,11 @@ impl Recorder {
         Ok(())
     }
 
+    /// Whether a replay-buffer child is currently available.
+    pub fn is_running(&self) -> bool {
+        self.child.is_some()
+    }
+
     /// True between `request_end` and its `CaptureEnded`.
     pub fn is_ending(&self) -> bool {
         self.ending.is_some()
@@ -1412,6 +1417,7 @@ mod tests {
         recorder.poll(now_wall_ms());
 
         let selection = recorder.reselect_target(&config).unwrap();
+        assert!(recorder.is_running());
         // The old token was deleted; GSR has not written a new one yet.
         assert_eq!(selection.token, None);
         assert!(!token_path.exists());
@@ -1539,6 +1545,7 @@ mod tests {
             recorder.arm(&invalid),
             Err(RecorderError::InvalidSettings(_))
         ));
+        assert!(recorder.is_running());
         recorder
             .begin(StartRequest {
                 id: RecordingId::new(),
