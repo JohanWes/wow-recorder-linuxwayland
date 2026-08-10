@@ -15,6 +15,8 @@ One command in a terminal:
 curl -fsSL https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/install.sh | bash
 ```
 
+If your terminal says `curl` is missing, use the Flatpak commands below instead.
+
 It installs the app from the project's signed Flatpak remote and starts it.
 Run the same command again any time to update.
 
@@ -31,9 +33,9 @@ flatpak install --user warcraft-recorder io.github.JohanWes.WarcraftRecorder
 - **A Wayland desktop session.** KDE Plasma, GNOME, Hyprland and COSMIC all
   work. X11 does not.
 - **Flatpak.** Most gaming distributions ship it. If it is missing, the
-  installer tells you the one command for your distribution
-  (`sudo pacman -S flatpak`, `sudo dnf install flatpak`,
-  `sudo apt install flatpak`).
+  installer shows the command for common distributions (`sudo pacman -S
+  flatpak`, `sudo dnf install flatpak`, `sudo apt install flatpak` or `sudo
+  zypper install flatpak`).
 - **Desktop screen sharing**, meaning `xdg-desktop-portal` and PipeWire. This
   is how a sandboxed app is allowed to see your screen, and every mainstream
   desktop already sets it up. A hand-assembled Hyprland or wlroots session may
