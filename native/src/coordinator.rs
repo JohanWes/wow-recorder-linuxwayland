@@ -51,6 +51,8 @@ const CLASSIC_DATA_TIMEOUT_MS: i64 = 2 * 60_000;
 const COMMAND_BATCH: usize = 16;
 /// Bounded problem list surfaced in the snapshot.
 const MAX_PROBLEMS: usize = 8;
+const CAPTURE_STOPPED_PROBLEM: &str = "Screen capture stopped unexpectedly.";
+const CAPTURE_RESTART_FAILED_PROBLEM: &str = "Screen capture could not be restarted.";
 /// Keep queued transcodes finite while preserving the one-worker design.
 const MAX_MEDIA_QUEUE: usize = 16;
 
@@ -628,6 +630,7 @@ impl Coordinator {
         match self.recorder.arm(&config) {
             Ok(()) => {
                 self.armed = true;
+                self.clear_recovered_capture_problems();
             }
             Err(error) => {
                 self.armed = false;
@@ -665,6 +668,7 @@ impl Coordinator {
         match self.recorder.reselect_target(&config) {
             Ok(selection) => {
                 self.armed = true;
+                self.clear_recovered_capture_problems();
                 if let Some(token) = selection.token {
                     self.store_token(token);
                 }
@@ -698,7 +702,7 @@ impl Coordinator {
                 RecorderEvent::RestartFailed { message } => {
                     self.armed = false;
                     self.push_problem(
-                        "Screen capture could not be restarted.",
+                        CAPTURE_RESTART_FAILED_PROBLEM,
                         Some(message),
                         Some(RecoveryAction::ReselectCaptureTarget),
                     );
@@ -706,7 +710,7 @@ impl Coordinator {
                 RecorderEvent::ChildExited { code } => {
                     self.armed = false;
                     self.push_problem(
-                        "Screen capture stopped unexpectedly.",
+                        CAPTURE_STOPPED_PROBLEM,
                         Some(format!("gpu-screen-recorder exited with code {code:?}")),
                         Some(RecoveryAction::ReselectCaptureTarget),
                     );
@@ -721,6 +725,7 @@ impl Coordinator {
                 }
                 RecorderEvent::Restarted => {
                     self.armed = true;
+                    self.clear_recovered_capture_problems();
                     tracing::info!("capture restarted");
                     self.dirty = true;
                 }
@@ -1553,6 +1558,12 @@ impl Coordinator {
         self.dirty = true;
     }
 
+    fn clear_recovered_capture_problems(&mut self) {
+        if clear_recovered_capture_problems(&mut self.problems) {
+            self.dirty = true;
+        }
+    }
+
     fn push_recorder_problem(&mut self, error: &RecorderError) {
         let (summary, detail, action) = match error {
             RecorderError::SelectionDenied { log_tail } => (
@@ -1748,6 +1759,17 @@ impl Drop for Coordinator {
 }
 
 // --- Free helpers ---
+
+fn clear_recovered_capture_problems(problems: &mut Vec<Problem>) -> bool {
+    let previous_len = problems.len();
+    problems.retain(|problem| {
+        !matches!(
+            problem.summary.as_str(),
+            CAPTURE_STOPPED_PROBLEM | CAPTURE_RESTART_FAILED_PROBLEM
+        )
+    });
+    problems.len() != previous_len
+}
 
 fn make_problem(
     summary: impl Into<String>,
@@ -1998,11 +2020,49 @@ fn test_events(
 
 #[cfg(test)]
 mod tests {
-    use super::utc_offset_minutes;
+    use super::{
+        CAPTURE_RESTART_FAILED_PROBLEM, CAPTURE_STOPPED_PROBLEM, Problem, RecoveryAction,
+        clear_recovered_capture_problems, utc_offset_minutes,
+    };
 
     #[test]
     fn timezone_offset_converts_seconds_to_minutes() {
         assert_eq!(utc_offset_minutes(7_200), 120);
         assert_eq!(utc_offset_minutes(-12_600), -210);
+    }
+
+    #[test]
+    fn recovered_capture_problems_are_removed_without_touching_other_problems() {
+        let preserved = Problem {
+            summary: "The capture target could not be saved.".to_owned(),
+            safe_detail: Some("disk full".to_owned()),
+            occurred_unix_ms: 42,
+            recovery_action: Some(RecoveryAction::ReselectCaptureTarget),
+        };
+        let mut problems = vec![
+            Problem {
+                summary: CAPTURE_STOPPED_PROBLEM.to_owned(),
+                safe_detail: None,
+                occurred_unix_ms: 1,
+                recovery_action: Some(RecoveryAction::ReselectCaptureTarget),
+            },
+            Problem {
+                summary: CAPTURE_RESTART_FAILED_PROBLEM.to_owned(),
+                safe_detail: None,
+                occurred_unix_ms: 2,
+                recovery_action: Some(RecoveryAction::ReselectCaptureTarget),
+            },
+            Problem {
+                summary: CAPTURE_RESTART_FAILED_PROBLEM.to_owned(),
+                safe_detail: None,
+                occurred_unix_ms: 3,
+                recovery_action: Some(RecoveryAction::ReselectCaptureTarget),
+            },
+            preserved.clone(),
+        ];
+
+        assert!(clear_recovered_capture_problems(&mut problems));
+        assert_eq!(problems, vec![preserved]);
+        assert!(!clear_recovered_capture_problems(&mut problems));
     }
 }

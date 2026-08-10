@@ -7,6 +7,12 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## 1.0.5 - 2026-08-10
+
+### Fixed
+- Resolved screen-capture crashes no longer leave stale problem indicators
+  after automatic restart, rearming, or capture-target reselection.
+
 ## 1.0.4 - 2026-08-09
 
 ### Fixed

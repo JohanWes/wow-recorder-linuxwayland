@@ -4,6 +4,9 @@ Commit subjects per release, written by `scripts/generate-release-notes.sh` and
 compiled into the binary: the "What's new" dialog reads the section matching the
 running version. Only `## <version>` headings and `- ` lines are parsed.
 
+## 1.0.5
+- Clear stale screen-capture errors after recovery
+
 ## 1.0.4
 - Harden replay artifact correlation
 
