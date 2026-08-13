@@ -91,6 +91,32 @@ pub fn visible_items(entry: &LibraryEntry, prefs: MarkerPrefs) -> Vec<&TimelineI
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkerDirection {
+    Previous,
+    Next,
+}
+
+/// Start of the nearest visible marker strictly before or after the playhead.
+pub fn marker_target(
+    entry: &LibraryEntry,
+    prefs: MarkerPrefs,
+    position_ms: u64,
+    direction: MarkerDirection,
+) -> Option<u64> {
+    visible_items(entry, prefs)
+        .into_iter()
+        .map(TimelineItem::start_ms)
+        .filter(|start_ms| match direction {
+            MarkerDirection::Previous => *start_ms < position_ms,
+            MarkerDirection::Next => *start_ms > position_ms,
+        })
+        .reduce(|best, start_ms| match direction {
+            MarkerDirection::Previous => best.max(start_ms),
+            MarkerDirection::Next => best.min(start_ms),
+        })
+}
+
 pub fn ms_to_x(ms: u64, duration_ms: u64, width: f64) -> f64 {
     if duration_ms == 0 {
         return 0.0;
@@ -696,6 +722,51 @@ mod tests {
         // Clips never draw markers.
         let clip = entry_with(Category::Clip, vec![death("Alice", 1_000)]);
         assert!(visible_items(&clip, all).is_empty());
+    }
+
+    #[test]
+    fn marker_target_uses_nearest_visible_marker_without_wrapping() {
+        let all = MarkerPrefs {
+            deaths: DeathMarkerVisibility::All,
+            encounters: MarkerVisibility::Visible,
+            rounds: MarkerVisibility::Visible,
+        };
+        let entry = entry_with(
+            Category::MythicPlus,
+            vec![
+                death("Alice", 5_000),
+                TimelineItem::span(TimelineKind::Encounter, 10_000, 40_000, None, None, None)
+                    .unwrap(),
+                death("Bob", 20_000),
+            ],
+        );
+
+        assert_eq!(
+            marker_target(&entry, all, 10_000, MarkerDirection::Previous),
+            Some(5_000)
+        );
+        assert_eq!(
+            marker_target(&entry, all, 10_000, MarkerDirection::Next),
+            Some(20_000)
+        );
+        assert_eq!(
+            marker_target(&entry, all, 0, MarkerDirection::Previous),
+            None
+        );
+        assert_eq!(
+            marker_target(&entry, all, 20_000, MarkerDirection::Next),
+            None
+        );
+
+        let hidden = MarkerPrefs {
+            deaths: DeathMarkerVisibility::None,
+            encounters: MarkerVisibility::Hidden,
+            rounds: MarkerVisibility::Hidden,
+        };
+        assert_eq!(
+            marker_target(&entry, hidden, 15_000, MarkerDirection::Previous),
+            None
+        );
     }
 
     #[test]

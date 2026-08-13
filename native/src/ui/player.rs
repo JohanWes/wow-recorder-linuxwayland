@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The persistent player pane: one ClapperGtk video with Warcraft Recorder's
-//! compact control row, the combat timeline, the drawing overlay, clip mode,
-//! and a single-view viewpoint selector. Volume/mute are process-shared
-//! session state; speed, position, drawings, and the clip range are
-//! session-only. All playback state lives in Clapper; this pane only issues
-//! commands and mirrors positions.
+//! compact control row, combat timeline, clip mode, and a single-view
+//! viewpoint selector. Volume/mute are process-shared session state; speed,
+//! position, and the clip range are session-only. All playback state lives in
+//! Clapper; this pane only issues commands and mirrors positions.
 //!
 //! Multi-POV grid playback (synchronized 2–4 player grid) was removed from
 //! the product by maintainer decision (2026-07-22); the viewpoint selector
@@ -27,8 +26,8 @@ use warcraft_recorder::domain::{
 use super::library::Selection;
 use super::multipov;
 use super::player_backend::{PlayerBackend, SeekMode, VideoStreamToken};
-use super::timeline::{self, MarkerPrefs, Timeline};
-use super::{ActionSink, ShellAction, drawing};
+use super::timeline::{self, MarkerDirection, MarkerPrefs, Timeline};
+use super::{ActionSink, ShellAction};
 
 const SPEEDS: [f64; 4] = [0.25, 0.5, 1.0, 2.0];
 const SEEK_STEP_SECONDS: f64 = 5.0;
@@ -53,7 +52,6 @@ struct Inner {
     empty_reveal: gtk4::Button,
     error_bar: gtk4::Box,
     timeline: Timeline,
-    drawing: drawing::Overlay,
     time_label: gtk4::Label,
     play_button: gtk4::Button,
     speed_button: gtk4::Button,
@@ -62,12 +60,13 @@ struct Inner {
     pov_dropdown: gtk4::DropDown,
     clip_button: gtk4::Button,
     clip_actions: gtk4::Box,
-    drawing_toggle: gtk4::ToggleButton,
     marker_button: gtk4::MenuButton,
+    previous_marker_button: gtk4::Button,
+    next_marker_button: gtk4::Button,
     reveal_button: gtk4::Button,
 
-    /// Drawing toolbar plus control row; collapsing it in fullscreen gives the
-    /// video the whole surface, which is what closes the letterbox bars.
+    /// Collapsing the control row in fullscreen gives the video the whole
+    /// surface, which is what closes the letterbox bars.
     bottom_bar: gtk4::Revealer,
     fullscreen: Cell<bool>,
     last_motion: Cell<Instant>,
@@ -123,17 +122,14 @@ impl Player {
             .map_err(|error| tracing::warn!(error, "player backend unavailable"))
             .ok();
 
-        let drawing = drawing::Overlay::new();
         let video_overlay = gtk4::Overlay::new();
         if let Some(backend) = &backend {
             video_overlay.set_child(Some(backend.widget()));
         }
-        video_overlay.add_overlay(&drawing.area);
         video_overlay.set_vexpand(true);
-        // The drawing area is hidden until drawing is enabled, and GTK4 gives
-        // plain widgets no allocation signal, so this always-allocated probe is
-        // what tells the shell the video viewport was re-laid out. It paints
-        // nothing and takes no input.
+        // GTK4 gives plain widgets no allocation signal, so this
+        // always-allocated probe tells the shell when the video viewport was
+        // re-laid out. It paints nothing and takes no input.
         let size_probe = gtk4::DrawingArea::new();
         size_probe.set_can_target(false);
         video_overlay.add_overlay(&size_probe);
@@ -174,13 +170,13 @@ impl Player {
         time_label.add_css_class("numeric");
         let speed_button = gtk4::Button::with_label("1x");
         speed_button.set_tooltip_text(Some("Playback speed"));
+        let previous_marker_button = icon_button("media-skip-backward-symbolic", "Previous marker");
+        let next_marker_button = icon_button("media-skip-forward-symbolic", "Next marker");
+        previous_marker_button.set_sensitive(false);
+        next_marker_button.set_sensitive(false);
         let marker_button = gtk4::MenuButton::new();
         marker_button.set_icon_name("view-list-symbolic");
         marker_button.set_tooltip_text(Some("Marker visibility"));
-        let drawing_toggle = gtk4::ToggleButton::new();
-        drawing_toggle.set_icon_name("document-edit-symbolic");
-        drawing_toggle.set_tooltip_text(Some("Toggle drawing"));
-        drawing_toggle.update_property(&[gtk4::accessible::Property::Label("Toggle drawing")]);
         let clip_button = icon_button("edit-cut-symbolic", "Clip");
         let clip_create = gtk4::Button::with_label("Create clip");
         clip_create.add_css_class("suggested-action");
@@ -207,8 +203,9 @@ impl Player {
         controls.append(&timeline.widget);
         for widget in [
             speed_button.upcast_ref::<gtk4::Widget>(),
+            previous_marker_button.upcast_ref(),
             marker_button.upcast_ref(),
-            drawing_toggle.upcast_ref(),
+            next_marker_button.upcast_ref(),
             clip_button.upcast_ref(),
             clip_actions.upcast_ref(),
             pov_dropdown.upcast_ref(),
@@ -218,11 +215,8 @@ impl Player {
             controls.append(widget);
         }
 
-        let bottom_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        bottom_box.append(&drawing.toolbar);
-        bottom_box.append(&controls);
         let bottom_bar = gtk4::Revealer::new();
-        bottom_bar.set_child(Some(&bottom_box));
+        bottom_bar.set_child(Some(&controls));
         bottom_bar.set_transition_type(gtk4::RevealerTransitionType::SlideUp);
         bottom_bar.set_transition_duration(250);
         bottom_bar.set_reveal_child(true);
@@ -241,7 +235,6 @@ impl Player {
             empty_reveal,
             error_bar,
             timeline,
-            drawing,
             time_label,
             play_button,
             speed_button,
@@ -250,8 +243,9 @@ impl Player {
             pov_dropdown,
             clip_button,
             clip_actions,
-            drawing_toggle,
             marker_button,
+            previous_marker_button,
+            next_marker_button,
             reveal_button,
             bottom_bar,
             fullscreen: Cell::new(false),
@@ -457,9 +451,11 @@ impl Inner {
             this.request_seek(ms as f64 / 1_000.0, mode);
         });
         let this = Rc::clone(self);
-        self.drawing_toggle.connect_toggled(move |toggle| {
-            this.drawing.set_enabled(toggle.is_active());
-        });
+        self.previous_marker_button
+            .connect_clicked(move |_| this.jump_marker(MarkerDirection::Previous));
+        let this = Rc::clone(self);
+        self.next_marker_button
+            .connect_clicked(move |_| this.jump_marker(MarkerDirection::Next));
         let this = Rc::clone(self);
         self.clip_button.connect_clicked(move |_| {
             this.enter_clip_mode();
@@ -525,10 +521,7 @@ impl Inner {
             .unwrap_or_else(|| selection.id.clone());
         drop(entries);
 
-        // New activity: stop, clear drawings and clip mode, seek to zero.
-        self.exit_clip_mode();
-        self.drawing.reset();
-        self.drawing_toggle.set_active(false);
+        // New activity: stop, leave clip mode, and seek to zero.
         *self.povs.borrow_mut() = povs;
         self.position_seconds.set(0.0);
         self.load_pov(&chosen, false);
@@ -675,8 +668,6 @@ impl Inner {
 
     fn unload(self: &Rc<Self>) {
         self.exit_clip_mode();
-        self.drawing.reset();
-        self.drawing_toggle.set_active(false);
         if let Some(backend) = &self.backend {
             backend.stop();
         }
@@ -708,8 +699,8 @@ impl Inner {
         self.speed_button.set_sensitive(usable);
         self.mute_button.set_sensitive(usable);
         self.volume_scale.set_sensitive(usable);
-        self.drawing_toggle.set_sensitive(usable);
         self.clip_button.set_sensitive(usable && !is_clip);
+        self.update_marker_navigation();
     }
 
     fn active_entry_is_clip(&self) -> bool {
@@ -845,6 +836,8 @@ impl Inner {
             gtk4::gdk::Key::l | gtk4::gdk::Key::L | gtk4::gdk::Key::Right => {
                 self.request_seek(position + SEEK_STEP_SECONDS, SeekMode::Settle);
             }
+            gtk4::gdk::Key::bracketleft => self.jump_marker(MarkerDirection::Previous),
+            gtk4::gdk::Key::bracketright => self.jump_marker(MarkerDirection::Next),
             gtk4::gdk::Key::comma => {
                 // Previous frame while paused: known FPS, else assume 30. The
                 // frame is the point, so this is the one seek worth decoding
@@ -1006,6 +999,40 @@ impl Inner {
             .as_ref()
             .and_then(|id| entries.iter().find(|entry| &entry.id == id));
         self.timeline.set_entry(entry, self.prefs.get());
+        drop(entries);
+        drop(active);
+        self.update_marker_navigation();
+    }
+
+    /// Seek to the nearest visible marker strictly before/after the playhead.
+    fn jump_marker(self: &Rc<Self>, direction: MarkerDirection) {
+        let position_ms = (self.position_seconds.get() * 1_000.0) as u64;
+        let target_ms = {
+            let active = self.active_id.borrow();
+            let entries = self.entries.borrow();
+            active
+                .as_ref()
+                .and_then(|id| entries.iter().find(|entry| &entry.id == id))
+                .and_then(|entry| {
+                    timeline::marker_target(entry, self.prefs.get(), position_ms, direction)
+                })
+        };
+        if let Some(target_ms) = target_ms {
+            self.request_seek(target_ms as f64 / 1_000.0, SeekMode::Settle);
+        }
+    }
+
+    fn update_marker_navigation(&self) {
+        let usable = self.media_usable.get() && {
+            let active = self.active_id.borrow();
+            let entries = self.entries.borrow();
+            active
+                .as_ref()
+                .and_then(|id| entries.iter().find(|entry| &entry.id == id))
+                .is_some_and(|entry| !timeline::visible_items(entry, self.prefs.get()).is_empty())
+        };
+        self.previous_marker_button.set_sensitive(usable);
+        self.next_marker_button.set_sensitive(usable);
     }
 
     /// The marker-visibility popover: death radio plus two check rows. Rebuilt

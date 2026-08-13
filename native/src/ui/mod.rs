@@ -8,7 +8,6 @@
 //! snapshot, tray-event, and coordinator-stopped receivers. No stores, no
 //! per-widget view models, no string events, no blocking work.
 
-pub mod drawing;
 pub mod filters;
 pub mod library;
 pub mod multipov;
