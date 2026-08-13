@@ -2458,7 +2458,8 @@ fn raid_zone_id(encounter_id: u32) -> u32 {
 }
 
 static CURRENT_RETAIL_ENCOUNTERS: &[u32] = &[
-    3176, 3177, 3178, 3179, 3180, 3181, 3182, 3183, 3306, 3159, 9999,
+    3176, 3177, 3178, 3179, 3180, 3181, 3182, 3183, 3306, 3159, 3470, 3445, 3455, 3497, 3420, 3421,
+    3429, 3492, 3379, 9999,
 ];
 
 #[rustfmt::skip]
@@ -2523,6 +2524,13 @@ static DUNGEON_ENCOUNTERS: &[(u32, &str)] = &[
     (1999, "Forgemaster Garfrost"), (2001, "Ick and Krick"), (2000, "Scourgelord Tyrannus"),
     (2068, "L'ura"), (2066, "Saprish"), (2067, "Viceroy Nezhar"), (2065, "Zuraal the Ascended"),
     (1699, "Araknath"), (1701, "High Sage Viryx"), (1698, "Ranjit"), (1700, "Rukhran"),
+    (3101, "Kystia Manaheart"), (3102, "Zaen Bladesorrow"), (3103, "Xathuux the Annihilator"), (3105, "Lithiel Cinderfury"),
+    (3207, "The Hoardmonger"), (3208, "Sentinel of Winter"), (3209, "Nalorakk"),
+    (3199, "Lightblossom Trinity"), (3200, "Ikuzz the Light Hunter"), (3201, "Lightwarden Ruia"), (3202, "Ziekket"),
+    (3285, "Taz'Rah"), (3286, "Atroxus"), (3287, "Charonus"),
+    (3456, "Rav'i"), (3457, "The Writhing Coil"), (3458, "Zul'jan"),
+    (2124, "Adderis and Aspix"), (2125, "Merektha"), (2126, "Galvazzt"), (2127, "Avatar of Sethraliss"),
+    (2139, "The Golden Serpent"), (2142, "Mchimba the Embalmer"), (2140, "The Council of Tribes"), (2143, "Dazar, The First King"),
 ];
 
 fn dungeon_encounter_name(encounter_id: u32) -> Option<&'static str> {
@@ -2543,6 +2551,7 @@ static RETAIL_DUNGEON_MAP_IDS: &[u32] = &[
     499, 504, 500, 506, 247, 525,
     542,
     558, 560, 559, 557, 556, 239, 161,
+    587, 586, 584, 585, 588, 250, 249,
 ];
 
 /// Retail keystone timers in seconds `[one, two, three] chest`.
@@ -2608,6 +2617,13 @@ static DUNGEON_TIMERS: &[(u32, [f64; 3])] = &[
     (556, [1800.0, 1440.0, 1080.0]),
     (239, [2040.0, 1632.0, 1224.0]),
     (161, [1680.0, 1356.0, 1002.0]),
+    (587, [1800.0, 1440.0, 1080.0]),
+    (586, [1800.0, 1440.0, 1080.0]),
+    (584, [1800.0, 1440.0, 1080.0]),
+    (585, [1800.0, 1440.0, 1080.0]),
+    (588, [1800.0, 1440.0, 1080.0]),
+    (250, [1800.0, 1440.0, 1080.0]),
+    (249, [1800.0, 1440.0, 1080.0]),
 ];
 
 fn dungeon_timers(map_id: u32) -> Option<&'static [f64]> {
@@ -2638,10 +2654,12 @@ static DUNGEONS_BY_ZONE_ID: &[(u32, &str)] = &[
     (2649, "Priory of the Sacred Flame"), (2651, "Darkflame Cleft"), (2648, "The Rookery"),
     (2661, "Cinderbrew Meadery"), (2773, "Operation: Floodgate"), (1594, "THE MOTHERLODE!!"),
     (2830, "Eco-Dome Al'Dani"),
-    (2805, "Windrunner Spire"), (2811, "Magisters' Terrace"), (2813, "Murder Row"),
-    (2825, "Den of Nalorakk"), (2859, "The Blinding Vale"), (2874, "Maisara Caverns"),
+    (2805, "Windrunner Spire"), (2811, "Magisters' Terrace"), (2874, "Maisara Caverns"),
     (2915, "Nexus-Point Xenas"), (658, "Pit of Saron"), (1209, "Skyreach"),
     (1753, "Seat of the Triumvirate"),
+    (2813, "Murder Row"), (2825, "Den of Nalorakk"), (2859, "The Blinding Vale"),
+    (2923, "Voidscar Arena"), (2993, "Altar of Fangs"), (1877, "Temple of Sethraliss"),
+    (1762, "Kings' Rest"),
 ];
 
 #[rustfmt::skip]
@@ -3299,6 +3317,62 @@ mod tests {
             &config,
         );
         assert!(start.is_empty() && end.is_empty());
+    }
+
+    #[test]
+    fn midnight_season_two_content_is_recordable() {
+        let config = ActivitySettings {
+            current_raid_only: true,
+            ..ActivitySettings::default()
+        };
+
+        for (zone_id, map_id) in [
+            (2521, 399),
+            (2813, 587),
+            (2825, 586),
+            (2859, 584),
+            (2923, 585),
+            (2993, 588),
+            (1877, 250),
+            (1762, 249),
+        ] {
+            let actions = handle(
+                &mut ActivityEngine::new(),
+                GameFlavor::Retail,
+                0,
+                CombatEvent::ChallengeStarted {
+                    name: "Midnight Season 2".to_string(),
+                    zone_id,
+                    map_id,
+                    level: 10,
+                    affixes: Vec::new(),
+                },
+                &config,
+            );
+            assert_eq!(begins(&actions), 1, "map {map_id} was not recordable");
+        }
+
+        for encounter_id in [3470, 3445, 3455, 3497, 3420, 3421, 3429, 3492, 3379] {
+            let actions = handle(
+                &mut ActivityEngine::new(),
+                GameFlavor::Retail,
+                0,
+                encounter_start(encounter_id, "Midnight Season 2", 16),
+                &config,
+            );
+            assert_eq!(
+                begins(&actions),
+                1,
+                "raid encounter {encounter_id} was not recordable"
+            );
+        }
+
+        for encounter_id in [
+            3101, 3102, 3103, 3105, 3207, 3208, 3209, 3199, 3200, 3201, 3202, 3285, 3286, 3287,
+            3456, 3457, 3458, 2124, 2125, 2126, 2127, 2139, 2142, 2140, 2143,
+        ] {
+            assert!(dungeon_encounter_name(encounter_id).is_some());
+        }
     }
 
     #[test]

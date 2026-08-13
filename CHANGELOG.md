@@ -7,6 +7,12 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## 1.0.6 - 2026-08-13
+
+### Added
+- Midnight patch 12.1 raid encounters and Mythic+ dungeons are now recognized
+  and recorded.
+
 ## 1.0.5 - 2026-08-10
 
 ### Fixed
