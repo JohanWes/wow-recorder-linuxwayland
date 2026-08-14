@@ -1,0 +1,1112 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! The damage-meter overlay: a compact Details/Skada-style ranking laid over
+//! the player video and fed from `LibraryEntry.meter` pre-aggregates. The
+//! player owns one instance on its `video_overlay`; visibility, filters, and
+//! drag position are session-only state. Totals are whole-segment: the
+//! playhead only rebuilds the Current fight when it crosses a boundary.
+
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeSet, HashMap};
+use std::rc::Rc;
+
+use gtk4::prelude::*;
+
+use warcraft_recorder::domain::{LibraryEntry, MeterActor, MeterEntry, MeterFight, MeterMetric};
+
+use super::filters::class_css_class;
+use super::timeline::format_mm_ss;
+
+/// Raid-marker values (`destRaidFlags & 0xff`) in display order.
+const MARKERS: [(u8, &str); 8] = [
+    (0x01, "Star"),
+    (0x02, "Circle"),
+    (0x04, "Diamond"),
+    (0x08, "Triangle"),
+    (0x10, "Moon"),
+    (0x20, "Square"),
+    (0x40, "Cross"),
+    (0x80, "Skull"),
+];
+
+/// Max natural height of the ranking/breakdown list; the scroller takes over
+/// beyond it.
+const MAX_LIST_HEIGHT: i32 = 260;
+/// Minimum panel width/height once the user has resized it; a smaller
+/// viewport wins.
+const MIN_WIDTH: i32 = 240;
+const MIN_HEIGHT: i32 = 140;
+/// Bounded target rows fold into "Other", which is not a selectable target.
+const OTHER_KEY: &str = "Other";
+
+fn metric_label(metric: MeterMetric) -> &'static str {
+    match metric {
+        MeterMetric::Damage => "Damage Done",
+        MeterMetric::Healing => "Healing Done",
+        MeterMetric::Interrupts => "Interrupts",
+        MeterMetric::Dispels => "Dispels",
+    }
+}
+
+/// `meter.view` action key (the serde snake_case name).
+fn metric_key(metric: MeterMetric) -> &'static str {
+    match metric {
+        MeterMetric::Damage => "damage",
+        MeterMetric::Healing => "healing",
+        MeterMetric::Interrupts => "interrupts",
+        MeterMetric::Dispels => "dispels",
+    }
+}
+
+fn metric_from_key(key: &str) -> Option<MeterMetric> {
+    Some(match key {
+        "damage" => MeterMetric::Damage,
+        "healing" => MeterMetric::Healing,
+        "interrupts" => MeterMetric::Interrupts,
+        "dispels" => MeterMetric::Dispels,
+        _ => return None,
+    })
+}
+
+fn metric_empty_message(metric: MeterMetric) -> String {
+    let noun = match metric {
+        MeterMetric::Damage => "damage",
+        MeterMetric::Healing => "healing",
+        MeterMetric::Interrupts => "interrupts",
+        MeterMetric::Dispels => "dispels",
+    };
+    format!("No {noun} in this fight.")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SegmentKind {
+    Overall,
+    Current,
+}
+
+/// What a claimed drag sequence on the meter does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragMode {
+    /// Header drags move the meter.
+    Move,
+    /// Grip drags resize the meter.
+    Resize,
+}
+
+fn segment_key(segment: SegmentKind) -> &'static str {
+    match segment {
+        SegmentKind::Overall => "overall",
+        SegmentKind::Current => "current",
+    }
+}
+
+fn segment_label(segment: SegmentKind) -> &'static str {
+    match segment {
+        SegmentKind::Overall => "Overall",
+        SegmentKind::Current => "Current fight",
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TargetSel {
+    All,
+    Name(String),
+    Marker(u8),
+}
+
+/// `meter.target` action key: "all", "name:<target>", or "marker:<value>".
+fn target_key(target: &TargetSel) -> String {
+    match target {
+        TargetSel::All => "all".to_owned(),
+        TargetSel::Name(name) => format!("name:{name}"),
+        TargetSel::Marker(marker) => format!("marker:{marker}"),
+    }
+}
+
+fn target_from_key(key: &str) -> Option<TargetSel> {
+    match key {
+        "all" => Some(TargetSel::All),
+        _ => match key.split_once(':')? {
+            ("name", name) => Some(TargetSel::Name(name.to_owned())),
+            ("marker", value) => Some(TargetSel::Marker(value.parse().ok()?)),
+            _ => None,
+        },
+    }
+}
+
+/// The title suffix a filter adds, if any: `Damage Done to Skull`.
+fn target_label(target: &TargetSel) -> Option<String> {
+    match target {
+        TargetSel::All => None,
+        TargetSel::Name(name) => Some(name.clone()),
+        TargetSel::Marker(marker) => marker_name(*marker).map(str::to_owned),
+    }
+}
+
+fn marker_name(value: u8) -> Option<&'static str> {
+    MARKERS
+        .iter()
+        .find(|(marker, _)| *marker == value)
+        .map(|(_, name)| *name)
+}
+
+/// Details-style compact amounts: 1234 → "1.23K", 5_000_000 → "5.00M".
+fn format_compact(amount: u64) -> String {
+    let mut value = amount as f64;
+    let mut suffix = "";
+    for candidate in ["K", "M", "B"] {
+        if value < 1_000.0 {
+            break;
+        }
+        value /= 1_000.0;
+        suffix = candidate;
+    }
+    if suffix.is_empty() {
+        return amount.to_string();
+    }
+    let decimals = if value >= 100.0 {
+        0
+    } else if value >= 10.0 {
+        1
+    } else {
+        2
+    };
+    match decimals {
+        0 => format!("{value:.0}{suffix}"),
+        1 => format!("{value:.1}{suffix}"),
+        _ => format!("{value:.2}{suffix}"),
+    }
+}
+
+/// The selected entry's meter facts plus the combatant GUID → spec id join
+/// for class colors. Cloned from the snapshot entry; no file I/O.
+struct EntryMeter {
+    fights: Vec<MeterFight>,
+    spec_by_guid: HashMap<String, u16>,
+}
+
+impl EntryMeter {
+    fn from_entry(entry: &LibraryEntry) -> Self {
+        let spec_by_guid = entry
+            .combatants
+            .iter()
+            .filter_map(|combatant| Some((combatant.guid.clone()?, combatant.spec_id?)))
+            .collect();
+        Self {
+            fights: entry.meter.fights.clone(),
+            spec_by_guid,
+        }
+    }
+}
+
+/// The Current fight for a playhead position: the segment containing it, else
+/// the nearest preceding segment, else the first.
+fn fight_index_at(fights: &[MeterFight], position_ms: u64) -> usize {
+    fights
+        .iter()
+        .position(|fight| position_ms >= fight.start_ms && position_ms < fight.end_ms)
+        .or_else(|| fights.iter().rposition(|fight| fight.end_ms <= position_ms))
+        .unwrap_or(0)
+}
+
+/// Merge every fight exactly once into one Overall segment, summing
+/// `active_ms`. Actors key on GUID in first-appearance order; same-key
+/// entries are summed so each fight contributes once.
+fn overall_fight(fights: &[MeterFight]) -> MeterFight {
+    let mut actors: Vec<MeterActor> = Vec::new();
+    let mut active_ms = 0_u64;
+    for fight in fights {
+        active_ms += fight.active_ms;
+        for actor in &fight.actors {
+            if let Some(merged) = actors.iter_mut().find(|merged| merged.guid == actor.guid) {
+                merge_entries(&mut merged.spells, &actor.spells);
+                merge_entries(&mut merged.targets, &actor.targets);
+            } else {
+                actors.push(MeterActor {
+                    guid: actor.guid.clone(),
+                    name: actor.name.clone(),
+                    spells: actor.spells.clone(),
+                    targets: actor.targets.clone(),
+                });
+            }
+        }
+    }
+    MeterFight {
+        label: String::new(),
+        start_ms: fights.first().map_or(0, |fight| fight.start_ms),
+        end_ms: fights.last().map_or(0, |fight| fight.end_ms),
+        active_ms,
+        actors,
+    }
+}
+
+/// Sum entries sharing `(metric, key)` — plus `marker` for targets.
+fn merge_entries(into: &mut Vec<MeterEntry>, from: &[MeterEntry]) {
+    for entry in from {
+        if let Some(merged) = into.iter_mut().find(|merged| {
+            merged.metric == entry.metric
+                && merged.key == entry.key
+                && merged.marker == entry.marker
+        }) {
+            merged.amount += entry.amount;
+            merged.hits += entry.hits;
+            merged.overheal += entry.overheal;
+        } else {
+            into.push(entry.clone());
+        }
+    }
+}
+
+/// Actor total for a view: spell amounts unfiltered, or the matching target
+/// rows when a target or marker is selected. Utility totals count events.
+fn actor_total(actor: &MeterActor, view: MeterMetric, target: &TargetSel) -> u64 {
+    match target {
+        TargetSel::All => actor
+            .spells
+            .iter()
+            .filter(|entry| entry.metric == view)
+            .map(|entry| entry.amount)
+            .sum(),
+        _ => actor
+            .targets
+            .iter()
+            .filter(|entry| entry.metric == view && matches_target(entry, target))
+            .map(|entry| entry.amount)
+            .sum(),
+    }
+}
+
+/// The active target filter, applied to target rows only: by name across all
+/// markers, or by marker across all names.
+fn matches_target(entry: &MeterEntry, target: &TargetSel) -> bool {
+    match target {
+        TargetSel::All => true,
+        TargetSel::Name(name) => &entry.key == name,
+        TargetSel::Marker(marker) => entry.marker == *marker,
+    }
+}
+
+struct Inner {
+    root: gtk4::Box,
+    header: gtk4::Box,
+    title: gtk4::Label,
+    menu_button: gtk4::MenuButton,
+    content: gtk4::Box,
+    scroller: gtk4::ScrolledWindow,
+    grip: gtk4::Label,
+    empty_label: gtk4::Label,
+    actions: gtk4::gio::SimpleActionGroup,
+
+    entry: RefCell<Option<EntryMeter>>,
+    view: Cell<MeterMetric>,
+    segment: Cell<SegmentKind>,
+    /// The open actor breakdown: the actor's GUID.
+    target: RefCell<TargetSel>,
+    breakdown: RefCell<Option<String>>,
+    /// Fight index the Current segment last rendered from.
+    current_fight: Cell<Option<usize>>,
+    /// Drag mode chosen at drag begin, if the sequence was claimed.
+    drag_mode: Cell<Option<DragMode>>,
+    /// Geometry captured at drag begin: `(margin_end, margin_bottom, width,
+    /// height)`.
+    drag_geometry: Cell<(i32, i32, i32, i32)>,
+    /// The user's chosen panel size once resized: an explicit size request
+    /// instead of the natural size, so it survives a temporary viewport
+    /// shrink.
+    desired_size: Cell<Option<(i32, i32)>>,
+    /// Last playhead position, kept so a segment switch can pick the Current
+    /// fight even while another segment was rendered.
+    position_ms: Cell<u64>,
+}
+
+pub struct DamageMeter {
+    pub widget: gtk4::Box,
+    inner: Rc<Inner>,
+}
+
+impl DamageMeter {
+    pub fn new() -> Self {
+        let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        root.add_css_class("wr-meter");
+        root.set_size_request(300, -1);
+        root.set_halign(gtk4::Align::End);
+        root.set_valign(gtk4::Align::End);
+        root.set_margin_end(16);
+        root.set_margin_bottom(16);
+        root.set_visible(false);
+
+        let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        header.add_css_class("wr-meter-header");
+        let title = gtk4::Label::new(Some("Damage Done"));
+        title.set_xalign(0.0);
+        title.set_hexpand(true);
+        title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        // Cap the title's natural width: its long text is the header's main
+        // width contributor, so the explicit root widths from resizing can
+        // govern.
+        title.set_max_width_chars(1);
+        let menu_button = gtk4::MenuButton::new();
+        menu_button.set_icon_name("view-more-symbolic");
+        menu_button.add_css_class("flat");
+        menu_button.set_tooltip_text(Some("Meter options"));
+        menu_button.update_property(&[gtk4::accessible::Property::Label("Meter options")]);
+        let close = gtk4::Button::from_icon_name("window-close-symbolic");
+        close.add_css_class("flat");
+        close.set_tooltip_text(Some("Hide meter"));
+        close.update_property(&[gtk4::accessible::Property::Label("Hide meter")]);
+        header.append(&title);
+        header.append(&menu_button);
+        header.append(&close);
+
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let scroller = gtk4::ScrolledWindow::new();
+        scroller.set_hscrollbar_policy(gtk4::PolicyType::Never);
+        scroller.set_propagate_natural_height(true);
+        scroller.set_vexpand(true);
+        scroller.set_max_content_height(MAX_LIST_HEIGHT);
+        scroller.set_child(Some(&content));
+        // The resize grip: a dim, bottom-right corner handle the drag
+        // gesture picks on.
+        let grip = gtk4::Label::new(Some("◢"));
+        grip.add_css_class("dim-label");
+        grip.set_halign(gtk4::Align::End);
+        grip.set_size_request(16, 16);
+        grip.set_cursor_from_name(Some("se-resize"));
+        grip.set_tooltip_text(Some("Resize meter"));
+        grip.update_property(&[gtk4::accessible::Property::Label("Resize meter")]);
+        let empty_label = gtk4::Label::new(None);
+        empty_label.add_css_class("dim-label");
+        empty_label.set_halign(gtk4::Align::Center);
+        // Wrapped, so a long empty-state text never imposes a width floor
+        // on the resizable panel.
+        empty_label.set_wrap(true);
+        empty_label.set_margin_top(16);
+        empty_label.set_margin_bottom(16);
+
+        let actions = gtk4::gio::SimpleActionGroup::new();
+        root.insert_action_group("meter", Some(&actions));
+
+        root.append(&header);
+        root.append(&scroller);
+        root.append(&grip);
+
+        let inner = Rc::new(Inner {
+            root,
+            header,
+            title,
+            menu_button,
+            content,
+            scroller,
+            grip,
+            empty_label,
+            actions,
+            entry: RefCell::new(None),
+            view: Cell::new(MeterMetric::Damage),
+            segment: Cell::new(SegmentKind::Current),
+            target: RefCell::new(TargetSel::All),
+            position_ms: Cell::new(0),
+            breakdown: RefCell::new(None),
+            current_fight: Cell::new(None),
+            drag_mode: Cell::new(None),
+            drag_geometry: Cell::new((16, 16, 0, 0)),
+            desired_size: Cell::new(None),
+        });
+
+        inner.connect_actions();
+        inner.connect_title_menu(&inner.title);
+        {
+            let inner = Rc::clone(&inner);
+            close.connect_clicked(move |_| inner.set_visible(false));
+        }
+        inner.refresh();
+
+        Self {
+            widget: inner.root.clone(),
+            inner,
+        }
+    }
+
+    /// Feed the selected entry's meter facts; `None` clears. No file I/O:
+    /// everything arrives on the snapshot. A target filter is reset: names and
+    /// markers of a previous recording need not occur here.
+    pub fn set_entry(&self, entry: Option<&LibraryEntry>) {
+        let inner = &self.inner;
+        inner.entry.replace(entry.map(EntryMeter::from_entry));
+        inner.current_fight.set(None);
+        inner.breakdown.replace(None);
+        inner.target.replace(TargetSel::All);
+        inner.refresh();
+    }
+    /// The playhead moved. The Current-fight index is tracked on every call,
+    /// whatever segment is shown, so switching to Current renders the fight
+    /// for the last known position; a rebuild only happens when the shown
+    /// Current fight actually changes.
+    pub fn set_position(&self, position_ms: u64) {
+        let inner = &self.inner;
+        inner.position_ms.set(position_ms);
+        let previous = inner.current_fight.get();
+        inner.sync_current_fight();
+        if inner.current_fight.get() != previous && inner.segment.get() == SegmentKind::Current {
+            inner.refresh();
+        }
+    }
+
+    pub fn set_visible(&self, visible: bool) {
+        self.widget.set_visible(visible);
+    }
+
+    pub fn toggle(&self) {
+        self.widget.set_visible(!self.widget.is_visible());
+    }
+
+    /// Re-clamp the drag margins to the current overlay allocation; once
+    /// resized, the desired size is reapplied, capped to the viewport so a
+    /// temporary shrink does not lose it.
+    pub fn clamp_position(&self) {
+        let inner = &self.inner;
+        if let Some((width, height)) = inner.desired_size.get()
+            && let Some((viewport_width, viewport_height)) = inner.viewport_size()
+            && viewport_width > 0
+            && viewport_height > 0
+        {
+            inner
+                .root
+                .set_size_request(width.min(viewport_width), height.min(viewport_height));
+        }
+        inner.move_to(
+            f64::from(inner.root.margin_end()),
+            f64::from(inner.root.margin_bottom()),
+        );
+    }
+
+    /// Install the meter's drag gesture on the overlay it was added to.
+    pub fn attach_drag(&self, overlay: &gtk4::Overlay) {
+        self.inner.connect_drag(overlay);
+    }
+}
+
+impl Inner {
+    fn set_visible(&self, visible: bool) {
+        self.root.set_visible(visible);
+    }
+
+    fn connect_actions(self: &Rc<Self>) {
+        let view = stateful_action("view", metric_key(self.view.get()));
+        self.actions.add_action(&view);
+        let this = Rc::clone(self);
+        view.connect_change_state(move |action, state| {
+            // With a change-state handler connected, GLib leaves the state
+            // update to it; the default handler is suppressed.
+            let Some(state) = state else {
+                return;
+            };
+            action.set_state(state);
+            if let Some(key) = state.str()
+                && let Some(metric) = metric_from_key(key)
+            {
+                this.set_view(metric);
+            }
+        });
+
+        let segment = stateful_action("segment", segment_key(self.segment.get()));
+        self.actions.add_action(&segment);
+        let this = Rc::clone(self);
+        segment.connect_change_state(move |action, state| {
+            let Some(state) = state else {
+                return;
+            };
+            action.set_state(state);
+            if let Some(key) = state.str() {
+                let segment = match key {
+                    "overall" => SegmentKind::Overall,
+                    "current" => SegmentKind::Current,
+                    _ => return,
+                };
+                this.set_segment(segment);
+            }
+        });
+
+        let target = stateful_action("target", "all");
+        self.actions.add_action(&target);
+        let this = Rc::clone(self);
+        target.connect_change_state(move |action, state| {
+            let Some(state) = state else {
+                return;
+            };
+            action.set_state(state);
+            if let Some(key) = state.str()
+                && let Some(target) = target_from_key(key)
+            {
+                this.set_target(target);
+            }
+        });
+
+        let close = gtk4::gio::SimpleAction::new("close", None);
+        self.actions.add_action(&close);
+        let this = Rc::clone(self);
+        close.connect_activate(move |_, _| this.set_visible(false));
+    }
+
+    /// Header-and-grip drag: the header moves the meter by pixel margins, the
+    /// bottom-right grip resizes it, both clamped so the panel stays inside
+    /// the overlay allocation. The controller lives on the stationary
+    /// overlay: a gesture controller must not move with its own coordinate
+    /// frame, and the overlay-relative drag coordinates stay valid.
+    fn connect_drag(self: &Rc<Self>, overlay: &gtk4::Overlay) {
+        let drag = gtk4::GestureDrag::new();
+        {
+            let overlay = (*overlay).clone();
+            let this = Rc::clone(self);
+            drag.connect_drag_begin(move |gesture, start_x, start_y| {
+                // The mode comes from the overlay-relative pick: the grip
+                // resizes, the header moves, anything else is denied.
+                this.drag_mode.set(None);
+                let Some(picked) = overlay.pick(start_x, start_y, gtk4::PickFlags::DEFAULT) else {
+                    gesture.set_state(gtk4::EventSequenceState::Denied);
+                    return;
+                };
+                let mode = if picked == this.grip || picked.is_ancestor(&this.grip) {
+                    DragMode::Resize
+                } else if picked == this.header || picked.is_ancestor(&this.header) {
+                    DragMode::Move
+                } else {
+                    gesture.set_state(gtk4::EventSequenceState::Denied);
+                    return;
+                };
+                let width = this.root.width();
+                let height = this.root.height();
+                this.drag_geometry.set((
+                    this.root.margin_end(),
+                    this.root.margin_bottom(),
+                    width,
+                    height,
+                ));
+                if mode == DragMode::Resize {
+                    // Freeze the current allocation as the explicit size
+                    // request; the natural height would otherwise override
+                    // it, so the scroller must stop propagating it. Both
+                    // changes only queue layout, so nothing jumps.
+                    this.root.set_size_request(width, height);
+                    this.scroller.set_propagate_natural_height(false);
+                    this.desired_size.set(Some((width, height)));
+                }
+                this.drag_mode.set(Some(mode));
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
+            });
+        }
+        {
+            let this = Rc::clone(self);
+            drag.connect_drag_update(move |_, offset_x, offset_y| {
+                let (end, bottom, width, height) = this.drag_geometry.get();
+                match this.drag_mode.get() {
+                    Some(DragMode::Move) => {
+                        this.move_to(f64::from(end) - offset_x, f64::from(bottom) - offset_y);
+                    }
+                    Some(DragMode::Resize) => {
+                        this.resize_to(end, bottom, width, height, offset_x, offset_y);
+                    }
+                    None => {}
+                }
+            });
+        }
+        overlay.add_controller(drag);
+    }
+
+    /// The secondary-click route to the one options menu; the menu button is
+    /// the accessible primary route.
+    fn connect_title_menu(self: &Rc<Self>, title: &gtk4::Label) {
+        let click = gtk4::GestureClick::new();
+        click.set_button(gtk4::gdk::BUTTON_SECONDARY);
+        let this = Rc::clone(self);
+        click.connect_pressed(move |gesture, _, _, _| {
+            this.menu_button.popup();
+            gesture.set_state(gtk4::EventSequenceState::Claimed);
+        });
+        title.add_controller(click);
+    }
+
+    fn set_view(self: &Rc<Self>, metric: MeterMetric) {
+        if self.view.replace(metric) != metric {
+            self.refresh();
+        }
+    }
+
+    fn set_segment(self: &Rc<Self>, segment: SegmentKind) {
+        if self.segment.replace(segment) != segment {
+            // Pick the Current fight from the last known playhead before the
+            // re-render; positions arrived while Overall was shown too.
+            self.sync_current_fight();
+            self.refresh();
+        }
+    }
+
+    /// Track the Current fight from the last known playhead position, even
+    /// while another segment is rendered, so a segment switch never shows a
+    /// stale fight.
+    fn sync_current_fight(&self) {
+        let Some(index) = self
+            .entry
+            .borrow()
+            .as_ref()
+            .map(|entry| fight_index_at(&entry.fights, self.position_ms.get()))
+        else {
+            return;
+        };
+        self.current_fight.replace(Some(index));
+    }
+
+    fn set_target(self: &Rc<Self>, target: TargetSel) {
+        if *self.target.borrow() != target {
+            self.target.replace(target);
+            self.refresh();
+        }
+    }
+
+    /// One full re-render: menu, header, and content all derive from the same
+    /// session state and the selected entry.
+    fn refresh(self: &Rc<Self>) {
+        self.sync_action_states();
+        self.rebuild_menu();
+        let fight = self.selected_fight();
+        self.rebuild_title(fight.as_ref());
+        self.rebuild_content(fight);
+    }
+
+    /// Mirror the cells into the stateful actions so rebuilt menus mark the
+    /// active items. `set_state` updates the property directly.
+    fn sync_action_states(&self) {
+        let target = target_key(&self.target.borrow());
+        for (name, state) in [
+            ("view", metric_key(self.view.get())),
+            ("segment", segment_key(self.segment.get())),
+            ("target", target.as_str()),
+        ] {
+            if let Some(action) = self
+                .actions
+                .lookup_action(name)
+                .and_downcast::<gtk4::gio::SimpleAction>()
+            {
+                action.set_state(&state.to_variant());
+            }
+        }
+    }
+
+    /// The fight the current view/segment renders: Current selects the
+    /// containing fight, Overall merges every fight exactly once.
+    fn selected_fight(&self) -> Option<MeterFight> {
+        let entry = self.entry.borrow();
+        let entry = entry.as_ref()?;
+        if entry.fights.is_empty() {
+            return None;
+        }
+        Some(match self.segment.get() {
+            SegmentKind::Overall => overall_fight(&entry.fights),
+            SegmentKind::Current => entry
+                .fights
+                .get(self.current_fight.get().unwrap_or(0))
+                .cloned()?,
+        })
+    }
+
+    /// Header text: `{mm:ss} {view}`, with the target appended when filtered.
+    /// The clock is the selected segment's static `active_ms`, never a timer.
+    fn rebuild_title(&self, fight: Option<&MeterFight>) {
+        let view = metric_label(self.view.get());
+        let title = match target_label(&self.target.borrow()) {
+            Some(target) => format!("{view} to {target}"),
+            None => view.to_owned(),
+        };
+        match fight {
+            Some(fight) => self
+                .title
+                .set_text(&format!("{} {title}", format_mm_ss(fight.active_ms))),
+            None => self.title.set_text(&title),
+        }
+    }
+
+    fn rebuild_menu(self: &Rc<Self>) {
+        let menu = gtk4::gio::Menu::new();
+
+        let view_section = gtk4::gio::Menu::new();
+        for metric in [
+            MeterMetric::Damage,
+            MeterMetric::Healing,
+            MeterMetric::Interrupts,
+            MeterMetric::Dispels,
+        ] {
+            let item = gtk4::gio::MenuItem::new(Some(metric_label(metric)), None);
+            item.set_action_and_target_value(
+                Some("meter.view"),
+                Some(&metric_key(metric).to_variant()),
+            );
+            view_section.append_item(&item);
+        }
+        menu.append_section(None, &view_section);
+
+        let segment_section = gtk4::gio::Menu::new();
+        for segment in [SegmentKind::Overall, SegmentKind::Current] {
+            let item = gtk4::gio::MenuItem::new(Some(segment_label(segment)), None);
+            item.set_action_and_target_value(
+                Some("meter.segment"),
+                Some(&segment_key(segment).to_variant()),
+            );
+            segment_section.append_item(&item);
+        }
+        menu.append_section(None, &segment_section);
+
+        // Only names and markers present in the selected segment; a dead
+        // entry would be a filter with no rows.
+        let target_section = gtk4::gio::Menu::new();
+        let targets = gtk4::gio::Menu::new();
+        let all = gtk4::gio::MenuItem::new(Some("All targets"), None);
+        all.set_action_and_target_value(Some("meter.target"), Some(&"all".to_variant()));
+        targets.append_item(&all);
+        let (names, markers) = self.target_choices();
+        for name in names {
+            let item = gtk4::gio::MenuItem::new(Some(&name), None);
+            item.set_action_and_target_value(
+                Some("meter.target"),
+                Some(&format!("name:{name}").to_variant()),
+            );
+            targets.append_item(&item);
+        }
+        for marker in markers {
+            let label = marker_name(marker).unwrap_or("Other");
+            let item = gtk4::gio::MenuItem::new(Some(label), None);
+            item.set_action_and_target_value(
+                Some("meter.target"),
+                Some(&format!("marker:{marker}").to_variant()),
+            );
+            targets.append_item(&item);
+        }
+        target_section.append_submenu(Some("Target"), &targets);
+        menu.append_section(None, &target_section);
+
+        let close_section = gtk4::gio::Menu::new();
+        close_section.append(Some("Hide meter"), Some("meter.close"));
+        menu.append_section(None, &close_section);
+
+        self.menu_button.set_menu_model(Some(&menu));
+    }
+
+    /// Target names (sorted) and marker values (canonical order) present in
+    /// the selected segment for the active view. `Other` is never a
+    /// selectable target.
+    fn target_choices(&self) -> (Vec<String>, Vec<u8>) {
+        let Some(fight) = self.selected_fight() else {
+            return (Vec::new(), Vec::new());
+        };
+        let mut names = BTreeSet::new();
+        let mut markers = Vec::new();
+        for actor in &fight.actors {
+            for entry in actor
+                .targets
+                .iter()
+                .filter(|entry| entry.metric == self.view.get())
+            {
+                if entry.key != OTHER_KEY {
+                    names.insert(entry.key.clone());
+                }
+                if entry.marker != 0 && !markers.contains(&entry.marker) {
+                    markers.push(entry.marker);
+                }
+            }
+        }
+        markers.sort_by_key(|marker| {
+            MARKERS
+                .iter()
+                .position(|(value, _)| value == marker)
+                .unwrap_or(MARKERS.len())
+        });
+        (names.into_iter().collect(), markers)
+    }
+
+    fn rebuild_content(self: &Rc<Self>, fight: Option<MeterFight>) {
+        let Some(fight) = fight else {
+            self.show_empty("No combat data for this recording.");
+            return;
+        };
+        let view = self.view.get();
+        let target = self.target.borrow().clone();
+        let breakdown = self.breakdown.borrow().clone();
+        if let Some(guid) = &breakdown
+            && let Some(actor) = fight.actors.iter().find(|actor| &actor.guid == guid)
+        {
+            self.rebuild_breakdown(actor, view, &target);
+            return;
+        }
+        // A segment switch may have left the breakdown without its actor.
+        if breakdown.is_some() {
+            self.breakdown.replace(None);
+        }
+        let mut ranked: Vec<(&MeterActor, u64)> = fight
+            .actors
+            .iter()
+            .filter_map(|actor| {
+                let total = actor_total(actor, view, &target);
+                (total > 0).then_some((actor, total))
+            })
+            .collect();
+        if ranked.is_empty() {
+            self.show_empty(&metric_empty_message(view));
+            return;
+        }
+        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        self.rebuild_ranking(&fight, &ranked, view);
+    }
+
+    /// Dense ranked buttons: class-colored fill behind white labels, compact
+    /// total and rate on the right. Activating a row opens its breakdown.
+    fn rebuild_ranking(
+        self: &Rc<Self>,
+        fight: &MeterFight,
+        ranked: &[(&MeterActor, u64)],
+        view: MeterMetric,
+    ) {
+        let top = ranked.first().map_or(1, |(_, total)| *total);
+        let utility = matches!(view, MeterMetric::Interrupts | MeterMetric::Dispels);
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        for (rank, (actor, total)) in ranked.iter().enumerate() {
+            let right = if utility || fight.active_ms == 0 {
+                format_compact(*total)
+            } else {
+                let rate = u128::from(*total) * 1_000 / u128::from(fight.active_ms);
+                format!(
+                    "{} ({})",
+                    format_compact(*total),
+                    format_compact(rate as u64)
+                )
+            };
+            let overlay = fill_line(
+                self.class_for(&actor.guid),
+                &format!("{}. {}", rank + 1, actor.name),
+                &right,
+                *total as f64 / top as f64,
+            );
+            let button = gtk4::Button::new();
+            button.add_css_class("flat");
+            button.add_css_class("wr-meter-row");
+            button.set_child(Some(&overlay));
+            let this = Rc::clone(self);
+            let guid = actor.guid.clone();
+            button.connect_clicked(move |_| this.open_breakdown(guid.clone()));
+            content.append(&button);
+        }
+        self.set_content(&content);
+    }
+
+    /// The actor drilldown in the same scroller: Back, actor name, then the
+    /// Spells and Targets lists with the active filters intact.
+    fn rebuild_breakdown(
+        self: &Rc<Self>,
+        actor: &MeterActor,
+        view: MeterMetric,
+        target: &TargetSel,
+    ) {
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        let back = gtk4::Button::with_label("Back");
+        back.add_css_class("flat");
+        back.set_halign(gtk4::Align::Start);
+        let this = Rc::clone(self);
+        back.connect_clicked(move |_| {
+            this.breakdown.replace(None);
+            this.refresh();
+        });
+        content.append(&back);
+        let name = gtk4::Label::new(Some(&actor.name));
+        name.set_xalign(0.0);
+        name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        content.append(&name);
+
+        content.append(&heading("Spells"));
+        let spell_total: u64 = actor
+            .spells
+            .iter()
+            .filter(|entry| entry.metric == view)
+            .map(|entry| entry.amount)
+            .sum();
+        for entry in actor.spells.iter().filter(|entry| entry.metric == view) {
+            content.append(&self.breakdown_row(actor, entry, spell_total));
+        }
+
+        content.append(&heading("Targets"));
+        let target_total: u64 = actor
+            .targets
+            .iter()
+            .filter(|entry| entry.metric == view && matches_target(entry, target))
+            .map(|entry| entry.amount)
+            .sum();
+        for entry in actor
+            .targets
+            .iter()
+            .filter(|entry| entry.metric == view && matches_target(entry, target))
+        {
+            content.append(&self.breakdown_row(actor, entry, target_total));
+        }
+        self.set_content(&content);
+    }
+
+    /// One breakdown line: `name … amount share% hits`, sharing the ranking
+    /// row visual with the fill proportional to the share.
+    fn breakdown_row(&self, actor: &MeterActor, entry: &MeterEntry, total: u64) -> gtk4::Overlay {
+        let share = if total == 0 {
+            0.0
+        } else {
+            entry.amount as f64 / total as f64 * 100.0
+        };
+        let right = format!(
+            "{} {:.1}% {}",
+            format_compact(entry.amount),
+            share,
+            entry.hits
+        );
+        let row = fill_line(
+            self.class_for(&actor.guid),
+            &entry.key,
+            &right,
+            share / 100.0,
+        );
+        row.add_css_class("wr-meter-row");
+        row
+    }
+
+    fn open_breakdown(self: &Rc<Self>, guid: String) {
+        self.breakdown.replace(Some(guid));
+        self.refresh();
+    }
+    fn class_for(&self, guid: &str) -> Option<&'static str> {
+        let entry = self.entry.borrow();
+        entry
+            .as_ref()?
+            .spec_by_guid
+            .get(guid)
+            .and_then(|spec| class_css_class(*spec))
+    }
+
+    /// Replace the scroller content; the empty state label is shown only by
+    /// `show_empty`.
+    fn set_content(&self, content: &impl IsA<gtk4::Widget>) {
+        self.clear_content();
+        self.content.append(content);
+    }
+
+    fn show_empty(&self, message: &str) {
+        self.clear_content();
+        self.empty_label.set_text(message);
+        self.content.append(&self.empty_label);
+    }
+
+    fn clear_content(&self) {
+        while let Some(child) = self.content.first_child() {
+            self.content.remove(&child);
+        }
+    }
+
+    /// Grip drag: resize the root from the captured geometry, clamped to the
+    /// current viewport. The margins preserve the top-left until the grip
+    /// reaches the viewport edge, after which growth continues left/up.
+    /// Sets the request and margins directly: `move_to` clamps against the
+    /// stale allocation, which only the relayout this request queues
+    /// updates.
+    fn resize_to(
+        &self,
+        margin_end: i32,
+        margin_bottom: i32,
+        width: i32,
+        height: i32,
+        offset_x: f64,
+        offset_y: f64,
+    ) {
+        let Some((viewport_width, viewport_height)) = self.viewport_size() else {
+            return;
+        };
+        if viewport_width <= 0 || viewport_height <= 0 {
+            return;
+        }
+        let target_width = (width as f64 + offset_x)
+            .clamp(
+                f64::from(MIN_WIDTH.min(viewport_width)),
+                f64::from(viewport_width),
+            )
+            .round() as i32;
+        let target_height = (height as f64 + offset_y)
+            .clamp(
+                f64::from(MIN_HEIGHT.min(viewport_height)),
+                f64::from(viewport_height),
+            )
+            .round() as i32;
+        let end =
+            (margin_end - (target_width - width)).clamp(0, (viewport_width - target_width).max(0));
+        let bottom = (margin_bottom - (target_height - height))
+            .clamp(0, (viewport_height - target_height).max(0));
+        self.root.set_size_request(target_width, target_height);
+        self.root.set_margin_end(end);
+        self.root.set_margin_bottom(bottom);
+        self.desired_size.set(Some((target_width, target_height)));
+    }
+
+    /// Pixel margins from a drag, clamped so the meter stays inside the
+    /// overlay allocation.
+    fn move_to(&self, margin_end: f64, margin_bottom: f64) {
+        let Some((width, height)) = self.viewport_size() else {
+            return;
+        };
+        let max_end = (width - self.root.width()).max(0) as f64;
+        let max_bottom = (height - self.root.height()).max(0) as f64;
+        self.root
+            .set_margin_end(margin_end.clamp(0.0, max_end) as i32);
+        self.root
+            .set_margin_bottom(margin_bottom.clamp(0.0, max_bottom) as i32);
+    }
+
+    /// The overlay allocation the meter is positioned in: the video overlay
+    /// it was added to.
+    fn viewport_size(&self) -> Option<(i32, i32)> {
+        let overlay = self.root.parent().and_downcast::<gtk4::Overlay>()?;
+        Some((overlay.width(), overlay.height()))
+    }
+}
+
+/// One dense meter row visual: class-colored fill behind always-white labels,
+/// left label expanding, right label aligned end.
+fn fill_line(class: Option<&str>, left: &str, right: &str, fraction: f64) -> gtk4::Overlay {
+    let fill = gtk4::ProgressBar::new();
+    fill.set_show_text(false);
+    fill.set_fraction(fraction.clamp(0.0, 1.0));
+    fill.add_css_class("wr-meter-fill");
+    if let Some(class) = class {
+        fill.add_css_class(class);
+    }
+    let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+    line.set_margin_start(6);
+    line.set_margin_end(6);
+    let left_label = gtk4::Label::new(Some(left));
+    left_label.set_xalign(0.0);
+    left_label.set_hexpand(true);
+    left_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    let right_label = gtk4::Label::new(Some(right));
+    right_label.set_xalign(1.0);
+    right_label.add_css_class("numeric");
+    line.append(&left_label);
+    line.append(&right_label);
+    let overlay = gtk4::Overlay::new();
+    overlay.set_child(Some(&fill));
+    overlay.add_overlay(&line);
+    overlay
+}
+
+fn heading(text: &str) -> gtk4::Label {
+    let label = gtk4::Label::new(Some(text));
+    label.add_css_class("caption-heading");
+    label.set_xalign(0.0);
+    label
+}
+
+/// A stateful string action for the meter action group.
+fn stateful_action(name: &str, state: &str) -> gtk4::gio::SimpleAction {
+    gtk4::gio::SimpleAction::new_stateful(
+        name,
+        Some(gtk4::glib::VariantTy::STRING),
+        &state.to_variant(),
+    )
+}

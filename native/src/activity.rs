@@ -22,9 +22,10 @@ use std::collections::HashMap;
 
 use crate::config::ActivitySettings;
 use crate::domain::{
-    ActivityDetails, BLOODLUST_DURATION_MS, Category, CombatantSummary, GameFlavor, Outcome,
-    PlayerSummary, RaidDifficulty, RecordingId, RoundSummary, TimelineItem, TimelineKind,
+    ActivityDetails, BLOODLUST_DURATION_MS, Category, CombatantSummary, GameFlavor, MeterData,
+    Outcome, PlayerSummary, RaidDifficulty, RecordingId, RoundSummary, TimelineItem, TimelineKind,
 };
+use crate::meter::MeterAccumulator;
 use crate::parser::{CombatEvent, ParsedEvent, PlayerObservationKind, is_bloodlust_spell};
 
 const RAID_DEFAULT_OVERRUN_MS: u64 = 3_000;
@@ -40,22 +41,26 @@ const BELOREN_UNIT_NAME: &str = "Belo'ren";
 const ALLERIA_UNIT_NAME: &str = "Alleria Windrunner";
 const BELOREN_PHASE_SPELL: &str = "Rebirth";
 const EMPTY_GUID: &str = "0000000000000000";
-
-const AFFILIATION_MINE: u64 = 0x1;
-const REACTION_FRIENDLY: u64 = 0x10;
-const CONTROL_PLAYER: u64 = 0x100;
+pub(crate) const AFFILIATION_MINE: u64 = 0x1;
+pub(crate) const REACTION_FRIENDLY: u64 = 0x10;
+pub(crate) const CONTROL_PLAYER: u64 = 0x100;
 const TYPE_PLAYER: u64 = 0x400;
 
 fn is_unit_player(flags: u64) -> bool {
     flags & CONTROL_PLAYER != 0 && flags & TYPE_PLAYER != 0
 }
 
-fn is_unit_friendly(flags: u64) -> bool {
+pub(crate) fn is_unit_friendly(flags: u64) -> bool {
     flags & REACTION_FRIENDLY != 0
 }
 
 fn is_unit_self(flags: u64) -> bool {
     is_unit_friendly(flags) && flags & AFFILIATION_MINE != 0
+}
+
+/// Player-controlled and friendly: players and their pets/guardians alike.
+pub(crate) fn is_player_controlled_friendly(flags: u64) -> bool {
+    flags & CONTROL_PLAYER != 0 && is_unit_friendly(flags)
 }
 
 /// Name, realm, region from a `Name-Realm(-x-Region)` string.
@@ -67,10 +72,9 @@ fn ambiguate(name_realm: &str) -> (String, Option<String>, Option<String>) {
     (name, realm, region)
 }
 
-fn relative_ms(started_at_ms: i64, at_ms: i64) -> u64 {
+pub(crate) fn relative_ms(started_at_ms: i64, at_ms: i64) -> u64 {
     (at_ms - started_at_ms).max(0) as u64
 }
-
 /// One logical recording in flight, emitted by `Begin` and completed by
 /// `take_finished` after a `Complete`/`Abandon`/`Discard` action. End-time
 /// fields are `None` until the activity finishes.
@@ -92,6 +96,7 @@ pub struct RecordingDraft {
     pub duration_ms: Option<u64>,
     pub title: Option<String>,
     pub activity_hash: Option<String>,
+    pub meter: MeterData,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -250,6 +255,7 @@ struct ActiveActivity {
     combatants: Combatants,
     player_guid: Option<String>,
     timeline: Vec<TimelineItem>,
+    meter: MeterAccumulator,
     kind: ActiveKind,
 }
 
@@ -486,6 +492,7 @@ fn handle_event(
             target_name,
             target_flags,
             spell_name,
+            owner_guid,
         } => handle_player_observed(
             state,
             rules,
@@ -498,6 +505,7 @@ fn handle_event(
             target_name,
             *target_flags,
             spell_name,
+            owner_guid.as_deref(),
             at_ms,
             actions,
         ),
@@ -518,11 +526,119 @@ fn handle_event(
             finished,
             actions,
         ),
-        CombatEvent::BossHealth {
-            name,
-            current,
-            maximum,
-        } => handle_boss_health(state, rules, name, *current, *maximum),
+        CombatEvent::Damage {
+            source_guid,
+            source_name,
+            source_flags,
+            source_owner_guid,
+            dest_name,
+            dest_flags,
+            dest_raid_marker,
+            spell_name,
+            amount,
+            dest_current_hp,
+            dest_max_hp,
+        } => {
+            // Boss HP keeps flowing from the same event: destination HP is
+            // only set when the advanced block identified the destination.
+            if let (Some(current), Some(maximum)) = (dest_current_hp, dest_max_hp) {
+                handle_boss_health(state, rules, dest_name, *current, *maximum);
+            }
+            if let Some(active) = state.active.as_mut() {
+                if let Some(owner) = source_owner_guid {
+                    active.meter.record_owner(source_guid, owner, None);
+                }
+                active.meter.damage(
+                    source_guid,
+                    source_name,
+                    *source_flags,
+                    dest_name,
+                    *dest_flags,
+                    *dest_raid_marker,
+                    spell_name,
+                    *amount,
+                    at_ms,
+                );
+            }
+        }
+        CombatEvent::Heal {
+            source_guid,
+            source_name,
+            source_flags,
+            dest_name,
+            dest_flags: _,
+            dest_raid_marker,
+            spell_name,
+            amount,
+            overheal,
+        } => {
+            if let Some(active) = state.active.as_mut() {
+                active.meter.heal(
+                    source_guid,
+                    source_name,
+                    *source_flags,
+                    dest_name,
+                    *dest_raid_marker,
+                    spell_name,
+                    *amount,
+                    *overheal,
+                    at_ms,
+                );
+            }
+        }
+        CombatEvent::Interrupt {
+            source_guid,
+            source_name,
+            source_flags,
+            dest_name,
+            dest_flags: _,
+            dest_raid_marker,
+            spell_name,
+        } => {
+            if let Some(active) = state.active.as_mut() {
+                active.meter.interrupt(
+                    source_guid,
+                    source_name,
+                    *source_flags,
+                    dest_name,
+                    *dest_raid_marker,
+                    spell_name,
+                    at_ms,
+                );
+            }
+        }
+        CombatEvent::Dispel {
+            source_guid,
+            source_name,
+            source_flags,
+            dest_name,
+            dest_flags: _,
+            dest_raid_marker,
+            spell_name,
+        } => {
+            if let Some(active) = state.active.as_mut() {
+                active.meter.dispel(
+                    source_guid,
+                    source_name,
+                    *source_flags,
+                    dest_name,
+                    *dest_raid_marker,
+                    spell_name,
+                    at_ms,
+                );
+            }
+        }
+        CombatEvent::Summon {
+            source_guid,
+            source_name,
+            pet_guid,
+        } => {
+            if let Some(active) = state.active.as_mut() {
+                active
+                    .meter
+                    .record_owner(pet_guid, source_guid, Some(source_name));
+            }
+        }
         CombatEvent::BossCast {
             source_name,
             spell_name,
@@ -581,6 +697,7 @@ fn draft_for(active: &ActiveActivity) -> RecordingDraft {
         duration_ms: None,
         title: None,
         activity_hash: None,
+        meter: MeterData::default(),
     }
 }
 
@@ -807,7 +924,8 @@ fn handle_encounter_start(
             return;
         }
         // Mythic+ boss encounter segment: close the open segment, then push a
-        // boss segment labelled with the encounter name.
+        // boss segment labelled with the encounter name. The meter fight is
+        // cut at the same transition.
         close_open_segment(active, at_ms, actions);
         let label = dungeon_encounter_name(encounter_id)
             .unwrap_or(name)
@@ -817,10 +935,11 @@ fn handle_encounter_start(
                 kind: TimelineKind::Encounter,
                 start_ms: at_ms,
                 end_ms: None,
-                label: Some(label),
+                label: Some(label.clone()),
                 result: None,
             });
         }
+        active.meter.cut(at_ms, label);
         return;
     }
 
@@ -876,6 +995,7 @@ fn start_raid(
         combatants: Combatants::default(),
         player_guid: None,
         timeline: Vec::new(),
+        meter: MeterAccumulator::new(at_ms, None),
         kind: ActiveKind::Raid(RaidState {
             encounter_id,
             encounter_name: name.to_string(),
@@ -905,7 +1025,7 @@ fn handle_encounter_end(
     };
     if rules == Rules::Retail && matches!(active.kind, ActiveKind::Challenge(_)) {
         // Mythic+ boss encounter ended: record its result, close its span and
-        // start a fresh trash segment.
+        // start a fresh trash segment, cutting the meter fight with it.
         if let ActiveKind::Challenge(challenge) = &mut active.kind
             && let Some(segment) = challenge.segments.last_mut()
         {
@@ -921,6 +1041,7 @@ fn handle_encounter_end(
                 result: None,
             });
         }
+        active.meter.cut(at_ms, "Trash".to_owned());
         return;
     }
     let Some(info) = difficulty_info(difficulty_id) else {
@@ -1025,8 +1146,8 @@ fn handle_challenge_start(
         _ => GameFlavor::Classic,
     };
     // Classic challenge modes always record level 0 and no affixes, and have
-    // no initial trash segment.
-    let (level, affixes, segments) = match rules {
+    // no initial trash segment (one fight labelled by the activity title).
+    let (level, affixes, segments, meter_label) = match rules {
         Rules::Retail => (
             level,
             affixes.to_vec(),
@@ -1037,8 +1158,9 @@ fn handle_challenge_start(
                 label: None,
                 result: None,
             }],
+            Some("Trash".to_owned()),
         ),
-        _ => (0, Vec::new(), Vec::new()),
+        _ => (0, Vec::new(), Vec::new(), None),
     };
     let active = ActiveActivity {
         id: RecordingId::new(),
@@ -1049,6 +1171,7 @@ fn handle_challenge_start(
         combatants: Combatants::default(),
         player_guid: None,
         timeline: Vec::new(),
+        meter: MeterAccumulator::new(at_ms, meter_label),
         kind: ActiveKind::Challenge(ChallengeState {
             zone_id,
             map_id,
@@ -1181,6 +1304,7 @@ fn handle_arena_start(
             combatants: Combatants::default(),
             player_guid: None,
             timeline: Vec::new(),
+            meter: MeterAccumulator::new(at_ms, Some("Round 1".to_owned())),
             kind: ActiveKind::SoloShuffle(ShuffleState {
                 zone_id,
                 rounds: vec![ShuffleRound::new(at_ms)],
@@ -1193,6 +1317,7 @@ fn handle_arena_start(
         let active = state.active.as_mut().expect("checked above");
         let started_at_ms = active.started_at_ms;
         let mut pending = None;
+        let mut round_number = 0;
         if let ActiveKind::SoloShuffle(shuffle) = &mut active.kind {
             let index = shuffle.rounds.len() - 1;
             if let Some(round) = shuffle.rounds.last_mut()
@@ -1203,10 +1328,13 @@ fn handle_arena_start(
                 pending = Some(round_point(started_at_ms, index, round));
             }
             shuffle.rounds.push(ShuffleRound::new(at_ms));
+            round_number = shuffle.rounds.len();
         }
         if let Some(item) = pending {
             push_timeline(active, item, actions);
         }
+        // A new round cuts the meter fight at the existing round transition.
+        active.meter.cut(at_ms, format!("Round {round_number}"));
     } else {
         let active = ActiveActivity {
             id: RecordingId::new(),
@@ -1217,6 +1345,7 @@ fn handle_arena_start(
             combatants: Combatants::default(),
             player_guid: None,
             timeline: Vec::new(),
+            meter: MeterAccumulator::new(at_ms, None),
             kind: ActiveKind::Arena(ArenaState { zone_id }),
         };
         begin(state, active, at_ms, config, actions);
@@ -1382,6 +1511,7 @@ fn classic_zone_change(
             combatants: Combatants::default(),
             player_guid: None,
             timeline: Vec::new(),
+            meter: MeterAccumulator::new(at_ms, None),
             kind: ActiveKind::Arena(ArenaState { zone_id }),
         };
         begin(state, active, at_ms, config, actions);
@@ -1408,6 +1538,7 @@ fn start_battleground(
         combatants: Combatants::default(),
         player_guid: None,
         timeline: Vec::new(),
+        meter: MeterAccumulator::new(at_ms, None),
         kind: ActiveKind::Battleground { zone_id },
     };
     begin(state, active, at_ms, config, actions);
@@ -1553,12 +1684,16 @@ fn handle_player_observed(
     target_name: &str,
     target_flags: u64,
     spell_name: &str,
+    owner_guid: Option<&str>,
     at_ms: i64,
     actions: &mut Vec<ActivityAction>,
 ) {
     let Some(active) = state.active.as_mut() else {
         return;
     };
+    if let Some(owner) = owner_guid {
+        active.meter.record_owner(guid, owner, None);
+    }
     if kind == PlayerObservationKind::CastSucceeded && is_bloodlust_spell(spell_id) {
         let start_ms = relative_ms(active.started_at_ms, at_ms);
         let duplicate = active
@@ -2067,6 +2202,12 @@ fn build_draft(active: ActiveActivity, outcome: Outcome, ended_at_ms: i64) -> Re
     let details = build_details(&active);
     let mut timeline = active.timeline.clone();
     timeline.sort_by_key(|item| item.start_ms());
+    // Draining resolves pet ownership and bounds rows; unlabelled fights
+    // (raid/arena/battleground) take the activity title.
+    let names = combatant_names(&active);
+    let meter = active
+        .meter
+        .drain(ended_at_ms, active.started_at_ms, &title, &names);
     RecordingDraft {
         id: active.id.clone(),
         category: active.category.clone(),
@@ -2082,7 +2223,30 @@ fn build_draft(active: ActiveActivity, outcome: Outcome, ended_at_ms: i64) -> Re
         duration_ms: Some(duration_ms),
         title: Some(title),
         activity_hash: Some(activity_hash),
+        meter,
     }
+}
+
+/// GUID-to-name map for pet-owner merge naming, from the same combatant map
+/// the summaries use.
+fn combatant_names(active: &ActiveActivity) -> HashMap<String, String> {
+    let combatants = match &active.kind {
+        ActiveKind::SoloShuffle(shuffle) => shuffle
+            .rounds
+            .last()
+            .map(|round| &round.combatants)
+            .unwrap_or(&active.combatants),
+        _ => &active.combatants,
+    };
+    combatants
+        .iter()
+        .filter_map(|combatant| {
+            combatant
+                .name
+                .clone()
+                .map(|name| (combatant.guid.clone(), name))
+        })
+        .collect()
 }
 
 fn build_details(active: &ActiveActivity) -> ActivityDetails {
@@ -3003,6 +3167,7 @@ mod tests {
             target_name: target_name.to_string(),
             target_flags,
             spell_name: spell.to_string(),
+            owner_guid: None,
         }
     }
 

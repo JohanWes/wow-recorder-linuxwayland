@@ -27,8 +27,8 @@ use serde_json::Value;
 use crate::activity::RecordingDraft;
 use crate::domain::{
     ActivityDetails, BLOODLUST_DURATION_MS, Category, Codec, CombatantSummary, CorrelatedActivity,
-    GameFlavor, LibraryEntry, MediaFacts, Outcome, PlayerSummary, RecordingId, RoundSummary,
-    StorageLimit, TimelineItem, TimelineKind, TimelineShape,
+    GameFlavor, LibraryEntry, MediaFacts, MeterData, Outcome, PlayerSummary, RecordingId,
+    RoundSummary, StorageLimit, TimelineItem, TimelineKind, TimelineShape,
 };
 use crate::parser::{
     CombatEvent, ParseTimeContext, PlayerObservationKind, days_from_civil, is_bloodlust_spell,
@@ -461,6 +461,12 @@ impl Storage {
                 duration_ms,
             ),
             media: media.facts.clone(),
+            meter: shift_meter(
+                &draft.meter,
+                draft.started_at_ms,
+                media_start_ms,
+                duration_ms,
+            ),
         };
 
         self.write_new_entry(&entry, &media.temp_media)?;
@@ -836,6 +842,9 @@ struct NativeSidecar {
     details: ActivityDetails,
     timeline: Vec<TimelineItem>,
     media: MediaFacts,
+    /// Absent in sidecars written before the damage meter shipped.
+    #[serde(default)]
+    meter: MeterData,
 }
 
 impl NativeSidecar {
@@ -864,6 +873,7 @@ impl NativeSidecar {
             details: entry.details.clone(),
             timeline: entry.timeline.clone(),
             media: entry.media.clone(),
+            meter: entry.meter.clone(),
         }
     }
 
@@ -886,6 +896,7 @@ impl NativeSidecar {
             details: self.details,
             timeline: self.timeline,
             media: self.media,
+            meter: self.meter,
         }
     }
 
@@ -1094,6 +1105,7 @@ impl LegacySidecar {
                 codec: self.encoder.as_deref().and_then(legacy_codec),
                 has_content: true,
             },
+            meter: MeterData::default(),
         };
         entry.validate().map_err(|error| error.to_string())?;
         Ok(entry)
@@ -1664,6 +1676,37 @@ fn shift_timeline(
     shifted
 }
 
+/// Shift meter fight offsets relative to the activity start into media
+/// offsets, using the same signed lead-in as `shift_timeline` so meter fights
+/// line up with the timeline bands. Fights wholly outside the media are
+/// dropped; overlapping bounds clamp into the media and the end never precedes
+/// the start. `active_ms` is activity-invariant.
+fn shift_meter(
+    meter: &MeterData,
+    activity_start_ms: i64,
+    media_start_ms: i64,
+    duration_ms: u64,
+) -> MeterData {
+    let lead_in_ms = activity_start_ms - media_start_ms;
+    MeterData {
+        fights: meter
+            .fights
+            .iter()
+            .filter_map(|fight| {
+                let start = fight.start_ms as i64 + lead_in_ms;
+                let end = fight.end_ms as i64 + lead_in_ms;
+                if start > duration_ms as i64 || end < 0 {
+                    return None;
+                }
+                let mut shifted = fight.clone();
+                shifted.start_ms = (start.max(0) as u64).min(duration_ms);
+                shifted.end_ms = (end.max(0) as u64).min(duration_ms).max(shifted.start_ms);
+                Some(shifted)
+            })
+            .collect(),
+    }
+}
+
 /// Filename sanitizer: invalid characters become spaces, runs of spaces
 /// collapse.
 pub fn sanitize_name(name: &str) -> String {
@@ -1818,6 +1861,8 @@ pub fn now_unix_ms() -> i64 {
 mod tests {
     use super::*;
     use std::num::NonZeroU64;
+
+    use crate::domain::{MeterActor, MeterEntry, MeterFight, MeterMetric};
 
     fn fixture_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/native/fixtures/legacy/sidecars")
@@ -2185,6 +2230,7 @@ mod tests {
             duration_ms: Some(75_000),
             title: Some("Testone - Undermine, Chrome King Gallywix [M] (Kill)".to_owned()),
             activity_hash: Some("0f1e2d3c4b5a69788796a5b4c3d2e1f0".to_owned()),
+            meter: MeterData::default(),
         }
     }
 
@@ -2207,6 +2253,57 @@ mod tests {
             // The regular recording starts five seconds after the activity.
             regular_started_at_ms: 1_772_323_205_000,
             regular_stopped_at_ms: 1_772_323_275_000,
+        }
+    }
+
+    fn meter_fixture() -> MeterData {
+        MeterData {
+            fights: vec![
+                MeterFight {
+                    label: "Chrome King Gallywix".to_owned(),
+                    start_ms: 500,
+                    end_ms: 58_000,
+                    active_ms: 55_000,
+                    actors: vec![MeterActor {
+                        guid: "Player-1000-AAAA0001".to_owned(),
+                        name: "Testone".to_owned(),
+                        spells: vec![MeterEntry {
+                            metric: MeterMetric::Damage,
+                            key: "Smite".to_owned(),
+                            marker: 0,
+                            amount: 1_234,
+                            hits: 10,
+                            overheal: 0,
+                        }],
+                        targets: Vec::new(),
+                    }],
+                },
+                // Ends beyond the media duration: the shift must clamp.
+                MeterFight {
+                    label: "Trash".to_owned(),
+                    start_ms: 75_000,
+                    end_ms: 90_000,
+                    active_ms: 12_000,
+                    actors: Vec::new(),
+                },
+                // Ends before a media that starts after the activity: dropped
+                // under a negative lead-in, kept and shifted otherwise.
+                MeterFight {
+                    label: "Pre-media".to_owned(),
+                    start_ms: 0,
+                    end_ms: 4_000,
+                    active_ms: 3_000,
+                    actors: Vec::new(),
+                },
+                // Wholly beyond the media duration: always dropped.
+                MeterFight {
+                    label: "Post-media".to_owned(),
+                    start_ms: 80_000,
+                    end_ms: 85_000,
+                    active_ms: 4_000,
+                    actors: Vec::new(),
+                },
+            ],
         }
     }
 
@@ -2238,7 +2335,8 @@ mod tests {
         fs::write(&temp_media, "final media bytes").expect("temp media");
 
         let id = RecordingId::new();
-        let draft = draft(&id);
+        let mut draft = draft(&id);
+        draft.meter = meter_fixture();
         let artifacts = artifacts(&tree, true);
         let entry = storage
             .finalize(
@@ -2267,6 +2365,20 @@ mod tests {
         assert_eq!(entry.timeline[0].end_ms(), None);
         assert_eq!(entry.timeline[1].start_ms(), 3_000);
         assert_eq!(entry.timeline[1].end_ms(), Some(63_000));
+        // Meter fights shift by the same three-second lead-in, clamp to the
+        // media duration, and keep their contents; the fight beyond the media
+        // end is dropped.
+        assert_eq!(entry.meter.fights.len(), 3);
+        assert_eq!(entry.meter.fights[0].start_ms, 3_500);
+        assert_eq!(entry.meter.fights[0].end_ms, 61_000);
+        assert_eq!(entry.meter.fights[0].active_ms, 55_000);
+        assert_eq!(entry.meter.fights[0].actors[0].spells[0].amount, 1_234);
+        assert_eq!(entry.meter.fights[1].start_ms, 78_000);
+        assert_eq!(entry.meter.fights[1].end_ms, 78_000);
+        assert_eq!(entry.meter.fights[1].active_ms, 12_000);
+        assert_eq!(entry.meter.fights[2].start_ms, 3_000);
+        assert_eq!(entry.meter.fights[2].end_ms, 7_000);
+        assert_eq!(entry.meter.fights[2].active_ms, 3_000);
         assert!(entry.media_path.starts_with(tree.library()));
         assert!(
             entry
@@ -2414,12 +2526,15 @@ mod tests {
                 .expect("json");
         assert!(cleared.get("tag").is_none());
 
-        // A native sidecar round-trips through the typed model.
+        // A native sidecar round-trips through the typed model; the meter must
+        // survive the tag/protect rewrite.
         let temp_media = tree.capture_root().join("staging/native.mp4");
         fs::write(&temp_media, "media").expect("media");
+        let mut native_draft = draft(&RecordingId::new());
+        native_draft.meter = meter_fixture();
         let native = storage
             .finalize(
-                &draft(&RecordingId::new()),
+                &native_draft,
                 &artifacts(&tree, false),
                 &CombinedMedia {
                     temp_media,
@@ -2437,6 +2552,20 @@ mod tests {
         let updated = storage
             .update(&native, &EntryUpdate::Protected(true))
             .expect("protect native");
+        // The update path rebuilds the sidecar from the entry: meter contents
+        // must come back byte-identical, and the rescan equality below proves
+        // they were actually written.
+        assert_eq!(updated.meter, native.meter);
+        // No replay here: the media starts five seconds after the activity, so
+        // the lead-in is negative. The encounter fight clamps to the media
+        // start, the trash fight end clamps to the 70 s media duration, and
+        // the pre-media fight is dropped.
+        assert_eq!(updated.meter.fights.len(), 2);
+        assert_eq!(updated.meter.fights[0].start_ms, 0);
+        assert_eq!(updated.meter.fights[0].end_ms, 53_000);
+        assert_eq!(updated.meter.fights[0].active_ms, 55_000);
+        assert_eq!(updated.meter.fights[1].start_ms, 70_000);
+        assert_eq!(updated.meter.fights[1].end_ms, 70_000);
         let reloaded = storage
             .scan()
             .entries

@@ -23,6 +23,7 @@ use warcraft_recorder::domain::{
     Category, DeathMarkerVisibility, LibraryEntry, MarkerVisibility, RecordingId,
 };
 
+use super::damage_meter::DamageMeter;
 use super::library::Selection;
 use super::multipov;
 use super::player_backend::{PlayerBackend, SeekMode, VideoStreamToken};
@@ -60,6 +61,8 @@ struct Inner {
     pov_dropdown: gtk4::DropDown,
     clip_button: gtk4::Button,
     clip_actions: gtk4::Box,
+    meter_button: gtk4::ToggleButton,
+    meter: DamageMeter,
     marker_button: gtk4::MenuButton,
     previous_marker_button: gtk4::Button,
     next_marker_button: gtk4::Button,
@@ -133,6 +136,11 @@ impl Player {
         let size_probe = gtk4::DrawingArea::new();
         size_probe.set_can_target(false);
         video_overlay.add_overlay(&size_probe);
+        // The damage-meter overlay sits on the video itself, not the control
+        // row, so it survives the fullscreen bottom-bar collapse.
+        let meter = DamageMeter::new();
+        video_overlay.add_overlay(&meter.widget);
+        meter.attach_drag(&video_overlay);
 
         // One recovery row for playback failure; the library stays usable.
         let error_label = gtk4::Label::new(Some("This recording could not be played."));
@@ -174,6 +182,9 @@ impl Player {
         let next_marker_button = icon_button("media-skip-forward-symbolic", "Next marker");
         previous_marker_button.set_sensitive(false);
         next_marker_button.set_sensitive(false);
+        let meter_button = gtk4::ToggleButton::with_label("Meter");
+        meter_button.set_tooltip_text(Some("Damage meter (M)"));
+        meter_button.update_property(&[gtk4::accessible::Property::Label("Damage meter")]);
         let marker_button = gtk4::MenuButton::new();
         marker_button.set_icon_name("view-list-symbolic");
         marker_button.set_tooltip_text(Some("Marker visibility"));
@@ -206,6 +217,7 @@ impl Player {
             previous_marker_button.upcast_ref(),
             marker_button.upcast_ref(),
             next_marker_button.upcast_ref(),
+            meter_button.upcast_ref(),
             clip_button.upcast_ref(),
             clip_actions.upcast_ref(),
             pov_dropdown.upcast_ref(),
@@ -246,6 +258,8 @@ impl Player {
             marker_button,
             previous_marker_button,
             next_marker_button,
+            meter_button,
+            meter,
             reveal_button,
             bottom_bar,
             fullscreen: Cell::new(false),
@@ -287,12 +301,47 @@ impl Player {
         video_click.set_propagation_phase(gtk4::PropagationPhase::Capture);
         {
             let this = Rc::clone(&inner);
-            video_click.connect_pressed(move |gesture, n_press, _, _| {
+            video_click.connect_pressed(move |gesture, n_press, x, y| {
+                // The capture phase runs before the meter's own controllers.
+                // Ask the overlay which widget the press landed on and never
+                // claim meter hits, so meter interaction cannot toggle
+                // playback or fullscreen.
+                if let Some(picked) = this.video_overlay.pick(x, y, gtk4::PickFlags::DEFAULT)
+                    && (picked == this.meter.widget || picked.is_ancestor(&this.meter.widget))
+                {
+                    return;
+                }
                 gesture.set_state(gtk4::EventSequenceState::Claimed);
                 this.toggle_playing();
                 if n_press == 2 {
                     this.toggle_fullscreen();
                 }
+            });
+        }
+
+        // One visibility state behind the control-row toggle, the meter's own
+        // close routes, and the M shortcut, whichever changes it first.
+        {
+            let this = Rc::clone(&inner);
+            inner.meter_button.connect_toggled(move |button| {
+                this.meter.set_visible(button.is_active());
+            });
+        }
+        {
+            let this = Rc::clone(&inner);
+            inner.meter.widget.connect_visible_notify(move |widget| {
+                let visible = widget.is_visible();
+                if this.meter_button.is_active() != visible {
+                    this.meter_button.set_active(visible);
+                }
+            });
+        }
+        // The drag position is pixel margins: any relayout (window resize,
+        // fullscreen transitions) re-clamps them to the overlay allocation.
+        {
+            let this = Rc::clone(&inner);
+            inner.size_probe.connect_resize(move |_, _, _| {
+                this.meter.clamp_position();
             });
         }
         video_overlay.add_controller(video_click);
@@ -535,6 +584,7 @@ impl Inner {
         let Some(entry) = entries.iter().find(|entry| &entry.id == id) else {
             return;
         };
+        self.meter.set_entry(Some(entry));
         let uri = gtk4::gio::File::for_path(&entry.media_path)
             .uri()
             .to_string();
@@ -688,6 +738,7 @@ impl Inner {
         self.empty_reveal.set_visible(false);
         self.stack.set_visible_child_name("placeholder");
         self.timeline.set_entry(None, self.prefs.get());
+        self.meter.set_entry(None);
         self.rebuild_pov_selector();
     }
 
@@ -811,6 +862,7 @@ impl Inner {
         let position_ms = (seconds * 1_000.0) as u64;
         let duration_ms = self.duration_ms.get();
         self.timeline.set_position(position_ms);
+        self.meter.set_position(position_ms);
         let rendered = (position_ms / 1_000, duration_ms);
         if self.time_label_state.replace(Some(rendered)) != Some(rendered) {
             self.time_label.set_text(&format!(
@@ -838,6 +890,9 @@ impl Inner {
             }
             gtk4::gdk::Key::bracketleft => self.jump_marker(MarkerDirection::Previous),
             gtk4::gdk::Key::bracketright => self.jump_marker(MarkerDirection::Next),
+            gtk4::gdk::Key::m | gtk4::gdk::Key::M => {
+                self.meter.toggle();
+            }
             gtk4::gdk::Key::comma => {
                 // Previous frame while paused: known FPS, else assume 30. The
                 // frame is the point, so this is the one seek worth decoding

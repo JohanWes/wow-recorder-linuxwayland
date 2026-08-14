@@ -247,6 +247,58 @@ impl ActivityDetails {
     }
 }
 
+/// One damage-meter aggregate: a spell or target bucket for one actor and one
+/// metric. Actor totals derive structurally from the spell entries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeterEntry {
+    pub metric: MeterMetric,
+    /// Spell name (or "Melee"), the interrupted/dispelled spell name, or the
+    /// target name. No spell IDs: names are the persisted keys.
+    pub key: String,
+    /// Destination raid marker (`0x80` = skull) at event time; 0 on spell rows.
+    pub marker: u8,
+    /// Effective amount, or the event count for Interrupts/Dispels.
+    pub amount: u64,
+    pub hits: u32,
+    pub overheal: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeterMetric {
+    Damage,
+    Healing,
+    Interrupts,
+    Dispels,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeterActor {
+    /// Join key for class colours via `LibraryEntry.combatants`.
+    pub guid: String,
+    pub name: String,
+    pub spells: Vec<MeterEntry>,
+    pub targets: Vec<MeterEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeterFight {
+    /// Encounter name, "Trash", "Round N", or the activity title.
+    pub label: String,
+    /// Media-relative after finalize; activity-relative in the engine.
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// First-to-last eligible event; the shared DPS/HPS denominator.
+    pub active_ms: u64,
+    pub actors: Vec<MeterActor>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeterData {
+    #[serde(default)]
+    pub fights: Vec<MeterFight>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimelineKind {
@@ -426,6 +478,9 @@ pub struct LibraryEntry {
     pub details: ActivityDetails,
     pub timeline: Vec<TimelineItem>,
     pub media: MediaFacts,
+    /// Pre-aggregated damage/healing facts, media-relative after finalize.
+    /// Empty for clips, manual recordings, and legacy sidecars.
+    pub meter: MeterData,
 }
 
 impl LibraryEntry {
@@ -582,6 +637,7 @@ mod tests {
                 codec: Some(Codec::H264),
                 has_content: true,
             },
+            meter: MeterData::default(),
         }
     }
 

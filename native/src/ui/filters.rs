@@ -309,7 +309,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use warcraft_recorder::domain::{
-        Category, Codec, CombatantSummary, MediaFacts, PlayerSummary, RecordingId,
+        Category, Codec, CombatantSummary, MediaFacts, MeterData, PlayerSummary, RecordingId,
     };
 
     fn base(category: Category, details: ActivityDetails, outcome: Outcome) -> LibraryEntry {
@@ -337,6 +337,7 @@ mod tests {
                 codec: Some(Codec::H264),
                 has_content: true,
             },
+            meter: MeterData::default(),
         }
     }
 

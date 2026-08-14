@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::domain::GameFlavor;
-use crate::parser::{ParseFailure, ParseTimeContext, ParsedEvent, event_name, parse_line};
+use crate::parser::{
+    ParseFailure, ParseTimeContext, ParsedEvent, combat_log_version, event_name, parse_line,
+};
 
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 const CHECKPOINT_BYTES: usize = 64;
@@ -79,6 +81,7 @@ pub struct LogTailer {
     incomplete: Vec<u8>,
     incomplete_offset: u64,
     line_number: u64,
+    base_context: ParseTimeContext,
     time_context: ParseTimeContext,
     replay: bool,
     checkpoint: Vec<u8>,
@@ -124,6 +127,7 @@ impl LogTailer {
         let source_modified = (!source.is_file())
             .then(|| fs::metadata(&source).ok()?.modified().ok())
             .flatten();
+        let seeded_context = probe_header_context(&path, time_context)?;
         Ok(Self {
             source,
             path,
@@ -133,7 +137,8 @@ impl LogTailer {
             incomplete: Vec::new(),
             incomplete_offset: offset,
             line_number: 0,
-            time_context,
+            base_context: time_context,
+            time_context: seeded_context,
             replay,
             checkpoint,
             observed_len: metadata.len(),
@@ -228,6 +233,9 @@ impl LogTailer {
         self.checkpoint.clear();
         self.observed_len = 0;
         self.observed_modified = None;
+        // A rotated-in or truncated file starts from the caller's base
+        // context; consuming its header reseeds the layout if it has one.
+        self.time_context = self.base_context;
     }
 
     fn checkpoint_matches(&self) -> Result<bool, LogError> {
@@ -326,6 +334,9 @@ impl LogTailer {
                 return;
             }
         };
+        if let Some(version) = combat_log_version(line) {
+            self.time_context = self.base_context.with_combat_log_version(version);
+        }
         match parse_line(self.flavor.clone(), self.time_context, line) {
             Ok(Some(event)) => events.push(event),
             Ok(None) => {}
@@ -424,6 +435,52 @@ fn read_checkpoint(path: &Path, offset: u64) -> Result<Vec<u8>, LogError> {
     Ok(checkpoint)
 }
 
+/// Seeds the active parse context from a complete, newline-terminated first
+/// line without touching offset/checkpoint/incomplete state: a live open
+/// starts at EOF and would otherwise never see the header. A fresh partial
+/// first line is not a header yet, and an unreadable version keeps the base.
+fn probe_header_context(path: &Path, base: ParseTimeContext) -> Result<ParseTimeContext, LogError> {
+    let mut file = File::open(path).map_err(|source| LogError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    let mut buffer = vec![0_u8; READ_CHUNK_BYTES];
+    let mut filled = 0;
+    let newline = loop {
+        let read = file
+            .read(&mut buffer[filled..])
+            .map_err(|source| LogError::Io {
+                path: path.to_owned(),
+                source,
+            })?;
+        if read == 0 {
+            break None;
+        }
+        if let Some(index) = buffer[filled..filled + read]
+            .iter()
+            .position(|byte| *byte == b'\n')
+        {
+            break Some(filled + index);
+        }
+        filled += read;
+        if filled == buffer.len() {
+            break None;
+        }
+    };
+    let Some(end) = newline else {
+        return Ok(base);
+    };
+    let line_end = if end > 0 && buffer[end - 1] == b'\r' {
+        end - 1
+    } else {
+        end
+    };
+    let Ok(line) = std::str::from_utf8(&buffer[..line_end]) else {
+        return Ok(base);
+    };
+    Ok(combat_log_version(line).map_or(base, |version| base.with_combat_log_version(version)))
+}
+
 #[cfg(unix)]
 fn file_identity(metadata: &Metadata) -> FileIdentity {
     use std::os::unix::fs::MetadataExt;
@@ -444,6 +501,7 @@ fn file_identity(metadata: &Metadata) -> FileIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::CombatEvent;
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -451,6 +509,9 @@ mod tests {
     const CONTEXT: ParseTimeContext = ParseTimeContext::new(2026, 0);
     const EVENT: &str =
         "4/9 19:27:13.200  ENCOUNTER_START,9999,\"Training Construct\",16,20,777,1\n";
+    const V22_HEADER: &str = "8/11/2026 18:28:29.3992  COMBAT_LOG_VERSION,22,ADVANCED_LOG_ENABLED,1,BUILD_VERSION,12.1.0,PROJECT_ID,1\n";
+    const V22_DAMAGE: &str = "5/24 20:26:10.911  SPELL_DAMAGE,Player-1322-07763A7B,\"Xiaohuli\",0x511,0x0,Creature-0-3013-0-11406-74284-0000266503,\"Cutpurse\",0x10a48,0x0,585,\"Smite\",0x2,Creature-0-3013-0-11406-74284-0000266503,0000000000000000,105,152,0,0,189,2084,0,0,0,250000,250000,0,0,0,0,0,0,46,0,2,0,0,0,1,0,0,0,0.000,1,1\n";
+    const LEGACY_DAMAGE: &str = "5/24 20:26:10.911  SPELL_DAMAGE,Player-1322-07763A7B,\"Xiaohuli\",0x511,0x0,Creature-0-3013-0-11406-74284-0000266503,\"Cutpurse\",0x10a48,0x0,585,\"Smite\",0x2,Creature-0-3013-0-11406-74284-0000266503,0000000000000000,105,152,0,0,189,2084,0,0,0,0,0,0,0,0,0,46,0,2,0,0,0,1,0,0,0,0.000,1,1\n";
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -645,6 +706,112 @@ mod tests {
                 .count(),
             1
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn version_22_header_seeds_the_wider_layout_under_replay() {
+        let directory = test_directory();
+        let path = directory.join("WoWCombatLog.txt");
+        fs::write(&path, format!("{V22_HEADER}{V22_DAMAGE}")).unwrap();
+        let mut tailer = LogTailer::open_replay(path.clone(), GameFlavor::Retail, CONTEXT).unwrap();
+        let events = tailer.poll().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].event,
+            CombatEvent::Damage {
+                amount: 46,
+                dest_current_hp: Some(105),
+                dest_max_hp: Some(152),
+                ..
+            }
+        ));
+        assert!(tailer.take_diagnostics().is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn live_at_eof_seeds_the_layout_from_a_complete_header_line() {
+        let directory = test_directory();
+        let path = directory.join("WoWCombatLog.txt");
+        fs::write(&path, format!("{V22_HEADER}{V22_DAMAGE}")).unwrap();
+        let mut tailer = LogTailer::open(path.clone(), GameFlavor::Retail, CONTEXT).unwrap();
+        assert!(tailer.poll().unwrap().is_empty());
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(V22_DAMAGE.as_bytes()).unwrap();
+        let events = tailer.poll().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].event,
+            CombatEvent::Damage { amount: 46, .. }
+        ));
+        assert!(tailer.take_diagnostics().is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rotation_restores_the_base_layout_until_a_new_header_reseeds() {
+        let directory = test_directory();
+        let first = directory.join("WoWCombatLog-1.txt");
+        fs::write(&first, format!("{V22_HEADER}{V22_DAMAGE}")).unwrap();
+        let mut tailer = LogTailer::open(directory.clone(), GameFlavor::Retail, CONTEXT).unwrap();
+        // Live starts at EOF but the probe already seeded the v22 layout;
+        // nothing is emitted from the pre-existing bytes.
+        assert!(tailer.poll().unwrap().is_empty());
+
+        // A headerless file must fall back to the base 17-field layout: the
+        // amount is at index 29, not the stale v22 index 31.
+        let second = directory.join("WoWCombatLog-2.txt");
+        fs::write(&second, LEGACY_DAMAGE).unwrap();
+        let events = tailer.poll().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].event,
+            CombatEvent::Damage { amount: 46, .. }
+        ));
+        assert_eq!(tailer.path(), second);
+
+        // A new file with its own header reseeds the wider layout.
+        let third = directory.join("WoWCombatLog-3.txt");
+        fs::write(&third, format!("{V22_HEADER}{V22_DAMAGE}")).unwrap();
+        let events = tailer.poll().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].event,
+            CombatEvent::Damage { amount: 46, .. }
+        ));
+        assert_eq!(tailer.path(), third);
+        assert!(tailer.take_diagnostics().is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn headerless_and_unreadable_headers_keep_the_legacy_layout_silently() {
+        let directory = test_directory();
+        let path = directory.join("WoWCombatLog.txt");
+        fs::write(&path, LEGACY_DAMAGE).unwrap();
+        let mut tailer = LogTailer::open_replay(path.clone(), GameFlavor::Retail, CONTEXT).unwrap();
+        let events = tailer.poll().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].event,
+            CombatEvent::Damage { amount: 46, .. }
+        ));
+        assert!(tailer.take_diagnostics().is_empty());
+
+        let path = directory.join("WoWCombatLog-bad-header.txt");
+        fs::write(
+            &path,
+            format!("8/11/2026 18:28:29.3992  COMBAT_LOG_VERSION,garbage,ADVANCED_LOG_ENABLED,1\n{LEGACY_DAMAGE}"),
+        )
+        .unwrap();
+        let mut tailer = LogTailer::open_replay(path.clone(), GameFlavor::Retail, CONTEXT).unwrap();
+        let events = tailer.poll().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].event,
+            CombatEvent::Damage { amount: 46, .. }
+        ));
+        assert!(tailer.take_diagnostics().is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
 }

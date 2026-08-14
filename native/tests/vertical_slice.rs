@@ -21,13 +21,18 @@ use warcraft_recorder::config::{
     ManualSettings, StorageSettings,
 };
 use warcraft_recorder::coordinator::{AppSnapshot, ClipRange, Command, Coordinator, Setup, start};
-use warcraft_recorder::domain::{Category, Outcome, RecorderStatus, StorageLimit, TimelineKind};
+use warcraft_recorder::domain::{
+    Category, MeterFight, MeterMetric, Outcome, RecorderStatus, StorageLimit, TimelineKind,
+};
 use warcraft_recorder::media_jobs::MediaConfig;
 use warcraft_recorder::recorder::Timeouts;
 use warcraft_recorder::storage::{RECOVERY_DIR, now_unix_ms};
 
 const PLAYER_GUID: &str = "Player-1092-0A70E103";
 const PLAYER_NAME: &str = "Testplayer-Testrealm";
+/// Hostile boss the player's spells land on; its flags are not friendly.
+const BOSS_GUID: &str = "Creature-0-3013-2820-74284-0000266503";
+const BOSS_FLAGS: &str = "0x10a48";
 const SELF_FLAGS: &str = "0x511";
 /// Long enough for real process spawns and FFmpeg fakes, short enough to fail
 /// fast. Nothing is asserted about how long a step actually takes.
@@ -342,6 +347,32 @@ fn player_death(at_ms: i64) -> String {
     )
 }
 
+/// The player's spell on the hostile boss in the retail advanced-block shape.
+/// The tiny HP values keep the destination below the boss-health floor, so the
+/// existing boss-health behavior is untouched.
+fn spell_damage(at_ms: i64) -> String {
+    line(
+        at_ms,
+        &format!(
+            "SPELL_DAMAGE,{PLAYER_GUID},\"{PLAYER_NAME}\",{SELF_FLAGS},0x0,{BOSS_GUID},\"Test Boss\",\
+             {BOSS_FLAGS},0x0,585,\"Smite\",0x2,{BOSS_GUID},0000000000000000,105,152,0,0,189,2084,0,0,0,\
+             0,0,0,0,0,0,1500,0,2,0,0,0,1,0,0,0,0.000,1,1"
+        ),
+    )
+}
+
+/// A self-heal in the modern suffix layout; 400 of the 1000 points overheat.
+fn spell_heal(at_ms: i64) -> String {
+    line(
+        at_ms,
+        &format!(
+            "SPELL_HEAL,{PLAYER_GUID},\"{PLAYER_NAME}\",{SELF_FLAGS},0x0,{PLAYER_GUID},\"{PLAYER_NAME}\",\
+             {SELF_FLAGS},0x0,2061,\"Flash Heal\",0x2,{PLAYER_GUID},0000000000000000,500,500,0,0,0,0,0,\
+             0,0,0,0,0,0,0,0,1000,600,400,0,1"
+        ),
+    )
+}
+
 // --- Scenarios ---
 
 #[test]
@@ -359,6 +390,7 @@ fn automatic_raid_completes_and_survives_a_restart() {
     assert_eq!(active.category, Category::Raids);
 
     harness.emit_artifacts(true);
+    harness.log(&[spell_damage(start_ms + 250), spell_heal(start_ms + 300)]);
     harness.log(&[player_death(start_ms + 500)]);
     harness.log(&[raid_end(now_unix_ms(), true)]);
     harness.pump(|snapshot| !snapshot.entries.is_empty());
@@ -384,6 +416,12 @@ fn automatic_raid_completes_and_survives_a_restart() {
     // The intermediates were consumed by finalization.
     assert!(read_dir_count(&harness.capture_root.join("replay")) == 0);
     assert!(read_dir_count(&harness.capture_root.join("regular")) == 0);
+    // The spell events survived parsing and aggregation into exactly one
+    // fight of effective damage and healing.
+    let fights = &entry.meter.fights;
+    assert_eq!(fights.len(), 1, "expected exactly one meter fight");
+    assert_eq!(meter_total(&fights[0], MeterMetric::Damage), 1_500);
+    assert_eq!(meter_total(&fights[0], MeterMetric::Healing), 600);
 
     // Tag and protect go through the real sidecar.
     harness.send(Command::SetTag {
@@ -419,6 +457,12 @@ fn automatic_raid_completes_and_survives_a_restart() {
         read_dir_count(&library.join(RECOVERY_DIR)) > 0,
         "nothing was quarantined"
     );
+
+    // The rescanned sidecar carries the same aggregated fight.
+    let fights = &restarted.latest.entries[0].meter.fights;
+    assert_eq!(fights.len(), 1, "meter fights did not survive the restart");
+    assert_eq!(meter_total(&fights[0], MeterMetric::Damage), 1_500);
+    assert_eq!(meter_total(&fights[0], MeterMetric::Healing), 600);
 
     let mut restarted = restarted;
     let id = restarted.latest.entries[0].id.clone();
@@ -750,6 +794,17 @@ fn production_handle_starts_and_shuts_down() {
     );
     assert!(handle.send(Command::Disarm));
     handle.shutdown();
+}
+
+/// Actor totals derive structurally from the spell entries.
+fn meter_total(fight: &MeterFight, metric: MeterMetric) -> u64 {
+    fight
+        .actors
+        .iter()
+        .flat_map(|actor| &actor.spells)
+        .filter(|entry| entry.metric == metric)
+        .map(|entry| entry.amount)
+        .sum()
 }
 
 fn read_dir_count(path: &Path) -> usize {

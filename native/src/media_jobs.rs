@@ -20,8 +20,8 @@ use uuid::Uuid;
 
 use crate::activity::RecordingDraft;
 use crate::domain::{
-    ActivityDetails, Category, LibraryEntry, MediaFacts, RecordingId, TimelineItem, TimelineShape,
-    WorkKind, WorkProgress,
+    ActivityDetails, Category, LibraryEntry, MediaFacts, MeterData, RecordingId, TimelineItem,
+    TimelineShape, WorkKind, WorkProgress,
 };
 use crate::parser::ParseTimeContext;
 use crate::process;
@@ -466,6 +466,8 @@ impl MediaWorker {
             },
             timeline: clip_timeline(&source.timeline, start_ms, end_ms),
             media: source.media.clone(),
+            // Pre-aggregated fights cannot be re-cut to an arbitrary range.
+            meter: MeterData::default(),
         };
 
         self.storage
@@ -912,7 +914,10 @@ mod tests {
     use std::sync::mpsc::{Sender, sync_channel};
     use std::thread;
 
-    use crate::domain::{Codec, GameFlavor, Outcome, TimelineKind};
+    use crate::domain::{
+        Codec, GameFlavor, MeterActor, MeterData, MeterEntry, MeterFight, MeterMetric, Outcome,
+        TimelineKind,
+    };
     use crate::storage::SIDECAR_SCHEMA_VERSION;
 
     fn fake_ffmpeg() -> PathBuf {
@@ -1058,6 +1063,28 @@ mod tests {
                     codec: Some(Codec::H264),
                     has_content: true,
                 },
+                // Nonempty on purpose: a clip must never inherit it.
+                meter: MeterData {
+                    fights: vec![MeterFight {
+                        label: "Chrome King Gallywix".to_owned(),
+                        start_ms: 10_000,
+                        end_ms: 40_000,
+                        active_ms: 28_000,
+                        actors: vec![MeterActor {
+                            guid: "Player-1000-AAAA0001".to_owned(),
+                            name: "Testone".to_owned(),
+                            spells: vec![MeterEntry {
+                                metric: MeterMetric::Damage,
+                                key: "Smite".to_owned(),
+                                marker: 0,
+                                amount: 9_999,
+                                hits: 42,
+                                overheal: 0,
+                            }],
+                            targets: Vec::new(),
+                        }],
+                    }],
+                },
             }
         }
 
@@ -1118,6 +1145,8 @@ mod tests {
         assert_eq!(entry.category, Category::Clip);
         assert_eq!(entry.duration_ms, 25_000);
         assert!(entry.protected);
+        // The source has meter data; the clip must not inherit any of it.
+        assert_eq!(entry.meter, MeterData::default());
         assert_eq!(
             entry.details,
             ActivityDetails::Clip {
@@ -1207,6 +1236,7 @@ mod tests {
                 duration_ms: Some(85_000),
                 title: Some("Testone - Chrome King Gallywix [M] (Kill)".to_owned()),
                 activity_hash: Some("0f1e2d3c4b5a69788796a5b4c3d2e1f0".to_owned()),
+                meter: MeterData::default(),
             }),
             artifacts: CaptureArtifacts {
                 replay,

@@ -118,6 +118,63 @@ window.wr-light .wr-class-shaman { color: #005bb0; }
 window.wr-light .wr-class-warlock { color: #5a5bc2; }
 window.wr-light .wr-class-warrior { color: #7d5f36; }
 
+/* Damage meter overlay: dark translucent panel on the always-black player
+   area. The 13 fills deliberately mirror the dark class palette above: the
+   `wr-light` overrides only set `color`, but the meter's labels are always
+   white and its fills must not inherit light-theme text rules. */
+.wr-meter {
+  background-color: alpha(#000000, 0.55);
+  border-radius: 6px;
+  padding: 4px;
+}
+
+.wr-meter label {
+  color: #ffffff;
+}
+
+.wr-meter label.dim-label {
+  color: alpha(#ffffff, 0.55);
+}
+
+.wr-meter-header button {
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0 4px;
+}
+
+.wr-meter-header label {
+  font-size: 0.9em;
+  font-weight: 600;
+}
+
+.wr-meter-row {
+  padding: 0;
+  min-height: 20px;
+  border-radius: 4px;
+}
+
+.wr-meter-fill trough {
+  background-color: alpha(#ffffff, 0.06);
+}
+
+.wr-meter-fill progress {
+  min-height: 20px;
+}
+
+.wr-meter-fill.wr-class-death-knight progress { background-color: alpha(#c41e3a, 0.55); }
+.wr-meter-fill.wr-class-demon-hunter progress { background-color: alpha(#a330c9, 0.55); }
+.wr-meter-fill.wr-class-druid progress { background-color: alpha(#ff7c0a, 0.55); }
+.wr-meter-fill.wr-class-evoker progress { background-color: alpha(#33937f, 0.55); }
+.wr-meter-fill.wr-class-hunter progress { background-color: alpha(#aad372, 0.55); }
+.wr-meter-fill.wr-class-mage progress { background-color: alpha(#3fc7eb, 0.55); }
+.wr-meter-fill.wr-class-monk progress { background-color: alpha(#00ff98, 0.55); }
+.wr-meter-fill.wr-class-paladin progress { background-color: alpha(#f48cba, 0.55); }
+.wr-meter-fill.wr-class-priest progress { background-color: alpha(#ffffff, 0.55); }
+.wr-meter-fill.wr-class-rogue progress { background-color: alpha(#fff468, 0.55); }
+.wr-meter-fill.wr-class-shaman progress { background-color: alpha(#0070dd, 0.55); }
+.wr-meter-fill.wr-class-warlock progress { background-color: alpha(#8788ee, 0.55); }
+.wr-meter-fill.wr-class-warrior progress { background-color: alpha(#c69b6d, 0.55); }
+
 /* Combat seek track: fixed dark geometry inside the black player area. */
 .wr-timeline {
   min-height: 26px;

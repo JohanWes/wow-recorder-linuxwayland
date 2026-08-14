@@ -29,8 +29,8 @@ use crate::config::{
 };
 use crate::domain::{
     ActivityDetails, Category, CorrelatedActivity, DeathMarkerVisibility, GameFlavor, LibraryEntry,
-    MarkerVisibility, MediaFacts, Outcome, Problem, RecorderStatus, RecordingId, RecoveryAction,
-    StorageLimit, WorkKind, WorkProgress,
+    MarkerVisibility, MediaFacts, MeterData, Outcome, Problem, RecorderStatus, RecordingId,
+    RecoveryAction, StorageLimit, WorkKind, WorkProgress,
 };
 use crate::logwatch::LogTailer;
 use crate::media_jobs::{MediaConfig, MediaControl, MediaEvent, MediaJob, MediaWorker};
@@ -993,6 +993,7 @@ impl Coordinator {
             duration_ms: None,
             title: Some("Manual recording".to_owned()),
             activity_hash: None,
+            meter: MeterData::default(),
         };
         self.start_capture(draft, 0, RecordingMode::Manual);
     }
@@ -2022,6 +2023,7 @@ fn test_events(
                 target_name: NAME.to_owned(),
                 target_flags: SELF_FLAGS,
                 spell_name: "Test Recording".to_owned(),
+                owner_guid: None,
             },
             start_ms,
         ),

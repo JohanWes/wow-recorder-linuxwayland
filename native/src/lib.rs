@@ -10,6 +10,7 @@ pub mod coordinator;
 pub mod domain;
 pub mod logwatch;
 pub mod media_jobs;
+pub mod meter;
 pub mod parser;
 pub mod process;
 pub mod recorder;

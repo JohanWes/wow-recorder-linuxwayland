@@ -68,6 +68,9 @@ pub enum CombatEvent {
         target_name: String,
         target_flags: u64,
         spell_name: String,
+        /// Source-side `ownerGUID` when the advanced block identifies the
+        /// source unit, used for pet-to-owner attribution.
+        owner_guid: Option<String>,
     },
     UnitDied {
         guid: String,
@@ -75,10 +78,58 @@ pub enum CombatEvent {
         flags: u64,
         unconscious: bool,
     },
-    BossHealth {
-        name: String,
-        current: u64,
-        maximum: u64,
+    Damage {
+        source_guid: String,
+        source_name: String,
+        source_flags: u64,
+        /// Source-side `ownerGUID` from `SWING_DAMAGE` swings.
+        source_owner_guid: Option<String>,
+        dest_name: String,
+        dest_flags: u64,
+        dest_raid_marker: u8,
+        /// "Melee" for swings, otherwise the spell name.
+        spell_name: String,
+        amount: u64,
+        /// Destination HP, trusted only when the advanced block's infoGUID
+        /// names the destination.
+        dest_current_hp: Option<u64>,
+        dest_max_hp: Option<u64>,
+    },
+    Heal {
+        source_guid: String,
+        source_name: String,
+        source_flags: u64,
+        dest_name: String,
+        dest_flags: u64,
+        dest_raid_marker: u8,
+        spell_name: String,
+        amount: u64,
+        overheal: u64,
+    },
+    Interrupt {
+        source_guid: String,
+        source_name: String,
+        source_flags: u64,
+        dest_name: String,
+        dest_flags: u64,
+        dest_raid_marker: u8,
+        /// The interrupted spell name.
+        spell_name: String,
+    },
+    Dispel {
+        source_guid: String,
+        source_name: String,
+        source_flags: u64,
+        dest_name: String,
+        dest_flags: u64,
+        dest_raid_marker: u8,
+        /// The dispelled or stolen spell name.
+        spell_name: String,
+    },
+    Summon {
+        source_guid: String,
+        source_name: String,
+        pet_guid: String,
     },
     BossCast {
         started: bool,
@@ -101,6 +152,8 @@ pub fn is_bloodlust_spell(spell_id: u32) -> bool {
 pub struct ParseTimeContext {
     pub year: i32,
     pub utc_offset_minutes: i32,
+    /// Advanced-block arity selected by the log's COMBAT_LOG_VERSION.
+    advanced_block_fields: usize,
 }
 
 impl ParseTimeContext {
@@ -108,6 +161,20 @@ impl ParseTimeContext {
         Self {
             year,
             utc_offset_minutes,
+            advanced_block_fields: LEGACY_ADVANCED_BLOCK_FIELDS,
+        }
+    }
+
+    /// Applies a COMBAT_LOG_VERSION value: version 22 and newer carry a
+    /// 19-field advanced block, older or unknown versions the legacy 17.
+    pub const fn with_combat_log_version(self, version: u32) -> Self {
+        Self {
+            advanced_block_fields: if version >= 22 {
+                V22_ADVANCED_BLOCK_FIELDS
+            } else {
+                LEGACY_ADVANCED_BLOCK_FIELDS
+            },
+            ..self
         }
     }
 }
@@ -198,26 +265,64 @@ pub fn parse_line(
             flags: hexadecimal(&fields, 7)?,
             unconscious: optional_number::<u8>(&fields, 9)?.is_some_and(|value| value != 0),
         },
-        "SPELL_AURA_APPLIED" | "SPELL_CAST_SUCCESS" => CombatEvent::PlayerObserved {
-            kind: if event_name == "SPELL_AURA_APPLIED" {
-                PlayerObservationKind::AuraApplied
-            } else {
-                PlayerObservationKind::CastSucceeded
-            },
-            spell_id: number(&fields, 9)?,
-            guid: text(&fields, 1)?.to_owned(),
-            name: text(&fields, 2)?.to_owned(),
-            flags: hexadecimal(&fields, 3)?,
-            target_guid: text(&fields, 5)?.to_owned(),
-            target_name: text(&fields, 6)?.to_owned(),
-            target_flags: hexadecimal(&fields, 7)?,
-            spell_name: text(&fields, 10)?.to_owned(),
-        },
-        "SPELL_DAMAGE" => CombatEvent::BossHealth {
-            name: text(&fields, 6)?.to_owned(),
-            current: number(&fields, 14)?,
-            maximum: number(&fields, 15)?,
-        },
+        "SPELL_AURA_APPLIED" | "SPELL_CAST_SUCCESS" => {
+            let guid = text(&fields, 1)?.to_owned();
+            let owner_guid = fields
+                .get(12)
+                .filter(|info_guid| info_guid.as_str() == guid)
+                .and_then(|_| fields.get(13))
+                .and_then(|owner| guid_or_none(owner).map(str::to_owned));
+            CombatEvent::PlayerObserved {
+                kind: if event_name == "SPELL_AURA_APPLIED" {
+                    PlayerObservationKind::AuraApplied
+                } else {
+                    PlayerObservationKind::CastSucceeded
+                },
+                spell_id: number(&fields, 9)?,
+                guid,
+                name: text(&fields, 2)?.to_owned(),
+                flags: hexadecimal(&fields, 3)?,
+                target_guid: text(&fields, 5)?.to_owned(),
+                target_name: text(&fields, 6)?.to_owned(),
+                target_flags: hexadecimal(&fields, 7)?,
+                spell_name: text(&fields, 10)?.to_owned(),
+                owner_guid,
+            }
+        }
+        "SWING_DAMAGE"
+        | "RANGE_DAMAGE"
+        | "SPELL_DAMAGE"
+        | "SPELL_PERIODIC_DAMAGE"
+        | "DAMAGE_SHIELD" => {
+            let Some(event) = parse_damage(event_name, &fields, context)? else {
+                return Ok(None);
+            };
+            event
+        }
+        "SPELL_HEAL" | "SPELL_PERIODIC_HEAL" => {
+            let Some(event) = parse_heal(&fields, context)? else {
+                return Ok(None);
+            };
+            event
+        }
+        "SPELL_INTERRUPT" => {
+            let Some(event) = parse_utility(&fields, event_name, context) else {
+                return Ok(None);
+            };
+            event
+        }
+        "SPELL_DISPEL" | "SPELL_STOLEN" => {
+            let Some(event) = parse_utility(&fields, event_name, context) else {
+                return Ok(None);
+            };
+            event
+        }
+        "SPELL_SUMMON" => {
+            let Some(event) = parse_summon(&fields) else {
+                return Ok(None);
+            };
+            event
+        }
         "SPELL_CAST_START" => CombatEvent::BossCast {
             started: true,
             source_name: text(&fields, 2)?.to_owned(),
@@ -233,9 +338,224 @@ pub fn parse_line(
     }))
 }
 
+const BASE_UNIT_FIELDS: usize = 8;
+/// Advanced-block arity carried by logs older than COMBAT_LOG_VERSION 22.
+const LEGACY_ADVANCED_BLOCK_FIELDS: usize = 17;
+/// COMBAT_LOG_VERSION 22 (Midnight) widened the advanced block by two fields.
+const V22_ADVANCED_BLOCK_FIELDS: usize = 19;
+const EMPTY_GUID: &str = "0000000000000000";
+
+/// A located advanced block: where it starts, whether the infoGUID rule
+/// found one, and where the event suffix begins.
+struct AdvancedBlock {
+    start: usize,
+    present: bool,
+    suffix: usize,
+}
+
+/// The meter suffix starts after the eight base unit fields plus the advanced
+/// block when present. The block is detected by the GUID shape of its
+/// infoGUID field at the event-specific boundary, never by total field count;
+/// its arity follows the log's COMBAT_LOG_VERSION.
+fn advanced_block(event_name: &str, fields: &[String], context: ParseTimeContext) -> AdvancedBlock {
+    let prefix_len = if event_name == "SWING_DAMAGE" { 0 } else { 3 };
+    let start = 1 + BASE_UNIT_FIELDS + prefix_len;
+    let present = fields
+        .get(start)
+        .is_some_and(|value| value == EMPTY_GUID || value.contains('-'));
+    let suffix = if present {
+        start + context.advanced_block_fields
+    } else {
+        start
+    };
+    AdvancedBlock {
+        start,
+        present,
+        suffix,
+    }
+}
+
+/// A real unit GUID, excluding the empty/nil placeholders.
+fn guid_or_none(value: &str) -> Option<&str> {
+    (!value.is_empty() && value != EMPTY_GUID && value != "nil" && value != "0").then_some(value)
+}
+
+/// Lenient numeric field read: missing or unparseable fields read as `None`
+/// instead of a parser diagnostic (advanced logging may be off).
+fn lenient_number<T: std::str::FromStr>(fields: &[String], index: usize) -> Option<T> {
+    fields
+        .get(index)
+        .filter(|value| !value.is_empty() && value.as_str() != "nil")
+        .and_then(|value| value.parse().ok())
+}
+
+fn lenient_hex(fields: &[String], index: usize) -> Option<u64> {
+    fields
+        .get(index)
+        .and_then(|value| u64::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).ok())
+}
+
+fn parse_damage(
+    event_name: &str,
+    fields: &[String],
+    context: ParseTimeContext,
+) -> Result<Option<CombatEvent>, ParseFailure> {
+    let block = advanced_block(event_name, fields, context);
+    let amount = match lenient_number::<u64>(fields, block.suffix) {
+        Some(amount) => amount,
+        // A detected advanced block promises a readable amount; a missing or
+        // unparseable one means the line is truncated, not that logging is off.
+        None if block.present => return Err(ParseFailure::MalformedRetainedEvent),
+        None => return Ok(None),
+    };
+    let event = (|| {
+        let source_guid = fields.get(1)?.as_str();
+        let dest_guid = fields.get(5)?.as_str();
+        // The advanced block describes the destination for spell damage and the
+        // source for swings, so destination HP is only trusted when infoGUID
+        // names the destination.
+        let (dest_current_hp, dest_max_hp) = if block.present
+            && fields
+                .get(block.start)
+                .is_some_and(|info_guid| info_guid == dest_guid)
+        {
+            (
+                lenient_number(fields, block.start + 2),
+                lenient_number(fields, block.start + 3),
+            )
+        } else {
+            (None, None)
+        };
+        // SWING_DAMAGE's block names the source, so its ownerGUID is the
+        // swinging pet's owner.
+        let source_owner_guid = if event_name == "SWING_DAMAGE"
+            && block.present
+            && fields
+                .get(block.start)
+                .is_some_and(|info_guid| info_guid == source_guid)
+        {
+            fields
+                .get(block.start + 1)
+                .and_then(|owner| guid_or_none(owner).map(str::to_owned))
+        } else {
+            None
+        };
+        Some(CombatEvent::Damage {
+            source_guid: source_guid.to_owned(),
+            source_name: fields.get(2)?.as_str().to_owned(),
+            source_flags: lenient_hex(fields, 3)?,
+            source_owner_guid,
+            dest_name: fields.get(6)?.as_str().to_owned(),
+            dest_flags: lenient_hex(fields, 7)?,
+            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            spell_name: if event_name == "SWING_DAMAGE" {
+                "Melee".to_owned()
+            } else {
+                fields.get(10)?.as_str().to_owned()
+            },
+            amount,
+            dest_current_hp,
+            dest_max_hp,
+        })
+    })();
+    Ok(event)
+}
+
+fn parse_heal(
+    fields: &[String],
+    context: ParseTimeContext,
+) -> Result<Option<CombatEvent>, ParseFailure> {
+    let block = advanced_block("SPELL_HEAL", fields, context);
+    let amount = match lenient_number::<u64>(fields, block.suffix) {
+        Some(amount) => amount,
+        None if block.present => return Err(ParseFailure::MalformedRetainedEvent),
+        None => return Ok(None),
+    };
+    let event = (|| {
+        // Modern healing suffixes carry baseAmount at index 1, older layouts do
+        // not, so the overhealing index follows the suffix arity.
+        let overheal_index = block.suffix
+            + if fields.len() - block.suffix >= 5 {
+                2
+            } else {
+                1
+            };
+        let overheal = lenient_number::<u64>(fields, overheal_index).unwrap_or(0);
+        Some(CombatEvent::Heal {
+            source_guid: fields.get(1)?.as_str().to_owned(),
+            source_name: fields.get(2)?.as_str().to_owned(),
+            source_flags: lenient_hex(fields, 3)?,
+            dest_name: fields.get(6)?.as_str().to_owned(),
+            dest_flags: lenient_hex(fields, 7)?,
+            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            spell_name: fields.get(10)?.as_str().to_owned(),
+            amount,
+            overheal,
+        })
+    })();
+    Ok(event)
+}
+
+/// Interrupts and dispels carry the interrupted/dispelled spell as the second
+/// suffix parameter; no spell IDs are needed anywhere.
+fn parse_utility(
+    fields: &[String],
+    event_name: &str,
+    context: ParseTimeContext,
+) -> Option<CombatEvent> {
+    let block = advanced_block(event_name, fields, context);
+    let spell_name = fields
+        .get(block.suffix + 1)
+        .filter(|value| !value.is_empty() && value.as_str() != "nil")?;
+    let spell_name = spell_name.to_owned();
+    Some(if event_name == "SPELL_INTERRUPT" {
+        CombatEvent::Interrupt {
+            source_guid: fields.get(1)?.as_str().to_owned(),
+            source_name: fields.get(2)?.as_str().to_owned(),
+            source_flags: lenient_hex(fields, 3)?,
+            dest_name: fields.get(6)?.as_str().to_owned(),
+            dest_flags: lenient_hex(fields, 7)?,
+            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            spell_name,
+        }
+    } else {
+        CombatEvent::Dispel {
+            source_guid: fields.get(1)?.as_str().to_owned(),
+            source_name: fields.get(2)?.as_str().to_owned(),
+            source_flags: lenient_hex(fields, 3)?,
+            dest_name: fields.get(6)?.as_str().to_owned(),
+            dest_flags: lenient_hex(fields, 7)?,
+            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            spell_name,
+        }
+    })
+}
+
+fn parse_summon(fields: &[String]) -> Option<CombatEvent> {
+    Some(CombatEvent::Summon {
+        source_guid: fields.get(1)?.as_str().to_owned(),
+        source_name: fields.get(2)?.as_str().to_owned(),
+        pet_guid: fields.get(5)?.as_str().to_owned(),
+    })
+}
+
 pub(crate) fn event_name(line: &str) -> Option<&str> {
     let payload = line.split_once("  ")?.1;
     Some(payload.split_once(',').map_or(payload, |(name, _)| name))
+}
+
+/// The integer `COMBAT_LOG_VERSION` value of a complete header line, with or
+/// without the leading timestamp real clients write. Event lines and headers
+/// without a readable version return `None`; a header is never a retained
+/// event itself.
+pub(crate) fn combat_log_version(line: &str) -> Option<u32> {
+    let payload = line.split_once("  ").map_or(line, |(_, rest)| rest);
+    payload
+        .strip_prefix("COMBAT_LOG_VERSION,")?
+        .split(',')
+        .next()?
+        .parse()
+        .ok()
 }
 
 fn is_retained(name: &str) -> bool {
@@ -253,7 +573,17 @@ fn is_retained(name: &str) -> bool {
             | "SPELL_AURA_APPLIED"
             | "SPELL_CAST_START"
             | "SPELL_CAST_SUCCESS"
+            | "SWING_DAMAGE"
+            | "RANGE_DAMAGE"
             | "SPELL_DAMAGE"
+            | "SPELL_PERIODIC_DAMAGE"
+            | "DAMAGE_SHIELD"
+            | "SPELL_HEAL"
+            | "SPELL_PERIODIC_HEAL"
+            | "SPELL_INTERRUPT"
+            | "SPELL_DISPEL"
+            | "SPELL_STOLEN"
+            | "SPELL_SUMMON"
     )
 }
 
@@ -437,6 +767,8 @@ mod tests {
     use super::*;
 
     const CONTEXT: ParseTimeContext = ParseTimeContext::new(2026, 120);
+    const V22_CONTEXT: ParseTimeContext =
+        ParseTimeContext::new(2026, 120).with_combat_log_version(22);
 
     #[test]
     fn parses_every_retained_event_shape_in_order() {
@@ -451,7 +783,7 @@ mod tests {
             "4/9 19:27:20.200  UNIT_DIED,0,nil,0x0,0x0,Player-0-AAAA,\"Player One\",0x511,0x0,0",
             "4/9 19:27:21.200  COMBATANT_INFO,Player-0-AAAA,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1234,256,[]",
             "4/9 19:27:22.200  SPELL_AURA_APPLIED,Player-0-AAAA,\"Player One\",0x511,0x0,Player-0-BBBB,\"Player Two\",0x512,0x0,123,\"Aura, Tested\",0x1",
-            "4/9 19:27:23.200  SPELL_DAMAGE,Player-0-AAAA,\"Player One\",0x511,0x0,Creature-0-BOSS,\"Training Boss\",0x10a48,0x0,123,Hit,0x1,Creature-0-BOSS,0,400,1000",
+            "4/9 19:27:23.200  SPELL_DAMAGE,Player-0-AAAA,\"Player One\",0x511,0x0,Creature-0-BOSS,\"Training Boss\",0x10a48,0x0,123,\"Smite\",0x2,Creature-0-BOSS,0000000000000000,105,152,0,0,189,2084,0,0,0,0,0,0,0,0,0,46,0,2,0,0,0,1,0,0,0,0.000,1,1",
             "4/9 19:27:24.200  SPELL_CAST_START,Creature-0-BOSS,\"Training Boss\",0x10a48,0x0,0,nil,0x0,0x0,456,\"Rebirth\",0x1",
         ];
         let events = fixture
@@ -524,11 +856,20 @@ mod tests {
                 target_name: "Player Two".into(),
                 target_flags: 0x512,
                 spell_name: "Aura, Tested".into(),
+                owner_guid: None,
             },
-            CombatEvent::BossHealth {
-                name: "Training Boss".into(),
-                current: 400,
-                maximum: 1000,
+            CombatEvent::Damage {
+                source_guid: "Player-0-AAAA".into(),
+                source_name: "Player One".into(),
+                source_flags: 0x511,
+                source_owner_guid: None,
+                dest_name: "Training Boss".into(),
+                dest_flags: 0x10a48,
+                dest_raid_marker: 0,
+                spell_name: "Smite".into(),
+                amount: 46,
+                dest_current_hp: Some(105),
+                dest_max_hp: Some(152),
             },
             CombatEvent::BossCast {
                 started: true,
@@ -608,6 +949,7 @@ mod tests {
                 target_name: "Fighter-Two".into(),
                 target_flags: 0x548,
                 spell_name: "Mortal Strike".into(),
+                owner_guid: None,
             },
             CombatEvent::UnitDied {
                 guid: "Player-0-RIVAL".into(),
@@ -674,6 +1016,7 @@ mod tests {
                 target_name: "Clockwork Keeper".into(),
                 target_flags: 0x10a48,
                 spell_name: "Storm Strike".into(),
+                owner_guid: None,
             },
             CombatEvent::UnitDied {
                 guid: "Player-0-ERA".into(),
@@ -836,7 +1179,7 @@ mod tests {
             parse_line(
                 GameFlavor::Retail,
                 CONTEXT,
-                "4/9 19:27:13.200  SPELL_HEAL,irrelevant"
+                "4/9 19:27:13.200  SPELL_BUILDING_DAMAGE,irrelevant"
             ),
             Ok(None)
         );
@@ -844,12 +1187,329 @@ mod tests {
             parse_line(
                 GameFlavor::Retail,
                 CONTEXT,
-                "not a timestamp  SPELL_HEAL,\"unterminated"
+                "not a timestamp  SPELL_BUILDING_DAMAGE,\"unterminated"
             ),
             Ok(None)
         );
         assert_eq!(
             parse_line(GameFlavor::Retail, CONTEXT, "irrelevant"),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn meter_events_without_a_readable_suffix_are_ignored() {
+        // Advanced logging off: the amount field is unreadable, so the line is
+        // skipped instead of diagnosed (the app warns about ACL separately).
+        assert_eq!(
+            parse_line(
+                GameFlavor::Retail,
+                CONTEXT,
+                "4/9 19:27:13.200  SPELL_DAMAGE,Player-0-A,\"A\",0x511,0x0,Creature-0-B,\"B\",0x10a48,0x0,123,\"Smite\",0x2"
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            parse_line(
+                GameFlavor::Retail,
+                CONTEXT,
+                "4/9 19:27:13.200  SPELL_HEAL,irrelevant"
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn real_acl_spell_damage_carries_amount_and_destination_hp() {
+        let line = "5/24 20:26:10.911  SPELL_DAMAGE,Player-1322-07763A7B,\"Xiaohuli\",0x511,0x0,Creature-0-3013-0-11406-74284-0000266503,\"Cutpurse\",0x10a48,0x0,585,\"Smite\",0x2,Creature-0-3013-0-11406-74284-0000266503,0000000000000000,105,152,0,0,189,2084,0,0,0,0,0,0,0,0,0,46,0,2,0,0,0,1,0,0,0,0.000,1,1";
+        let parsed = parse_line(GameFlavor::Retail, CONTEXT, line)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.event,
+            CombatEvent::Damage {
+                source_guid: "Player-1322-07763A7B".into(),
+                source_name: "Xiaohuli".into(),
+                source_flags: 0x511,
+                source_owner_guid: None,
+                dest_name: "Cutpurse".into(),
+                dest_flags: 0x10a48,
+                dest_raid_marker: 0,
+                spell_name: "Smite".into(),
+                amount: 46,
+                dest_current_hp: Some(105),
+                dest_max_hp: Some(152),
+            }
+        );
+    }
+
+    #[test]
+    fn modern_and_old_heal_suffixes_pick_the_right_overheal_field() {
+        let modern = "4/9 19:27:13.200  SPELL_HEAL,Player-0-A,\"Healer\",0x511,0x0,Player-0-B,\"Tank\",0x512,0x0,2061,\"Flash Heal\",0x2,Player-0-B,0000000000000000,500,500,0,0,0,0,0,0,0,0,0,0,0,0,0,1000,600,400,0,1";
+        let parsed = parse_line(GameFlavor::Retail, CONTEXT, modern)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.event,
+            CombatEvent::Heal {
+                source_guid: "Player-0-A".into(),
+                source_name: "Healer".into(),
+                source_flags: 0x511,
+                dest_name: "Tank".into(),
+                dest_flags: 0x512,
+                dest_raid_marker: 0,
+                spell_name: "Flash Heal".into(),
+                amount: 1000,
+                overheal: 400,
+            }
+        );
+        let old = "4/9 19:27:13.200  SPELL_HEAL,Player-0-A,\"Healer\",0x511,0x0,Player-0-B,\"Tank\",0x512,0x0,2061,\"Flash Heal\",0x2,300,50,2,1";
+        let parsed = parse_line(GameFlavor::Retail, CONTEXT, old)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.event,
+            CombatEvent::Heal {
+                source_guid: "Player-0-A".into(),
+                source_name: "Healer".into(),
+                source_flags: 0x511,
+                dest_name: "Tank".into(),
+                dest_flags: 0x512,
+                dest_raid_marker: 0,
+                spell_name: "Flash Heal".into(),
+                amount: 300,
+                overheal: 50,
+            }
+        );
+    }
+
+    #[test]
+    fn swing_damage_carries_the_source_owner() {
+        let line = "4/9 19:27:13.200  SWING_DAMAGE,Pet-0-1,\"Imp\",0x2114,0x0,Creature-0-B,\"Training Boss\",0x10a48,0x0,Pet-0-1,Player-0-OWNER,500,1000,0,0,0,0,0,0,0,0,0,0,0,0,0,120,0,1,0,0,0,0,0,0,1";
+        let parsed = parse_line(GameFlavor::Retail, CONTEXT, line)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.event,
+            CombatEvent::Damage {
+                source_guid: "Pet-0-1".into(),
+                source_name: "Imp".into(),
+                source_flags: 0x2114,
+                source_owner_guid: Some("Player-0-OWNER".into()),
+                dest_name: "Training Boss".into(),
+                dest_flags: 0x10a48,
+                dest_raid_marker: 0,
+                spell_name: "Melee".into(),
+                amount: 120,
+                dest_current_hp: None,
+                dest_max_hp: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cast_success_carries_the_source_owner_when_the_block_names_the_source() {
+        let line = "4/9 19:27:13.200  SPELL_CAST_SUCCESS,Pet-0-1,\"Imp\",0x2114,0x0,Creature-0-B,\"Boss\",0x10a48,0x0,688,\"Firebolt\",0x4,Pet-0-1,Player-0-OWNER,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0";
+        let parsed = parse_line(GameFlavor::Retail, CONTEXT, line)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            &parsed.event,
+            CombatEvent::PlayerObserved {
+                kind: PlayerObservationKind::CastSucceeded,
+                guid,
+                owner_guid: Some(owner),
+                ..
+            } if guid == "Pet-0-1" && owner == "Player-0-OWNER"
+        ));
+    }
+
+    #[test]
+    fn interrupt_dispel_and_summon_parse_basic_fields() {
+        let interrupt = "4/9 19:27:13.200  SPELL_INTERRUPT,Player-0-A,\"Rogue\",0x511,0x0,Creature-0-B,\"Caster\",0x10a48,0x0,1766,\"Kick\",0x1,133,\"Fireball\",0x4";
+        let parsed = parse_line(GameFlavor::Retail, CONTEXT, interrupt)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.event,
+            CombatEvent::Interrupt {
+                source_guid: "Player-0-A".into(),
+                source_name: "Rogue".into(),
+                source_flags: 0x511,
+                dest_name: "Caster".into(),
+                dest_flags: 0x10a48,
+                dest_raid_marker: 0,
+                spell_name: "Fireball".into(),
+            }
+        );
+
+        let dispel = "4/9 19:27:13.200  SPELL_DISPEL,Player-0-A,\"Priest\",0x511,0x0,Player-0-B,\"Victim\",0x548,0x0,528,\"Dispel Magic\",0x1,1243,\"Power Word: Fortitude\",0x2,BUFF";
+        let parsed = parse_line(GameFlavor::Retail, CONTEXT, dispel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.event,
+            CombatEvent::Dispel {
+                source_guid: "Player-0-A".into(),
+                source_name: "Priest".into(),
+                source_flags: 0x511,
+                dest_name: "Victim".into(),
+                dest_flags: 0x548,
+                dest_raid_marker: 0,
+                spell_name: "Power Word: Fortitude".into(),
+            }
+        );
+
+        let summon = "4/9 19:27:13.200  SPELL_SUMMON,Player-0-A,\"Warlock\",0x511,0x0,Pet-0-IMP,\"Korlok\",0x2114,0x0,688,\"Summon Imp\",0x20";
+        let parsed = parse_line(GameFlavor::Retail, CONTEXT, summon)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.event,
+            CombatEvent::Summon {
+                source_guid: "Player-0-A".into(),
+                source_name: "Warlock".into(),
+                pet_guid: "Pet-0-IMP".into(),
+            }
+        );
+    }
+    #[test]
+    fn combat_log_version_maps_the_advanced_block_arity() {
+        let base = ParseTimeContext::new(2026, 0);
+        assert_eq!(base.advanced_block_fields, 17);
+        assert_eq!(base.with_combat_log_version(21).advanced_block_fields, 17);
+        assert_eq!(base.with_combat_log_version(22).advanced_block_fields, 19);
+        assert_eq!(base.with_combat_log_version(23).advanced_block_fields, 19);
+    }
+
+    #[test]
+    fn combat_log_version_reads_only_complete_header_values() {
+        assert_eq!(
+            combat_log_version(
+                "8/11/2026 18:28:29.3992  COMBAT_LOG_VERSION,22,ADVANCED_LOG_ENABLED,1,BUILD_VERSION,12.1.0,PROJECT_ID,1"
+            ),
+            Some(22)
+        );
+        assert_eq!(
+            combat_log_version(
+                "8/11/2026 18:28:29.3992  COMBAT_LOG_VERSION,9,ADVANCED_LOG_ENABLED,1,BUILD_VERSION,11.0.7,PROJECT_ID,1"
+            ),
+            Some(9)
+        );
+        // Bare headers from older clients or hand-written fixtures also work.
+        assert_eq!(
+            combat_log_version(
+                "COMBAT_LOG_VERSION,22,ADVANCED_LOG_ENABLED,1,BUILD_VERSION,12.0.0,PROJECT_ID,1"
+            ),
+            Some(22)
+        );
+        assert_eq!(
+            combat_log_version("COMBAT_LOG_VERSION,garbage,ADVANCED_LOG_ENABLED,1"),
+            None
+        );
+        assert_eq!(combat_log_version("COMBAT_LOG_VERSION"), None);
+        assert_eq!(
+            combat_log_version(
+                "4/9 19:27:13.200  SPELL_DAMAGE,Player-0-A,\"A\",0x511,0x0,Creature-0-B,\"B\",0x10a48,0x0,123,\"Smite\",0x2"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn version_22_spell_damage_amount_lives_at_the_wider_suffix() {
+        let line = "5/24 20:26:10.911  SPELL_DAMAGE,Player-1322-07763A7B,\"Xiaohuli\",0x511,0x0,Creature-0-3013-0-11406-74284-0000266503,\"Cutpurse\",0x10a48,0x0,585,\"Smite\",0x2,Creature-0-3013-0-11406-74284-0000266503,0000000000000000,105,152,0,0,189,2084,0,0,0,250000,250000,0,0,0,0,0,0,46,0,2,0,0,0,1,0,0,0,0.000,1,1";
+        let parsed = parse_line(GameFlavor::Retail, V22_CONTEXT, line)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.event,
+            CombatEvent::Damage {
+                source_guid: "Player-1322-07763A7B".into(),
+                source_name: "Xiaohuli".into(),
+                source_flags: 0x511,
+                source_owner_guid: None,
+                dest_name: "Cutpurse".into(),
+                dest_flags: 0x10a48,
+                dest_raid_marker: 0,
+                spell_name: "Smite".into(),
+                amount: 46,
+                dest_current_hp: Some(105),
+                dest_max_hp: Some(152),
+            }
+        );
+    }
+
+    #[test]
+    fn version_22_swing_damage_amount_and_source_owner_live_at_the_wider_suffix() {
+        let line = "4/9 19:27:13.200  SWING_DAMAGE,Pet-0-1,\"Imp\",0x2114,0x0,Creature-0-B,\"Training Boss\",0x10a48,0x0,Pet-0-1,Player-0-OWNER,500,1000,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,120,0,1,0,0,0,0,0,0,1";
+        let parsed = parse_line(GameFlavor::Retail, V22_CONTEXT, line)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.event,
+            CombatEvent::Damage {
+                source_guid: "Pet-0-1".into(),
+                source_name: "Imp".into(),
+                source_flags: 0x2114,
+                source_owner_guid: Some("Player-0-OWNER".into()),
+                dest_name: "Training Boss".into(),
+                dest_flags: 0x10a48,
+                dest_raid_marker: 0,
+                spell_name: "Melee".into(),
+                amount: 120,
+                dest_current_hp: None,
+                dest_max_hp: None,
+            }
+        );
+    }
+
+    #[test]
+    fn version_22_spell_heal_amount_and_overheal_live_at_the_wider_suffix() {
+        let line = "4/9 19:27:13.200  SPELL_HEAL,Player-0-A,\"Healer\",0x511,0x0,Player-0-B,\"Tank\",0x512,0x0,2061,\"Flash Heal\",0x2,Player-0-B,0000000000000000,500,500,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1000,600,400,0,1";
+        let parsed = parse_line(GameFlavor::Retail, V22_CONTEXT, line)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.event,
+            CombatEvent::Heal {
+                source_guid: "Player-0-A".into(),
+                source_name: "Healer".into(),
+                source_flags: 0x511,
+                dest_name: "Tank".into(),
+                dest_flags: 0x512,
+                dest_raid_marker: 0,
+                spell_name: "Flash Heal".into(),
+                amount: 1000,
+                overheal: 400,
+            }
+        );
+    }
+
+    #[test]
+    fn a_detected_block_with_an_unreadable_amount_is_malformed() {
+        let prefix = "4/9 19:27:13.200  SPELL_DAMAGE,Player-0-A,\"A\",0x511,0x0,Creature-0-B,\"B\",0x10a48,0x0,123,\"Smite\",0x2,Creature-0-B,0000000000000000,100,200,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0";
+        // The 19-field block is complete but the amount suffix is missing.
+        assert_eq!(
+            parse_line(GameFlavor::Retail, V22_CONTEXT, prefix),
+            Err(ParseFailure::MalformedRetainedEvent)
+        );
+        // Same for an unparseable amount; without a block the line is still
+        // merely ignored.
+        assert_eq!(
+            parse_line(
+                GameFlavor::Retail,
+                V22_CONTEXT,
+                &format!("{prefix},overkill!")
+            ),
+            Err(ParseFailure::MalformedRetainedEvent)
+        );
+        assert_eq!(
+            parse_line(
+                GameFlavor::Retail,
+                CONTEXT,
+                "4/9 19:27:13.200  SPELL_DAMAGE,Player-0-A,\"A\",0x511,0x0,Creature-0-B,\"B\",0x10a48,0x0,123,\"Smite\",0x2"
+            ),
             Ok(None)
         );
     }
