@@ -545,7 +545,9 @@ fn handle_event(
                 handle_boss_health(state, rules, dest_name, *current, *maximum);
             }
             if let Some(active) = state.active.as_mut() {
-                if let Some(owner) = source_owner_guid {
+                if is_player_controlled_friendly(*source_flags)
+                    && let Some(owner) = source_owner_guid
+                {
                     active.meter.record_owner(source_guid, owner, None);
                 }
                 active.meter.damage(
@@ -577,6 +579,30 @@ fn handle_event(
                     source_guid,
                     source_name,
                     *source_flags,
+                    dest_name,
+                    *dest_raid_marker,
+                    spell_name,
+                    *amount,
+                    *overheal,
+                    at_ms,
+                );
+            }
+        }
+        CombatEvent::Support {
+            metric,
+            supporter_guid,
+            source_guid,
+            dest_name,
+            dest_raid_marker,
+            spell_name,
+            amount,
+            overheal,
+        } => {
+            if let Some(active) = state.active.as_mut() {
+                active.meter.support(
+                    *metric,
+                    supporter_guid,
+                    source_guid,
                     dest_name,
                     *dest_raid_marker,
                     spell_name,
@@ -631,9 +657,12 @@ fn handle_event(
         CombatEvent::Summon {
             source_guid,
             source_name,
+            source_flags,
             pet_guid,
         } => {
-            if let Some(active) = state.active.as_mut() {
+            if is_player_controlled_friendly(*source_flags)
+                && let Some(active) = state.active.as_mut()
+            {
                 active
                     .meter
                     .record_owner(pet_guid, source_guid, Some(source_name));

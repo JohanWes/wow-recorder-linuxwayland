@@ -118,12 +118,12 @@ window.wr-light .wr-class-shaman { color: #005bb0; }
 window.wr-light .wr-class-warlock { color: #5a5bc2; }
 window.wr-light .wr-class-warrior { color: #7d5f36; }
 
-/* Damage meter overlay: dark translucent panel on the always-black player
-   area. The 13 fills deliberately mirror the dark class palette above: the
-   `wr-light` overrides only set `color`, but the meter's labels are always
-   white and its fills must not inherit light-theme text rules. */
+/* Damage meter overlay: solid black on the player area. The 13 fills
+   deliberately mirror the dark class palette above: the `wr-light` overrides
+   only set `color`, but the meter's labels are always white and its fills must
+   not inherit light-theme text rules. */
 .wr-meter {
-  background-color: alpha(#000000, 0.55);
+  background-color: #000000;
   border-radius: 6px;
   padding: 4px;
 }

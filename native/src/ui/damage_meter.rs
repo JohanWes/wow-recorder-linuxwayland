@@ -237,6 +237,7 @@ struct Inner {
     header: gtk4::Box,
     title: gtk4::Label,
     menu_button: gtk4::MenuButton,
+    context_menu: gtk4::PopoverMenu,
     content: gtk4::Box,
     scroller: gtk4::ScrolledWindow,
     grip: gtk4::Label,
@@ -296,6 +297,11 @@ impl DamageMeter {
         menu_button.add_css_class("flat");
         menu_button.set_tooltip_text(Some("Meter options"));
         menu_button.update_property(&[gtk4::accessible::Property::Label("Meter options")]);
+        let context_menu = gtk4::PopoverMenu::from_model(None::<&gtk4::gio::Menu>);
+        context_menu.set_parent(&title);
+        context_menu.set_position(gtk4::PositionType::Bottom);
+        context_menu.set_has_arrow(false);
+        context_menu.update_property(&[gtk4::accessible::Property::Label("Meter options")]);
         let close = gtk4::Button::from_icon_name("window-close-symbolic");
         close.add_css_class("flat");
         close.set_tooltip_text(Some("Hide meter"));
@@ -341,6 +347,7 @@ impl DamageMeter {
             header,
             title,
             menu_button,
+            context_menu,
             content,
             scroller,
             grip,
@@ -558,14 +565,23 @@ impl Inner {
         overlay.add_controller(drag);
     }
 
-    /// The secondary-click route to the one options menu; the menu button is
-    /// the accessible primary route.
+    /// Both menu routes build their model only when opened. The retained
+    /// right-click popover is parented to the title, so its pointing rectangle
+    /// uses the click coordinates directly.
     fn connect_title_menu(self: &Rc<Self>, title: &gtk4::Label) {
+        let this = Rc::clone(self);
+        self.menu_button.set_create_popup_func(move |button| {
+            button.set_menu_model(Some(&this.menu_model()));
+        });
+
         let click = gtk4::GestureClick::new();
         click.set_button(gtk4::gdk::BUTTON_SECONDARY);
         let this = Rc::clone(self);
-        click.connect_pressed(move |gesture, _, _, _| {
-            this.menu_button.popup();
+        click.connect_pressed(move |gesture, _, x, y| {
+            this.context_menu.set_menu_model(Some(&this.menu_model()));
+            this.context_menu
+                .set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            this.context_menu.popup();
             gesture.set_state(gtk4::EventSequenceState::Claimed);
         });
         title.add_controller(click);
@@ -605,11 +621,11 @@ impl Inner {
         }
     }
 
-    /// One full re-render: menu, header, and content all derive from the same
-    /// session state and the selected entry.
+    /// One full re-render: header and content derive from the same session
+    /// state and selected entry. Menu models are built only when opened, so a
+    /// playback tick never replaces an open popover.
     fn refresh(self: &Rc<Self>) {
         self.sync_action_states();
-        self.rebuild_menu();
         let fight = self.selected_fight();
         self.rebuild_title(fight.as_ref());
         self.rebuild_content(fight);
@@ -662,7 +678,7 @@ impl Inner {
         }
     }
 
-    fn rebuild_menu(self: &Rc<Self>) {
+    fn menu_model(self: &Rc<Self>) -> gtk4::gio::Menu {
         let menu = gtk4::gio::Menu::new();
 
         let view_section = gtk4::gio::Menu::new();
@@ -724,7 +740,7 @@ impl Inner {
         close_section.append(Some("Hide meter"), Some("meter.close"));
         menu.append_section(None, &close_section);
 
-        self.menu_button.set_menu_model(Some(&menu));
+        menu
     }
 
     /// Target names (sorted) and marker values (canonical order) present in

@@ -43,6 +43,16 @@ struct RawFight {
     last_event_ms: Option<i64>,
     actors: Vec<RawActor>,
     actor_index: HashMap<String, usize>,
+    recent: HashMap<(String, String, MeterMetric), RecentRecord>,
+}
+
+struct RecentRecord {
+    spell_key: (MeterMetric, String),
+    target_key: (MeterMetric, String, u8),
+    at_ms: i64,
+    bucket_end_ms: i64,
+    remaining: u64,
+    remaining_overheal: u64,
 }
 
 impl RawFight {
@@ -55,6 +65,7 @@ impl RawFight {
             last_event_ms: None,
             actors: Vec::new(),
             actor_index: HashMap::new(),
+            recent: HashMap::new(),
         }
     }
 
@@ -104,6 +115,23 @@ impl RawEntry {
             value.overheal += overheal;
         }
     }
+
+    fn add_transfer(&mut self, amount: u64, overheal: u64, bucket_end_ms: i64) {
+        self.total.amount += amount;
+        self.total.overheal += overheal;
+        let sample = self.samples.entry(bucket_end_ms).or_default();
+        sample.amount += amount;
+        sample.overheal += overheal;
+    }
+
+    fn subtract_transfer(&mut self, amount: u64, overheal: u64, bucket_end_ms: i64) {
+        self.total.amount = self.total.amount.saturating_sub(amount);
+        self.total.overheal = self.total.overheal.saturating_sub(overheal);
+        if let Some(sample) = self.samples.get_mut(&bucket_end_ms) {
+            sample.amount = sample.amount.saturating_sub(amount);
+            sample.overheal = sample.overheal.saturating_sub(overheal);
+        }
+    }
 }
 
 impl MeterAccumulator {
@@ -149,10 +177,12 @@ impl MeterAccumulator {
         amount: u64,
         at_ms: i64,
     ) {
-        // Damage Done accepts friendly player-controlled sources (players,
-        // pets, guardians) against hostile destinations; friendly fire is
-        // excluded.
-        if !is_player_controlled_friendly(source_flags) || is_unit_friendly(dest_flags) {
+        // Known summons include CONTROL_NPC guardians whose flags are not
+        // friendly. Their owner was accepted only from a friendly
+        // player-controlled summoner.
+        if (!is_player_controlled_friendly(source_flags) && !self.owners.contains_key(source_guid))
+            || is_unit_friendly(dest_flags)
+        {
             return;
         }
         self.record(
@@ -252,6 +282,74 @@ impl MeterAccumulator {
         );
     }
 
+    /// Move support-contributed damage or effective healing from the actor who
+    /// produced the base event to the supporting player. Support rows follow
+    /// their base event in the combat log; a missing base is ignored.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn support(
+        &mut self,
+        metric: MeterMetric,
+        supporter_guid: &str,
+        source_guid: &str,
+        dest_name: &str,
+        marker: u8,
+        support_spell: &str,
+        amount: u64,
+        overheal: u64,
+        at_ms: i64,
+    ) {
+        if supporter_guid.is_empty() || supporter_guid == source_guid {
+            return;
+        }
+        let effective = if metric == MeterMetric::Healing {
+            amount.saturating_sub(overheal)
+        } else {
+            amount
+        };
+        let fight = self
+            .fights
+            .last_mut()
+            .expect("the open fight is always present");
+        let key = (source_guid.to_owned(), dest_name.to_owned(), metric);
+        let Some(&source_index) = fight.actor_index.get(source_guid) else {
+            return;
+        };
+        let Some(recent) = fight.recent.get_mut(&key) else {
+            return;
+        };
+        if at_ms.saturating_sub(recent.at_ms) > 1_000 {
+            return;
+        }
+        let transferred = effective.min(recent.remaining);
+        let transferred_overheal = overheal.min(recent.remaining_overheal);
+        if transferred == 0 && transferred_overheal == 0 {
+            return;
+        }
+        recent.remaining -= transferred;
+        recent.remaining_overheal -= transferred_overheal;
+        let bucket_end_ms = recent.bucket_end_ms;
+        {
+            let source = &mut fight.actors[source_index];
+            if let Some(entry) = source.spells.get_mut(&recent.spell_key) {
+                entry.subtract_transfer(transferred, transferred_overheal, bucket_end_ms);
+            }
+            if let Some(entry) = source.targets.get_mut(&recent.target_key) {
+                entry.subtract_transfer(transferred, transferred_overheal, bucket_end_ms);
+            }
+        }
+        let supporter = fight.actor(supporter_guid, "");
+        supporter
+            .spells
+            .entry((metric, support_spell.to_owned()))
+            .or_default()
+            .add_transfer(transferred, transferred_overheal, bucket_end_ms);
+        supporter
+            .targets
+            .entry((metric, dest_name.to_owned(), marker))
+            .or_default()
+            .add_transfer(transferred, transferred_overheal, bucket_end_ms);
+    }
+
     /// Close the open fight and start a new one labelled for the next segment.
     pub(crate) fn cut(&mut self, at_ms: i64, new_label: String) {
         let fight = self
@@ -318,6 +416,19 @@ impl MeterAccumulator {
             .entry((metric, dest_name.to_owned(), marker))
             .or_default()
             .add(amount, overheal, bucket_end_ms);
+        if matches!(metric, MeterMetric::Damage | MeterMetric::Healing) {
+            fight.recent.insert(
+                (source_guid.to_owned(), dest_name.to_owned(), metric),
+                RecentRecord {
+                    spell_key: (metric, spell_name.to_owned()),
+                    target_key: (metric, dest_name.to_owned(), marker),
+                    at_ms,
+                    bucket_end_ms,
+                    remaining: amount,
+                    remaining_overheal: overheal,
+                },
+            );
+        }
     }
 }
 
@@ -377,17 +488,16 @@ fn merged_actors(
         if let Some(actor) = actors.iter_mut().find(|actor| actor.guid == resolved) {
             append_entries(actor, raw, started_at_ms);
         } else {
-            let name = if resolved == raw.guid {
-                raw.name.clone()
-            } else if let Some(owned) = owners.get(&raw.guid)
-                && let Some(name) = &owned.name
-            {
-                name.clone()
-            } else {
-                names
-                    .get(resolved)
-                    .cloned()
+            let name = if resolved != raw.guid {
+                owners
+                    .get(&raw.guid)
+                    .and_then(|owned| owned.name.clone())
+                    .or_else(|| names.get(resolved).cloned())
                     .unwrap_or_else(|| raw.name.clone())
+            } else if raw.name.is_empty() {
+                names.get(resolved).cloned().unwrap_or_default()
+            } else {
+                raw.name.clone()
             };
             actors.push(MeterActor {
                 guid: resolved.to_owned(),
@@ -661,7 +771,8 @@ fn project_entries(entries: &[MeterEntry], position_ms: u64) -> Vec<ProjectedEnt
                 projected.hits += sample.hits;
                 projected.overheal += sample.overheal;
             }
-            (projected.hits > 0).then_some(projected)
+            (projected.hits > 0 || projected.amount > 0 || projected.overheal > 0)
+                .then_some(projected)
         })
         .collect()
 }
@@ -728,6 +839,123 @@ mod tests {
         assert_eq!(fight.actors.len(), 1);
         assert_eq!(fight.actors[0].spells.len(), 1);
         assert_eq!(fight.actors[0].spells[0].amount, 80);
+    }
+
+    #[test]
+    fn owned_control_npc_damage_merges_into_player() {
+        let mut meter = MeterAccumulator::new(0, None);
+        meter.record_owner("Creature-0-GHOUL", "Player-0-A", Some("Death Knight"));
+        meter.damage(
+            "Creature-0-GHOUL",
+            "Lesser Ghoul",
+            0xa28,
+            "Boss",
+            0,
+            0,
+            "Sweeping Claws",
+            75,
+            1_000,
+        );
+        let data = meter.drain(2_000, 0, "Fight", &HashMap::new());
+        let actor = &data.fights[0].actors[0];
+        assert_eq!(actor.guid, "Player-0-A");
+        assert_eq!(actor.name, "Death Knight");
+        assert_eq!(actor.spells[0].amount, 75);
+    }
+
+    #[test]
+    fn support_transfer_preserves_total_and_samples() {
+        let mut meter = MeterAccumulator::new(0, None);
+        meter.damage(
+            "Player-0-A",
+            "Dealer",
+            PLAYER,
+            "Boss",
+            0,
+            0,
+            "Strike",
+            100,
+            1_200,
+        );
+        meter.support(
+            MeterMetric::Damage,
+            "Player-0-B",
+            "Player-0-A",
+            "Boss",
+            0,
+            "Ebon Might",
+            30,
+            0,
+            1_200,
+        );
+        meter.support(
+            MeterMetric::Damage,
+            "Player-0-B",
+            "Player-0-A",
+            "Boss",
+            0,
+            "Prescience",
+            10,
+            0,
+            1_200,
+        );
+        meter.support(
+            MeterMetric::Damage,
+            "Player-0-B",
+            "Player-0-A",
+            "Boss",
+            0,
+            "Stale support",
+            10,
+            0,
+            2_201,
+        );
+        let mut names = HashMap::new();
+        names.insert("Player-0-B".to_owned(), "Supporter".to_owned());
+        let data = meter.drain(3_000, 0, "Fight", &names);
+        let fight = &data.fights[0];
+        let dealer = fight
+            .actors
+            .iter()
+            .find(|actor| actor.guid == "Player-0-A")
+            .unwrap();
+        let supporter = fight
+            .actors
+            .iter()
+            .find(|actor| actor.guid == "Player-0-B")
+            .unwrap();
+        assert_eq!(supporter.name, "Supporter");
+        assert_eq!(
+            dealer.spells.iter().map(|entry| entry.amount).sum::<u64>(),
+            60
+        );
+        assert_eq!(
+            supporter
+                .spells
+                .iter()
+                .map(|entry| entry.amount)
+                .sum::<u64>(),
+            40
+        );
+        assert_eq!(
+            fight
+                .actors
+                .iter()
+                .flat_map(|actor| &actor.spells)
+                .map(|entry| entry.amount)
+                .sum::<u64>(),
+            100
+        );
+        let projected = project_current(&data.fights, 2_000).unwrap();
+        assert_eq!(
+            projected
+                .actors
+                .iter()
+                .flat_map(|actor| &actor.spells)
+                .map(|entry| entry.amount)
+                .sum::<u64>(),
+            100
+        );
     }
 
     #[test]

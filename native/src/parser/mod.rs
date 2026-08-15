@@ -2,7 +2,7 @@
 
 //! Combat-log parsing into small facts consumed by the activity engine.
 
-use crate::domain::GameFlavor;
+use crate::domain::{GameFlavor, MeterMetric};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParsedEvent {
@@ -106,6 +106,18 @@ pub enum CombatEvent {
         amount: u64,
         overheal: u64,
     },
+    /// Damage or effective healing reassigned from the original actor to the
+    /// player whose support effect contributed it.
+    Support {
+        metric: MeterMetric,
+        supporter_guid: String,
+        source_guid: String,
+        dest_name: String,
+        dest_raid_marker: u8,
+        spell_name: String,
+        amount: u64,
+        overheal: u64,
+    },
     Interrupt {
         source_guid: String,
         source_name: String,
@@ -129,6 +141,7 @@ pub enum CombatEvent {
     Summon {
         source_guid: String,
         source_name: String,
+        source_flags: u64,
         pet_guid: String,
     },
     BossCast {
@@ -301,6 +314,17 @@ pub fn parse_line(
         }
         "SPELL_HEAL" | "SPELL_PERIODIC_HEAL" => {
             let Some(event) = parse_heal(&fields, context)? else {
+                return Ok(None);
+            };
+            event
+        }
+        "SPELL_DAMAGE_SUPPORT"
+        | "SPELL_PERIODIC_DAMAGE_SUPPORT"
+        | "RANGE_DAMAGE_SUPPORT"
+        | "SWING_DAMAGE_LANDED_SUPPORT"
+        | "SPELL_HEAL_SUPPORT"
+        | "SPELL_PERIODIC_HEAL_SUPPORT" => {
+            let Some(event) = parse_support(event_name, &fields, context)? else {
                 return Ok(None);
             };
             event
@@ -531,10 +555,55 @@ fn parse_utility(
     })
 }
 
+fn parse_support(
+    event_name: &str,
+    fields: &[String],
+    context: ParseTimeContext,
+) -> Result<Option<CombatEvent>, ParseFailure> {
+    // Even SWING_DAMAGE_LANDED_SUPPORT has the three-field spell prefix, so
+    // advanced_block's exact SWING_DAMAGE special case must not apply here.
+    let block = advanced_block(event_name, fields, context);
+    let amount = match lenient_number::<u64>(fields, block.suffix) {
+        Some(amount) => amount,
+        None if block.present => return Err(ParseFailure::MalformedRetainedEvent),
+        None => return Ok(None),
+    };
+    let healing = event_name.contains("HEAL");
+    let overheal = if healing {
+        let index = block.suffix
+            + if fields.len() - block.suffix >= 6 {
+                2
+            } else {
+                1
+            };
+        lenient_number(fields, index).unwrap_or(0)
+    } else {
+        0
+    };
+    let event = (|| {
+        Some(CombatEvent::Support {
+            metric: if healing {
+                MeterMetric::Healing
+            } else {
+                MeterMetric::Damage
+            },
+            supporter_guid: guid_or_none(fields.last()?)?.to_owned(),
+            source_guid: fields.get(1)?.as_str().to_owned(),
+            dest_name: fields.get(6)?.as_str().to_owned(),
+            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            spell_name: fields.get(10)?.as_str().to_owned(),
+            amount,
+            overheal,
+        })
+    })();
+    Ok(event)
+}
+
 fn parse_summon(fields: &[String]) -> Option<CombatEvent> {
     Some(CombatEvent::Summon {
         source_guid: fields.get(1)?.as_str().to_owned(),
         source_name: fields.get(2)?.as_str().to_owned(),
+        source_flags: lenient_hex(fields, 3)?,
         pet_guid: fields.get(5)?.as_str().to_owned(),
     })
 }
@@ -578,8 +647,14 @@ fn is_retained(name: &str) -> bool {
             | "SPELL_DAMAGE"
             | "SPELL_PERIODIC_DAMAGE"
             | "DAMAGE_SHIELD"
+            | "SPELL_DAMAGE_SUPPORT"
+            | "SPELL_PERIODIC_DAMAGE_SUPPORT"
+            | "RANGE_DAMAGE_SUPPORT"
+            | "SWING_DAMAGE_LANDED_SUPPORT"
             | "SPELL_HEAL"
             | "SPELL_PERIODIC_HEAL"
+            | "SPELL_HEAL_SUPPORT"
+            | "SPELL_PERIODIC_HEAL_SUPPORT"
             | "SPELL_INTERRUPT"
             | "SPELL_DISPEL"
             | "SPELL_STOLEN"
@@ -1369,6 +1444,7 @@ mod tests {
             CombatEvent::Summon {
                 source_guid: "Player-0-A".into(),
                 source_name: "Warlock".into(),
+                source_flags: 0x511,
                 pet_guid: "Pet-0-IMP".into(),
             }
         );
@@ -1482,6 +1558,48 @@ mod tests {
                 spell_name: "Flash Heal".into(),
                 amount: 1000,
                 overheal: 400,
+            }
+        );
+    }
+
+    #[test]
+    fn version_22_swing_support_keeps_spell_prefix_and_amount() {
+        let line = "8/11/2026 18:32:21.3482  SWING_DAMAGE_LANDED_SUPPORT,Player-3682-0B8856AA,\"Rhenin-Ragnaros-EU\",0x512,0x80000000,Creature-0-B,\"Ymirjar Graveblade\",0x10a48,0x80000000,413984,\"Shifting Sands\",0x40,Creature-0-B,0000000000000000,20707592,20832478,0,0,1470,0,0,0,1,0,0,0,502.83,212.23,184,4.6665,91,292,201,-1,1,0,0,0,1,nil,nil,Player-3391-0CB9742F";
+        let parsed = parse_line(GameFlavor::Retail, V22_CONTEXT, line)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.event,
+            CombatEvent::Support {
+                metric: MeterMetric::Damage,
+                supporter_guid: "Player-3391-0CB9742F".into(),
+                source_guid: "Player-3682-0B8856AA".into(),
+                dest_name: "Ymirjar Graveblade".into(),
+                dest_raid_marker: 0,
+                spell_name: "Shifting Sands".into(),
+                amount: 292,
+                overheal: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn version_22_heal_support_reads_appended_supporter() {
+        let line = "8/11/2026 18:32:18.7932  SPELL_HEAL_SUPPORT,Player-3682-0BBA26EE,\"Paulwalkerx-Ragnaros-EU\",0x511,0x80000000,Player-3682-0BBA26EE,\"Paulwalkerx-Ragnaros-EU\",0x511,0x80000000,413786,\"Fate Mirror\",0x40,Player-3682-0BBA26EE,0000000000000000,499731,499731,851,2750,884,300,546,0,17,43,120,0,488.27,218.90,184,0.0327,293,3088,3088,3088,0,nil,Player-3391-0CB9742F";
+        let parsed = parse_line(GameFlavor::Retail, V22_CONTEXT, line)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.event,
+            CombatEvent::Support {
+                metric: MeterMetric::Healing,
+                supporter_guid: "Player-3391-0CB9742F".into(),
+                source_guid: "Player-3682-0BBA26EE".into(),
+                dest_name: "Paulwalkerx-Ragnaros-EU".into(),
+                dest_raid_marker: 0,
+                spell_name: "Fate Mirror".into(),
+                amount: 3088,
+                overheal: 3088,
             }
         );
     }
