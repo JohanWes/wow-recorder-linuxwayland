@@ -7,10 +7,10 @@
 //! merges retroactively. The ownership map is activity-scoped and dropped with
 //! the accumulator. No spell IDs are involved anywhere.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::activity::{is_player_controlled_friendly, is_unit_friendly, relative_ms};
-use crate::domain::{MeterActor, MeterData, MeterEntry, MeterFight, MeterMetric};
+use crate::domain::{MeterActor, MeterData, MeterEntry, MeterFight, MeterMetric, MeterSample};
 
 /// Maximum spell or target rows kept per actor per metric; the remainder folds
 /// into a single "Other" row so totals stay exact.
@@ -24,6 +24,7 @@ const METRICS: [MeterMetric; 4] = [
 ];
 
 pub(crate) struct MeterAccumulator {
+    started_at_ms: i64,
     fights: Vec<RawFight>,
     owners: HashMap<String, OwnedBy>,
 }
@@ -79,24 +80,36 @@ struct RawActor {
     targets: HashMap<(MeterMetric, String, u8), RawEntry>,
 }
 
-#[derive(Default)]
-struct RawEntry {
+#[derive(Clone, Default)]
+struct RawValue {
     amount: u64,
     hits: u32,
     overheal: u64,
 }
 
+#[derive(Default)]
+struct RawEntry {
+    total: RawValue,
+    samples: BTreeMap<i64, RawValue>,
+}
+
 impl RawEntry {
-    fn add(&mut self, amount: u64, overheal: u64) {
-        self.amount += amount;
-        self.hits += 1;
-        self.overheal += overheal;
+    fn add(&mut self, amount: u64, overheal: u64, bucket_end_ms: i64) {
+        for value in [
+            &mut self.total,
+            self.samples.entry(bucket_end_ms).or_default(),
+        ] {
+            value.amount += amount;
+            value.hits += 1;
+            value.overheal += overheal;
+        }
     }
 }
 
 impl MeterAccumulator {
     pub(crate) fn new(start_ms: i64, initial_label: Option<String>) -> Self {
         Self {
+            started_at_ms: start_ms,
             fights: vec![RawFight::new(start_ms, initial_label)],
             owners: HashMap::new(),
         }
@@ -286,6 +299,8 @@ impl MeterAccumulator {
         overheal: u64,
         at_ms: i64,
     ) {
+        let elapsed_ms = at_ms.saturating_sub(self.started_at_ms).max(1);
+        let bucket_end_ms = self.started_at_ms + elapsed_ms.saturating_add(999) / 1_000 * 1_000;
         let fight = self
             .fights
             .last_mut()
@@ -297,12 +312,12 @@ impl MeterAccumulator {
             .spells
             .entry((metric, spell_name.to_owned()))
             .or_default()
-            .add(amount, overheal);
+            .add(amount, overheal, bucket_end_ms);
         actor
             .targets
             .entry((metric, dest_name.to_owned(), marker))
             .or_default()
-            .add(amount, overheal);
+            .add(amount, overheal, bucket_end_ms);
     }
 }
 
@@ -327,8 +342,11 @@ impl RawFight {
                 .unwrap_or_else(|| fallback_label.to_owned()),
             start_ms: start,
             end_ms: end,
+            first_event_ms: self
+                .first_event_ms
+                .map(|at_ms| relative_ms(started_at_ms, at_ms)),
             active_ms,
-            actors: merged_actors(self, owners, names),
+            actors: merged_actors(self, owners, names, started_at_ms),
         }
     }
 }
@@ -351,12 +369,13 @@ fn merged_actors(
     fight: &RawFight,
     owners: &HashMap<String, OwnedBy>,
     names: &HashMap<String, String>,
+    started_at_ms: i64,
 ) -> Vec<MeterActor> {
     let mut actors: Vec<MeterActor> = Vec::new();
     for raw in &fight.actors {
         let resolved = owner_of(&raw.guid, owners);
         if let Some(actor) = actors.iter_mut().find(|actor| actor.guid == resolved) {
-            append_entries(actor, raw);
+            append_entries(actor, raw, started_at_ms);
         } else {
             let name = if resolved == raw.guid {
                 raw.name.clone()
@@ -373,13 +392,11 @@ fn merged_actors(
             actors.push(MeterActor {
                 guid: resolved.to_owned(),
                 name,
-                spells: entries(&raw.spells),
-                targets: entries_targets(&raw.targets),
+                spells: entries(&raw.spells, started_at_ms),
+                targets: entries_targets(&raw.targets, started_at_ms),
             });
         }
     }
-    // Bound after merging: rows appended by pets may push the actor over the
-    // cap, so the fold runs on the final lists.
     for actor in &mut actors {
         actor.spells = bounded(std::mem::take(&mut actor.spells));
         actor.targets = bounded(std::mem::take(&mut actor.targets));
@@ -389,84 +406,92 @@ fn merged_actors(
 
 /// Collect raw spell entries into `MeterEntry`s; spell rows never carry a
 /// marker.
-fn entries(raw: &HashMap<(MeterMetric, String), RawEntry>) -> Vec<MeterEntry> {
+fn entries(raw: &HashMap<(MeterMetric, String), RawEntry>, started_at_ms: i64) -> Vec<MeterEntry> {
     raw.iter()
-        .map(|((metric, key), entry)| MeterEntry {
-            metric: *metric,
-            key: key.clone(),
-            marker: 0,
-            amount: entry.amount,
-            hits: entry.hits,
-            overheal: entry.overheal,
-        })
+        .map(|((metric, key), entry)| meter_entry(*metric, key.clone(), 0, entry, started_at_ms))
         .collect()
 }
 
 /// Collect raw target entries, keyed by `(name, marker)`.
-fn entries_targets(raw: &HashMap<(MeterMetric, String, u8), RawEntry>) -> Vec<MeterEntry> {
+fn entries_targets(
+    raw: &HashMap<(MeterMetric, String, u8), RawEntry>,
+    started_at_ms: i64,
+) -> Vec<MeterEntry> {
     raw.iter()
-        .map(|((metric, key, marker), entry)| MeterEntry {
-            metric: *metric,
-            key: key.clone(),
-            marker: *marker,
-            amount: entry.amount,
-            hits: entry.hits,
-            overheal: entry.overheal,
+        .map(|((metric, key, marker), entry)| {
+            meter_entry(*metric, key.clone(), *marker, entry, started_at_ms)
         })
         .collect()
 }
 
-fn append_entries(actor: &mut MeterActor, raw: &RawActor) {
+fn meter_entry(
+    metric: MeterMetric,
+    key: String,
+    marker: u8,
+    entry: &RawEntry,
+    started_at_ms: i64,
+) -> MeterEntry {
+    MeterEntry {
+        metric,
+        key,
+        marker,
+        amount: entry.total.amount,
+        hits: entry.total.hits,
+        overheal: entry.total.overheal,
+        samples: entry
+            .samples
+            .iter()
+            .map(|(at_ms, value)| MeterSample {
+                at_ms: relative_ms(started_at_ms, *at_ms),
+                amount: value.amount,
+                hits: value.hits,
+                overheal: value.overheal,
+            })
+            .collect(),
+    }
+}
+
+fn append_entries(actor: &mut MeterActor, raw: &RawActor, started_at_ms: i64) {
     for ((metric, key), entry) in &raw.spells {
         append(
             &mut actor.spells,
-            *metric,
-            key.clone(),
-            0,
-            entry.amount,
-            entry.hits,
-            entry.overheal,
+            meter_entry(*metric, key.clone(), 0, entry, started_at_ms),
         );
     }
     for ((metric, key, marker), entry) in &raw.targets {
         append(
             &mut actor.targets,
-            *metric,
-            key.clone(),
-            *marker,
-            entry.amount,
-            entry.hits,
-            entry.overheal,
+            meter_entry(*metric, key.clone(), *marker, entry, started_at_ms),
         );
     }
 }
 
-fn append(
-    entries: &mut Vec<MeterEntry>,
-    metric: MeterMetric,
-    key: String,
-    marker: u8,
-    amount: u64,
-    hits: u32,
-    overheal: u64,
-) {
-    if let Some(existing) = entries
-        .iter_mut()
-        .find(|entry| entry.metric == metric && entry.key == key && entry.marker == marker)
-    {
-        existing.amount += amount;
-        existing.hits += hits;
-        existing.overheal += overheal;
+fn append(entries: &mut Vec<MeterEntry>, entry: MeterEntry) {
+    if let Some(existing) = entries.iter_mut().find(|existing| {
+        existing.metric == entry.metric
+            && existing.key == entry.key
+            && existing.marker == entry.marker
+    }) {
+        existing.amount += entry.amount;
+        existing.hits += entry.hits;
+        existing.overheal += entry.overheal;
+        merge_samples(&mut existing.samples, &entry.samples);
     } else {
-        entries.push(MeterEntry {
-            metric,
-            key,
-            marker,
-            amount,
-            hits,
-            overheal,
-        });
+        entries.push(entry);
     }
+}
+
+fn merge_samples(into: &mut Vec<MeterSample>, from: &[MeterSample]) {
+    for sample in from {
+        if let Some(existing) = into.iter_mut().find(|item| item.at_ms == sample.at_ms) {
+            existing.amount += sample.amount;
+            existing.hits += sample.hits;
+            existing.overheal += sample.overheal;
+        } else {
+            into.push(sample.clone());
+        }
+    }
+    into.sort_by_key(|sample| sample.at_ms);
 }
 
 /// Bound each metric's rows to `MAX_BREAKDOWN_ROWS` largest contributors,
@@ -490,18 +515,171 @@ fn bounded(entries: Vec<MeterEntry>) -> Vec<MeterEntry> {
         // rows while totals stay exact.
         if group.len() > MAX_BREAKDOWN_ROWS {
             let rest = group.split_off(MAX_BREAKDOWN_ROWS - 1);
-            group.push(MeterEntry {
+            let mut other = MeterEntry {
                 metric,
                 key: OTHER_KEY.to_owned(),
                 marker: 0,
-                amount: rest.iter().map(|entry| entry.amount).sum(),
-                hits: rest.iter().map(|entry| entry.hits).sum(),
-                overheal: rest.iter().map(|entry| entry.overheal).sum(),
-            });
+                amount: 0,
+                hits: 0,
+                overheal: 0,
+                samples: Vec::new(),
+            };
+            for entry in rest {
+                other.amount += entry.amount;
+                other.hits += entry.hits;
+                other.overheal += entry.overheal;
+                merge_samples(&mut other.samples, &entry.samples);
+            }
+            group.push(other);
         }
         result.extend(group);
     }
     result
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeterProjection {
+    pub label: String,
+    pub elapsed_ms: u64,
+    pub actors: Vec<ProjectedActor>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectedActor {
+    pub guid: String,
+    pub name: String,
+    pub spells: Vec<ProjectedEntry>,
+    pub targets: Vec<ProjectedEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectedEntry {
+    pub metric: MeterMetric,
+    pub key: String,
+    pub marker: u8,
+    pub amount: u64,
+    pub hits: u32,
+    pub overheal: u64,
+}
+
+pub fn fight_index_at(fights: &[MeterFight], position_ms: u64) -> Option<usize> {
+    fights
+        .iter()
+        .position(|fight| position_ms >= fight.start_ms && position_ms < fight.end_ms)
+        .or_else(|| fights.iter().rposition(|fight| fight.end_ms <= position_ms))
+        .or((!fights.is_empty()).then_some(0))
+}
+
+pub fn project_current(fights: &[MeterFight], position_ms: u64) -> Option<MeterProjection> {
+    project_fight(
+        fights.get(fight_index_at(fights, position_ms)?)?,
+        position_ms,
+    )
+}
+
+pub fn project_overall(fights: &[MeterFight], position_ms: u64) -> MeterProjection {
+    let mut projection = MeterProjection {
+        label: String::new(),
+        elapsed_ms: 0,
+        actors: Vec::new(),
+    };
+    for fight in fights.iter().filter(|fight| fight.start_ms <= position_ms) {
+        let Some(partial) = project_fight(fight, position_ms) else {
+            continue;
+        };
+        projection.elapsed_ms += partial.elapsed_ms;
+        for actor in partial.actors {
+            if let Some(existing) = projection
+                .actors
+                .iter_mut()
+                .find(|existing| existing.guid == actor.guid)
+            {
+                merge_projected_entries(&mut existing.spells, actor.spells);
+                merge_projected_entries(&mut existing.targets, actor.targets);
+            } else {
+                projection.actors.push(actor);
+            }
+        }
+    }
+    projection
+}
+
+pub fn has_untimed_totals(fights: &[MeterFight]) -> bool {
+    fights
+        .iter()
+        .flat_map(|fight| &fight.actors)
+        .flat_map(|actor| actor.spells.iter().chain(&actor.targets))
+        .any(|entry| entry.amount > 0 && entry.samples.is_empty())
+}
+
+fn project_fight(fight: &MeterFight, position_ms: u64) -> Option<MeterProjection> {
+    let limit = position_ms.min(fight.end_ms);
+    let elapsed_ms = fight.first_event_ms.map_or(0, |first| {
+        limit
+            .clamp(first, first.saturating_add(fight.active_ms))
+            .saturating_sub(first)
+    });
+    let actors = fight
+        .actors
+        .iter()
+        .filter_map(|actor| {
+            let spells = project_entries(&actor.spells, limit);
+            let targets = project_entries(&actor.targets, limit);
+            (!spells.is_empty() || !targets.is_empty()).then(|| ProjectedActor {
+                guid: actor.guid.clone(),
+                name: actor.name.clone(),
+                spells,
+                targets,
+            })
+        })
+        .collect();
+    Some(MeterProjection {
+        label: fight.label.clone(),
+        elapsed_ms,
+        actors,
+    })
+}
+
+fn project_entries(entries: &[MeterEntry], position_ms: u64) -> Vec<ProjectedEntry> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let mut projected = ProjectedEntry {
+                metric: entry.metric,
+                key: entry.key.clone(),
+                marker: entry.marker,
+                amount: 0,
+                hits: 0,
+                overheal: 0,
+            };
+            for sample in entry
+                .samples
+                .iter()
+                .take_while(|sample| sample.at_ms <= position_ms)
+            {
+                projected.amount += sample.amount;
+                projected.hits += sample.hits;
+                projected.overheal += sample.overheal;
+            }
+            (projected.hits > 0).then_some(projected)
+        })
+        .collect()
+}
+
+fn merge_projected_entries(into: &mut Vec<ProjectedEntry>, from: Vec<ProjectedEntry>) {
+    for entry in from {
+        if let Some(existing) = into.iter_mut().find(|existing| {
+            existing.metric == entry.metric
+                && existing.key == entry.key
+                && existing.marker == entry.marker
+        }) {
+            existing.amount += entry.amount;
+            existing.hits += entry.hits;
+            existing.overheal += entry.overheal;
+        } else {
+            into.push(entry);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -644,11 +822,26 @@ mod tests {
         assert_eq!(data.fights[0].end_ms, 2_000);
         assert_eq!(data.fights[0].active_ms, 500);
         assert_eq!(data.fights[0].actors[0].spells[0].amount, 15);
+        assert_eq!(
+            data.fights[0].actors[0].spells[0]
+                .samples
+                .iter()
+                .map(|sample| (sample.at_ms, sample.amount))
+                .collect::<Vec<_>>(),
+            vec![(1_000, 10), (2_000, 5)]
+        );
         assert_eq!(data.fights[1].label, "Boss One");
         assert_eq!(data.fights[1].start_ms, 2_000);
         assert_eq!(data.fights[1].end_ms, 4_000);
         assert_eq!(data.fights[1].active_ms, 0);
         assert_eq!(data.fights[1].actors[0].spells[0].amount, 20);
+        let current = project_current(&data.fights, 1_000).unwrap();
+        assert_eq!(current.actors[0].spells[0].amount, 10);
+        let current = project_current(&data.fights, 3_000).unwrap();
+        assert_eq!(current.actors[0].spells[0].amount, 20);
+        let overall = project_overall(&data.fights, 3_000);
+        assert_eq!(overall.actors[0].spells[0].amount, 35);
+        assert_eq!(overall.elapsed_ms, 500);
     }
 
     #[test]

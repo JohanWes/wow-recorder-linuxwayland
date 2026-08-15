@@ -1921,6 +1921,10 @@ fn test_events(
     const NAME: &str = "Testplayer-Testrealm";
     // Affiliation mine, friendly, player-controlled, player type.
     const SELF_FLAGS: u64 = 0x511;
+    const ALLY_GUID: &str = "Player-1092-0B80F204";
+    const ALLY_NAME: &str = "Testmage-Testrealm";
+    const ALLY_FLAGS: u64 = 0x512;
+    const HOSTILE_FLAGS: u64 = 0xa48;
 
     let retail = |event: CombatEvent, at_ms: i64| ParsedEvent {
         flavor: GameFlavor::Retail,
@@ -2002,13 +2006,21 @@ fn test_events(
         _ => return None,
     };
 
-    let start_events = vec![
+    let mut start_events = vec![
         retail(start, start_ms),
         retail(
             CombatEvent::Combatant {
                 guid: GUID.to_owned(),
                 team_id: Some(0),
                 spec_id: Some(577),
+            },
+            start_ms,
+        ),
+        retail(
+            CombatEvent::Combatant {
+                guid: ALLY_GUID.to_owned(),
+                team_id: Some(0),
+                spec_id: Some(63),
             },
             start_ms,
         ),
@@ -2028,6 +2040,35 @@ fn test_events(
             start_ms,
         ),
     ];
+    let duration_ms = (end_ms - start_ms).max(0);
+    for (quarter, player_amount, ally_amount) in [
+        (1, 1_000_000, 800_000),
+        (2, 1_500_000, 1_100_000),
+        (3, 2_000_000, 1_400_000),
+    ] {
+        let at_ms = start_ms + duration_ms * quarter / 4;
+        for (guid, name, flags, spell, amount) in [
+            (GUID, NAME, SELF_FLAGS, "Annihilation", player_amount),
+            (ALLY_GUID, ALLY_NAME, ALLY_FLAGS, "Pyroblast", ally_amount),
+        ] {
+            start_events.push(retail(
+                CombatEvent::Damage {
+                    source_guid: guid.to_owned(),
+                    source_name: name.to_owned(),
+                    source_flags: flags,
+                    source_owner_guid: None,
+                    dest_name: "Test Target".to_owned(),
+                    dest_flags: HOSTILE_FLAGS,
+                    dest_raid_marker: 0,
+                    spell_name: spell.to_owned(),
+                    amount,
+                    dest_current_hp: None,
+                    dest_max_hp: None,
+                },
+                at_ms,
+            ));
+        }
+    }
     Some((start_events, retail(end, end_ms)))
 }
 

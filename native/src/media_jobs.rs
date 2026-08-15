@@ -1069,6 +1069,7 @@ mod tests {
                         label: "Chrome King Gallywix".to_owned(),
                         start_ms: 10_000,
                         end_ms: 40_000,
+                        first_event_ms: Some(11_000),
                         active_ms: 28_000,
                         actors: vec![MeterActor {
                             guid: "Player-1000-AAAA0001".to_owned(),
@@ -1080,6 +1081,7 @@ mod tests {
                                 amount: 9_999,
                                 hits: 42,
                                 overheal: 0,
+                                samples: Vec::new(),
                             }],
                             targets: Vec::new(),
                         }],

@@ -25,6 +25,7 @@ use warcraft_recorder::domain::{
     Category, MeterFight, MeterMetric, Outcome, RecorderStatus, StorageLimit, TimelineKind,
 };
 use warcraft_recorder::media_jobs::MediaConfig;
+use warcraft_recorder::meter::{MeterProjection, project_current, project_overall};
 use warcraft_recorder::recorder::Timeouts;
 use warcraft_recorder::storage::{RECOVERY_DIR, now_unix_ms};
 
@@ -319,10 +320,13 @@ fn player_lines(at_ms: i64) -> Vec<String> {
 }
 
 fn raid_start(at_ms: i64) -> Vec<String> {
-    let mut lines = vec![line(
-        at_ms,
-        "ENCOUNTER_START,2820,\"Test Encounter\",16,20,2549",
-    )];
+    let mut lines = vec![
+        line(
+            at_ms,
+            "COMBAT_LOG_VERSION,22,ADVANCED_LOG_ENABLED,1,BUILD_VERSION,12.1.0,PROJECT_ID,1",
+        ),
+        line(at_ms, "ENCOUNTER_START,2820,\"Test Encounter\",16,20,2549"),
+    ];
     lines.extend(player_lines(at_ms));
     lines
 }
@@ -356,7 +360,7 @@ fn spell_damage(at_ms: i64) -> String {
         &format!(
             "SPELL_DAMAGE,{PLAYER_GUID},\"{PLAYER_NAME}\",{SELF_FLAGS},0x0,{BOSS_GUID},\"Test Boss\",\
              {BOSS_FLAGS},0x0,585,\"Smite\",0x2,{BOSS_GUID},0000000000000000,105,152,0,0,189,2084,0,0,0,\
-             0,0,0,0,0,0,1500,0,2,0,0,0,1,0,0,0,0.000,1,1"
+             0,0,0,0,0,0,0,0,1500,0,2,0,0,0,1,0,0,0,0.000,1,1"
         ),
     )
 }
@@ -367,8 +371,8 @@ fn spell_heal(at_ms: i64) -> String {
         at_ms,
         &format!(
             "SPELL_HEAL,{PLAYER_GUID},\"{PLAYER_NAME}\",{SELF_FLAGS},0x0,{PLAYER_GUID},\"{PLAYER_NAME}\",\
-             {SELF_FLAGS},0x0,2061,\"Flash Heal\",0x2,{PLAYER_GUID},0000000000000000,500,500,0,0,0,0,0,\
-             0,0,0,0,0,0,0,0,1000,600,400,0,1"
+             {SELF_FLAGS},0x0,2061,\"Flash Heal\",0x2,{PLAYER_GUID},0000000000000000,500,500,0,0,0,0,0,0,0,0,\
+             0,0,0,0,0,0,0,1000,600,400,0,1"
         ),
     )
 }
@@ -380,7 +384,7 @@ fn automatic_raid_completes_and_survives_a_restart() {
     let mut harness = Harness::new("raid");
     assert_eq!(harness.latest.status, RecorderStatus::Ready);
 
-    let start_ms = now_unix_ms() - 1_000;
+    let start_ms = now_unix_ms() - 2_000;
     harness.log(&raid_start(start_ms));
     harness.pump(|snapshot| snapshot.active.is_some());
     let active = harness.latest.active.clone().unwrap();
@@ -390,8 +394,12 @@ fn automatic_raid_completes_and_survives_a_restart() {
     assert_eq!(active.category, Category::Raids);
 
     harness.emit_artifacts(true);
-    harness.log(&[spell_damage(start_ms + 250), spell_heal(start_ms + 300)]);
-    harness.log(&[player_death(start_ms + 500)]);
+    harness.log(&[
+        spell_damage(start_ms + 250),
+        spell_heal(start_ms + 300),
+        spell_damage(start_ms + 1_250),
+    ]);
+    harness.log(&[player_death(start_ms + 1_500)]);
     harness.log(&[raid_end(now_unix_ms(), true)]);
     harness.pump(|snapshot| !snapshot.entries.is_empty());
 
@@ -416,12 +424,53 @@ fn automatic_raid_completes_and_survives_a_restart() {
     // The intermediates were consumed by finalization.
     assert!(read_dir_count(&harness.capture_root.join("replay")) == 0);
     assert!(read_dir_count(&harness.capture_root.join("regular")) == 0);
-    // The spell events survived parsing and aggregation into exactly one
-    // fight of effective damage and healing.
+    // The version-22 advanced-layout events survived parsing into per-second
+    // deltas while retaining their exact full-fight aggregates.
     let fights = &entry.meter.fights;
     assert_eq!(fights.len(), 1, "expected exactly one meter fight");
-    assert_eq!(meter_total(&fights[0], MeterMetric::Damage), 1_500);
+    assert_eq!(meter_total(&fights[0], MeterMetric::Damage), 3_000);
     assert_eq!(meter_total(&fights[0], MeterMetric::Healing), 600);
+    let damage = fights[0].actors[0]
+        .spells
+        .iter()
+        .find(|entry| entry.metric == MeterMetric::Damage)
+        .expect("damage spell");
+    assert_eq!(damage.samples.len(), 2);
+    assert_eq!(
+        damage
+            .samples
+            .iter()
+            .map(|sample| sample.amount)
+            .collect::<Vec<_>>(),
+        vec![1_500, 1_500]
+    );
+    assert!(damage.samples[0].at_ms < damage.samples[1].at_ms);
+    assert!(
+        damage
+            .samples
+            .iter()
+            .all(|sample| sample.at_ms <= entry.duration_ms)
+    );
+    let first_at = damage.samples[0].at_ms;
+    let second_at = damage.samples[1].at_ms;
+    assert_eq!(
+        projection_total(
+            &project_current(fights, first_at.saturating_sub(1)).unwrap(),
+            MeterMetric::Damage,
+        ),
+        0
+    );
+    assert_eq!(
+        projection_total(
+            &project_current(fights, first_at).unwrap(),
+            MeterMetric::Damage,
+        ),
+        1_500
+    );
+    assert_eq!(
+        projection_total(&project_overall(fights, second_at), MeterMetric::Damage),
+        3_000
+    );
 
     // Tag and protect go through the real sidecar.
     harness.send(Command::SetTag {
@@ -458,11 +507,9 @@ fn automatic_raid_completes_and_survives_a_restart() {
         "nothing was quarantined"
     );
 
-    // The rescanned sidecar carries the same aggregated fight.
+    // The rescanned sidecar carries the same full and per-second aggregates.
     let fights = &restarted.latest.entries[0].meter.fights;
-    assert_eq!(fights.len(), 1, "meter fights did not survive the restart");
-    assert_eq!(meter_total(&fights[0], MeterMetric::Damage), 1_500);
-    assert_eq!(meter_total(&fights[0], MeterMetric::Healing), 600);
+    assert_eq!(fights, &entry.meter.fights);
 
     let mut restarted = restarted;
     let id = restarted.latest.entries[0].id.clone();
@@ -526,7 +573,13 @@ fn manual_and_test_recordings_reuse_the_capture_pipeline() {
     harness.pump(|snapshot| snapshot.active.is_some());
     harness.emit_artifacts(true);
     harness.pump(|snapshot| snapshot.entries.len() == 2);
-    assert_eq!(harness.entries_of(&Category::Raids).len(), 1);
+    let raid = harness.entries_of(&Category::Raids)[0];
+    assert_eq!(raid.meter.fights.len(), 1);
+    assert_eq!(
+        meter_total(&raid.meter.fights[0], MeterMetric::Damage),
+        7_800_000
+    );
+    assert_eq!(raid.meter.fights[0].actors.len(), 2);
 }
 
 #[test]
@@ -799,6 +852,16 @@ fn production_handle_starts_and_shuts_down() {
 /// Actor totals derive structurally from the spell entries.
 fn meter_total(fight: &MeterFight, metric: MeterMetric) -> u64 {
     fight
+        .actors
+        .iter()
+        .flat_map(|actor| &actor.spells)
+        .filter(|entry| entry.metric == metric)
+        .map(|entry| entry.amount)
+        .sum()
+}
+
+fn projection_total(projection: &MeterProjection, metric: MeterMetric) -> u64 {
+    projection
         .actors
         .iter()
         .flat_map(|actor| &actor.spells)

@@ -247,6 +247,17 @@ impl ActivityDetails {
     }
 }
 
+/// One metric delta accumulated during a single playback second. `at_ms` is
+/// the media-relative end of that second, so the UI can include only buckets
+/// that have completed at the current playhead.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeterSample {
+    pub at_ms: u64,
+    pub amount: u64,
+    pub hits: u32,
+    pub overheal: u64,
+}
+
 /// One damage-meter aggregate: a spell or target bucket for one actor and one
 /// metric. Actor totals derive structurally from the spell entries.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,6 +272,9 @@ pub struct MeterEntry {
     pub amount: u64,
     pub hits: u32,
     pub overheal: u64,
+    /// Per-second deltas used to reconstruct this entry at the playhead.
+    #[serde(default)]
+    pub samples: Vec<MeterSample>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -288,6 +302,9 @@ pub struct MeterFight {
     /// Media-relative after finalize; activity-relative in the engine.
     pub start_ms: u64,
     pub end_ms: u64,
+    /// First eligible meter event, on the same timeline as `start_ms`.
+    #[serde(default)]
+    pub first_event_ms: Option<u64>,
     /// First-to-last eligible event; the shared DPS/HPS denominator.
     pub active_ms: u64,
     pub actors: Vec<MeterActor>,

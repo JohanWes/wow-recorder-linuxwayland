@@ -1701,6 +1701,29 @@ fn shift_meter(
                 let mut shifted = fight.clone();
                 shifted.start_ms = (start.max(0) as u64).min(duration_ms);
                 shifted.end_ms = (end.max(0) as u64).min(duration_ms).max(shifted.start_ms);
+                shifted.first_event_ms = fight.first_event_ms.map(|first| {
+                    (first as i64 + lead_in_ms)
+                        .clamp(shifted.start_ms as i64, shifted.end_ms as i64)
+                        as u64
+                });
+                for actor in &mut shifted.actors {
+                    for entry in actor.spells.iter_mut().chain(&mut actor.targets) {
+                        entry.samples.retain_mut(|sample| {
+                            let at_ms = sample.at_ms as i64 + lead_in_ms;
+                            if at_ms < 0 {
+                                return false;
+                            }
+                            sample.at_ms = (at_ms as u64)
+                                .div_ceil(1_000)
+                                .saturating_mul(1_000)
+                                .clamp(shifted.start_ms, shifted.end_ms);
+                            true
+                        });
+                        entry.amount = entry.samples.iter().map(|sample| sample.amount).sum();
+                        entry.hits = entry.samples.iter().map(|sample| sample.hits).sum();
+                        entry.overheal = entry.samples.iter().map(|sample| sample.overheal).sum();
+                    }
+                }
                 Some(shifted)
             })
             .collect(),
@@ -1862,7 +1885,7 @@ mod tests {
     use super::*;
     use std::num::NonZeroU64;
 
-    use crate::domain::{MeterActor, MeterEntry, MeterFight, MeterMetric};
+    use crate::domain::{MeterActor, MeterEntry, MeterFight, MeterMetric, MeterSample};
 
     fn fixture_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/native/fixtures/legacy/sidecars")
@@ -2263,6 +2286,7 @@ mod tests {
                     label: "Chrome King Gallywix".to_owned(),
                     start_ms: 500,
                     end_ms: 58_000,
+                    first_event_ms: Some(1_000),
                     active_ms: 55_000,
                     actors: vec![MeterActor {
                         guid: "Player-1000-AAAA0001".to_owned(),
@@ -2274,6 +2298,12 @@ mod tests {
                             amount: 1_234,
                             hits: 10,
                             overheal: 0,
+                            samples: vec![MeterSample {
+                                at_ms: 58_500,
+                                amount: 1_234,
+                                hits: 10,
+                                overheal: 0,
+                            }],
                         }],
                         targets: Vec::new(),
                     }],
@@ -2283,6 +2313,7 @@ mod tests {
                     label: "Trash".to_owned(),
                     start_ms: 75_000,
                     end_ms: 90_000,
+                    first_event_ms: None,
                     active_ms: 12_000,
                     actors: Vec::new(),
                 },
@@ -2292,6 +2323,7 @@ mod tests {
                     label: "Pre-media".to_owned(),
                     start_ms: 0,
                     end_ms: 4_000,
+                    first_event_ms: None,
                     active_ms: 3_000,
                     actors: Vec::new(),
                 },
@@ -2300,6 +2332,7 @@ mod tests {
                     label: "Post-media".to_owned(),
                     start_ms: 80_000,
                     end_ms: 85_000,
+                    first_event_ms: None,
                     active_ms: 4_000,
                     actors: Vec::new(),
                 },
@@ -2373,6 +2406,10 @@ mod tests {
         assert_eq!(entry.meter.fights[0].end_ms, 61_000);
         assert_eq!(entry.meter.fights[0].active_ms, 55_000);
         assert_eq!(entry.meter.fights[0].actors[0].spells[0].amount, 1_234);
+        assert_eq!(
+            entry.meter.fights[0].actors[0].spells[0].samples[0].at_ms,
+            entry.meter.fights[0].end_ms
+        );
         assert_eq!(entry.meter.fights[1].start_ms, 78_000);
         assert_eq!(entry.meter.fights[1].end_ms, 78_000);
         assert_eq!(entry.meter.fights[1].active_ms, 12_000);

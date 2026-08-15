@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The damage-meter overlay: a compact Details/Skada-style ranking laid over
-//! the player video and fed from `LibraryEntry.meter` pre-aggregates. The
-//! player owns one instance on its `video_overlay`; visibility, filters, and
-//! drag position are session-only state. Totals are whole-segment: the
-//! playhead only rebuilds the Current fight when it crosses a boundary.
+//! the player video and fed from `LibraryEntry.meter` per-second aggregates.
+//! The player owns one instance on its `video_overlay`; visibility, filters,
+//! and drag position are session-only state. Current and Overall totals stop
+//! at the current playback second.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
@@ -12,7 +12,11 @@ use std::rc::Rc;
 
 use gtk4::prelude::*;
 
-use warcraft_recorder::domain::{LibraryEntry, MeterActor, MeterEntry, MeterFight, MeterMetric};
+use warcraft_recorder::domain::{LibraryEntry, MeterFight, MeterMetric};
+use warcraft_recorder::meter::{
+    MeterProjection, ProjectedActor, ProjectedEntry, fight_index_at, has_untimed_totals,
+    project_current, project_overall,
+};
 
 use super::filters::class_css_class;
 use super::timeline::format_mm_ss;
@@ -199,67 +203,9 @@ impl EntryMeter {
     }
 }
 
-/// The Current fight for a playhead position: the segment containing it, else
-/// the nearest preceding segment, else the first.
-fn fight_index_at(fights: &[MeterFight], position_ms: u64) -> usize {
-    fights
-        .iter()
-        .position(|fight| position_ms >= fight.start_ms && position_ms < fight.end_ms)
-        .or_else(|| fights.iter().rposition(|fight| fight.end_ms <= position_ms))
-        .unwrap_or(0)
-}
-
-/// Merge every fight exactly once into one Overall segment, summing
-/// `active_ms`. Actors key on GUID in first-appearance order; same-key
-/// entries are summed so each fight contributes once.
-fn overall_fight(fights: &[MeterFight]) -> MeterFight {
-    let mut actors: Vec<MeterActor> = Vec::new();
-    let mut active_ms = 0_u64;
-    for fight in fights {
-        active_ms += fight.active_ms;
-        for actor in &fight.actors {
-            if let Some(merged) = actors.iter_mut().find(|merged| merged.guid == actor.guid) {
-                merge_entries(&mut merged.spells, &actor.spells);
-                merge_entries(&mut merged.targets, &actor.targets);
-            } else {
-                actors.push(MeterActor {
-                    guid: actor.guid.clone(),
-                    name: actor.name.clone(),
-                    spells: actor.spells.clone(),
-                    targets: actor.targets.clone(),
-                });
-            }
-        }
-    }
-    MeterFight {
-        label: String::new(),
-        start_ms: fights.first().map_or(0, |fight| fight.start_ms),
-        end_ms: fights.last().map_or(0, |fight| fight.end_ms),
-        active_ms,
-        actors,
-    }
-}
-
-/// Sum entries sharing `(metric, key)` — plus `marker` for targets.
-fn merge_entries(into: &mut Vec<MeterEntry>, from: &[MeterEntry]) {
-    for entry in from {
-        if let Some(merged) = into.iter_mut().find(|merged| {
-            merged.metric == entry.metric
-                && merged.key == entry.key
-                && merged.marker == entry.marker
-        }) {
-            merged.amount += entry.amount;
-            merged.hits += entry.hits;
-            merged.overheal += entry.overheal;
-        } else {
-            into.push(entry.clone());
-        }
-    }
-}
-
 /// Actor total for a view: spell amounts unfiltered, or the matching target
 /// rows when a target or marker is selected. Utility totals count events.
-fn actor_total(actor: &MeterActor, view: MeterMetric, target: &TargetSel) -> u64 {
+fn actor_total(actor: &ProjectedActor, view: MeterMetric, target: &TargetSel) -> u64 {
     match target {
         TargetSel::All => actor
             .spells
@@ -278,7 +224,7 @@ fn actor_total(actor: &MeterActor, view: MeterMetric, target: &TargetSel) -> u64
 
 /// The active target filter, applied to target rows only: by name across all
 /// markers, or by marker across all names.
-fn matches_target(entry: &MeterEntry, target: &TargetSel) -> bool {
+fn matches_target(entry: &ProjectedEntry, target: &TargetSel) -> bool {
     match target {
         TargetSel::All => true,
         TargetSel::Name(name) => &entry.key == name,
@@ -432,21 +378,21 @@ impl DamageMeter {
     pub fn set_entry(&self, entry: Option<&LibraryEntry>) {
         let inner = &self.inner;
         inner.entry.replace(entry.map(EntryMeter::from_entry));
+        inner.position_ms.set(0);
         inner.current_fight.set(None);
         inner.breakdown.replace(None);
         inner.target.replace(TargetSel::All);
         inner.refresh();
     }
-    /// The playhead moved. The Current-fight index is tracked on every call,
-    /// whatever segment is shown, so switching to Current renders the fight
-    /// for the last known position; a rebuild only happens when the shown
-    /// Current fight actually changes.
+    /// The playhead moved. Both segment modes are cumulative only through the
+    /// current playback second, so either a second tick or fight boundary
+    /// rebuilds the meter.
     pub fn set_position(&self, position_ms: u64) {
         let inner = &self.inner;
-        inner.position_ms.set(position_ms);
-        let previous = inner.current_fight.get();
+        let previous_second = inner.position_ms.replace(position_ms) / 1_000;
+        let previous_fight = inner.current_fight.get();
         inner.sync_current_fight();
-        if inner.current_fight.get() != previous && inner.segment.get() == SegmentKind::Current {
+        if position_ms / 1_000 != previous_second || inner.current_fight.get() != previous_fight {
             inner.refresh();
         }
     }
@@ -644,15 +590,12 @@ impl Inner {
     /// while another segment is rendered, so a segment switch never shows a
     /// stale fight.
     fn sync_current_fight(&self) {
-        let Some(index) = self
+        let index = self
             .entry
             .borrow()
             .as_ref()
-            .map(|entry| fight_index_at(&entry.fights, self.position_ms.get()))
-        else {
-            return;
-        };
-        self.current_fight.replace(Some(index));
+            .and_then(|entry| fight_index_at(&entry.fights, self.position_ms.get()));
+        self.current_fight.replace(index);
     }
 
     fn set_target(self: &Rc<Self>, target: TargetSel) {
@@ -691,26 +634,21 @@ impl Inner {
         }
     }
 
-    /// The fight the current view/segment renders: Current selects the
-    /// containing fight, Overall merges every fight exactly once.
-    fn selected_fight(&self) -> Option<MeterFight> {
+    /// The selected Current or Overall projection at the playhead.
+    fn selected_fight(&self) -> Option<MeterProjection> {
         let entry = self.entry.borrow();
         let entry = entry.as_ref()?;
         if entry.fights.is_empty() {
             return None;
         }
-        Some(match self.segment.get() {
-            SegmentKind::Overall => overall_fight(&entry.fights),
-            SegmentKind::Current => entry
-                .fights
-                .get(self.current_fight.get().unwrap_or(0))
-                .cloned()?,
-        })
+        match self.segment.get() {
+            SegmentKind::Overall => Some(project_overall(&entry.fights, self.position_ms.get())),
+            SegmentKind::Current => project_current(&entry.fights, self.position_ms.get()),
+        }
     }
 
     /// Header text: `{mm:ss} {view}`, with the target appended when filtered.
-    /// The clock is the selected segment's static `active_ms`, never a timer.
-    fn rebuild_title(&self, fight: Option<&MeterFight>) {
+    fn rebuild_title(&self, fight: Option<&MeterProjection>) {
         let view = metric_label(self.view.get());
         let title = match target_label(&self.target.borrow()) {
             Some(target) => format!("{view} to {target}"),
@@ -719,7 +657,7 @@ impl Inner {
         match fight {
             Some(fight) => self
                 .title
-                .set_text(&format!("{} {title}", format_mm_ss(fight.active_ms))),
+                .set_text(&format!("{} {title}", format_mm_ss(fight.elapsed_ms))),
             None => self.title.set_text(&title),
         }
     }
@@ -821,7 +759,7 @@ impl Inner {
         (names.into_iter().collect(), markers)
     }
 
-    fn rebuild_content(self: &Rc<Self>, fight: Option<MeterFight>) {
+    fn rebuild_content(self: &Rc<Self>, fight: Option<MeterProjection>) {
         let Some(fight) = fight else {
             self.show_empty("No combat data for this recording.");
             return;
@@ -839,7 +777,7 @@ impl Inner {
         if breakdown.is_some() {
             self.breakdown.replace(None);
         }
-        let mut ranked: Vec<(&MeterActor, u64)> = fight
+        let mut ranked: Vec<(&ProjectedActor, u64)> = fight
             .actors
             .iter()
             .filter_map(|actor| {
@@ -848,7 +786,16 @@ impl Inner {
             })
             .collect();
         if ranked.is_empty() {
-            self.show_empty(&metric_empty_message(view));
+            let untimed = self
+                .entry
+                .borrow()
+                .as_ref()
+                .is_some_and(|entry| has_untimed_totals(&entry.fights));
+            if untimed {
+                self.show_empty("This recording has no time-resolved meter data.");
+            } else {
+                self.show_empty(&metric_empty_message(view));
+            }
             return;
         }
         ranked.sort_by(|a, b| b.1.cmp(&a.1));
@@ -859,18 +806,18 @@ impl Inner {
     /// total and rate on the right. Activating a row opens its breakdown.
     fn rebuild_ranking(
         self: &Rc<Self>,
-        fight: &MeterFight,
-        ranked: &[(&MeterActor, u64)],
+        fight: &MeterProjection,
+        ranked: &[(&ProjectedActor, u64)],
         view: MeterMetric,
     ) {
         let top = ranked.first().map_or(1, |(_, total)| *total);
         let utility = matches!(view, MeterMetric::Interrupts | MeterMetric::Dispels);
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         for (rank, (actor, total)) in ranked.iter().enumerate() {
-            let right = if utility || fight.active_ms == 0 {
+            let right = if utility || fight.elapsed_ms == 0 {
                 format_compact(*total)
             } else {
-                let rate = u128::from(*total) * 1_000 / u128::from(fight.active_ms);
+                let rate = u128::from(*total) * 1_000 / u128::from(fight.elapsed_ms);
                 format!(
                     "{} ({})",
                     format_compact(*total),
@@ -899,7 +846,7 @@ impl Inner {
     /// Spells and Targets lists with the active filters intact.
     fn rebuild_breakdown(
         self: &Rc<Self>,
-        actor: &MeterActor,
+        actor: &ProjectedActor,
         view: MeterMetric,
         target: &TargetSel,
     ) {
@@ -948,7 +895,12 @@ impl Inner {
 
     /// One breakdown line: `name … amount share% hits`, sharing the ranking
     /// row visual with the fill proportional to the share.
-    fn breakdown_row(&self, actor: &MeterActor, entry: &MeterEntry, total: u64) -> gtk4::Overlay {
+    fn breakdown_row(
+        &self,
+        actor: &ProjectedActor,
+        entry: &ProjectedEntry,
+        total: u64,
+    ) -> gtk4::Overlay {
         let share = if total == 0 {
             0.0
         } else {
