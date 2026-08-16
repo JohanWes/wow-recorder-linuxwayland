@@ -236,7 +236,6 @@ struct Inner {
     root: gtk4::Box,
     header: gtk4::Box,
     title: gtk4::Label,
-    menu_button: gtk4::MenuButton,
     context_menu: gtk4::PopoverMenu,
     content: gtk4::Box,
     scroller: gtk4::ScrolledWindow,
@@ -292,11 +291,6 @@ impl DamageMeter {
         // width contributor, so the explicit root widths from resizing can
         // govern.
         title.set_max_width_chars(1);
-        let menu_button = gtk4::MenuButton::new();
-        menu_button.set_icon_name("view-more-symbolic");
-        menu_button.add_css_class("flat");
-        menu_button.set_tooltip_text(Some("Meter options"));
-        menu_button.update_property(&[gtk4::accessible::Property::Label("Meter options")]);
         let context_menu = gtk4::PopoverMenu::from_model(None::<&gtk4::gio::Menu>);
         context_menu.set_parent(&title);
         context_menu.set_position(gtk4::PositionType::Bottom);
@@ -307,7 +301,6 @@ impl DamageMeter {
         close.set_tooltip_text(Some("Hide meter"));
         close.update_property(&[gtk4::accessible::Property::Label("Hide meter")]);
         header.append(&title);
-        header.append(&menu_button);
         header.append(&close);
 
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -346,7 +339,6 @@ impl DamageMeter {
             root,
             header,
             title,
-            menu_button,
             context_menu,
             content,
             scroller,
@@ -366,7 +358,7 @@ impl DamageMeter {
         });
 
         inner.connect_actions();
-        inner.connect_title_menu(&inner.title);
+        inner.connect_clicks();
         {
             let inner = Rc::clone(&inner);
             close.connect_clicked(move |_| inner.set_visible(false));
@@ -494,18 +486,13 @@ impl Inner {
                 this.set_target(target);
             }
         });
-
-        let close = gtk4::gio::SimpleAction::new("close", None);
-        self.actions.add_action(&close);
-        let this = Rc::clone(self);
-        close.connect_activate(move |_, _| this.set_visible(false));
     }
 
-    /// Header-and-grip drag: the header moves the meter by pixel margins, the
+    /// Title-and-grip drag: the title moves the meter by pixel margins, the
     /// bottom-right grip resizes it, both clamped so the panel stays inside
-    /// the overlay allocation. The controller lives on the stationary
-    /// overlay: a gesture controller must not move with its own coordinate
-    /// frame, and the overlay-relative drag coordinates stay valid.
+    /// the overlay allocation. Other header controls are denied so their
+    /// clicks survive. The controller lives on the stationary overlay because
+    /// overlay-relative drag coordinates stay valid while the meter moves.
     fn connect_drag(self: &Rc<Self>, overlay: &gtk4::Overlay) {
         let drag = gtk4::GestureDrag::new();
         {
@@ -521,7 +508,10 @@ impl Inner {
                 };
                 let mode = if picked == this.grip || picked.is_ancestor(&this.grip) {
                     DragMode::Resize
-                } else if picked == this.header || picked.is_ancestor(&this.header) {
+                } else if picked == this.header
+                    || picked == this.title
+                    || picked.is_ancestor(&this.title)
+                {
                     DragMode::Move
                 } else {
                     gesture.set_state(gtk4::EventSequenceState::Denied);
@@ -566,26 +556,33 @@ impl Inner {
         overlay.add_controller(drag);
     }
 
-    /// Both menu routes build their model only when opened. The retained
-    /// right-click popover is parented to the title, so its pointing rectangle
-    /// uses the click coordinates directly.
-    fn connect_title_menu(self: &Rc<Self>, title: &gtk4::Label) {
+    /// Secondary click on the title opens meter options; elsewhere on the
+    /// panel it returns an open actor breakdown to the ranking.
+    fn connect_clicks(self: &Rc<Self>) {
+        let menu_click = gtk4::GestureClick::new();
+        menu_click.set_button(gtk4::gdk::BUTTON_SECONDARY);
         let this = Rc::clone(self);
-        self.menu_button.set_create_popup_func(move |button| {
-            button.set_menu_model(Some(&this.menu_model()));
-        });
-
-        let click = gtk4::GestureClick::new();
-        click.set_button(gtk4::gdk::BUTTON_SECONDARY);
-        let this = Rc::clone(self);
-        click.connect_pressed(move |gesture, _, x, y| {
+        menu_click.connect_pressed(move |gesture, _, x, y| {
             this.context_menu.set_menu_model(Some(&this.menu_model()));
             this.context_menu
                 .set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
             this.context_menu.popup();
             gesture.set_state(gtk4::EventSequenceState::Claimed);
         });
-        title.add_controller(click);
+        self.title.add_controller(menu_click);
+
+        let back_click = gtk4::GestureClick::new();
+        back_click.set_button(gtk4::gdk::BUTTON_SECONDARY);
+        let this = Rc::clone(self);
+        back_click.connect_pressed(move |gesture, _, _, _| {
+            if this.breakdown.borrow().is_none() {
+                return;
+            }
+            this.breakdown.replace(None);
+            this.refresh();
+            gesture.set_state(gtk4::EventSequenceState::Claimed);
+        });
+        self.root.add_controller(back_click);
     }
 
     fn set_view(self: &Rc<Self>, metric: MeterMetric) {
@@ -737,10 +734,6 @@ impl Inner {
         target_section.append_submenu(Some("Target"), &targets);
         menu.append_section(None, &target_section);
 
-        let close_section = gtk4::gio::Menu::new();
-        close_section.append(Some("Hide meter"), Some("meter.close"));
-        menu.append_section(None, &close_section);
-
         menu
     }
 
@@ -868,8 +861,9 @@ impl Inner {
         self.set_content(&content);
     }
 
-    /// The actor drilldown in the same scroller: Back, actor name, then the
-    /// Spells and Targets lists with the active filters intact.
+    /// The actor drilldown in the same scroller: actor name, then the Spells
+    /// and Targets lists with the active filters intact. Secondary click on
+    /// the panel returns to the ranking.
     fn rebuild_breakdown(
         self: &Rc<Self>,
         actor: &ProjectedActor,
@@ -877,15 +871,6 @@ impl Inner {
         target: &TargetSel,
     ) {
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
-        let back = gtk4::Button::with_label("Back");
-        back.add_css_class("flat");
-        back.set_halign(gtk4::Align::Start);
-        let this = Rc::clone(self);
-        back.connect_clicked(move |_| {
-            this.breakdown.replace(None);
-            this.refresh();
-        });
-        content.append(&back);
         let name = gtk4::Label::new(Some(&actor.name));
         name.set_xalign(0.0);
         name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
