@@ -2332,6 +2332,7 @@ mod tests {
                         guid: "Player-1000-AAAA0001".to_owned(),
                         name: "Testone".to_owned(),
                         at_ms: 2_000,
+                        max_hp: 500_000,
                         events: vec![
                             MeterDeathEvent {
                                 kind: MeterDeathEventKind::Healing,
@@ -2339,6 +2340,8 @@ mod tests {
                                 source_name: "Healer".to_owned(),
                                 spell_name: "Heal".to_owned(),
                                 amount: 50,
+                                hp: 400_000,
+                                overkill: 0,
                             },
                             MeterDeathEvent {
                                 kind: MeterDeathEventKind::Damage,
@@ -2346,6 +2349,8 @@ mod tests {
                                 source_name: "Boss".to_owned(),
                                 spell_name: "Hit".to_owned(),
                                 amount: 100,
+                                hp: 0,
+                                overkill: 25,
                             },
                         ],
                     }],

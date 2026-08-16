@@ -26,6 +26,8 @@ pub const SAMPLE_INTERVAL_MS: u64 = 500;
 /// Total hostile-damage silence separating Mythic+ trash pulls. Chain pulls
 /// inside this window remain one fight, matching the host staying in combat.
 const PULL_GAP_MS: i64 = 6_000;
+/// Events kept per unit for the death log breakdown.
+const DEATH_LOG_EVENTS: usize = 20;
 const OTHER_KEY: &str = "Other";
 const METRICS: [MeterMetric; 5] = [
     MeterMetric::Damage,
@@ -44,6 +46,20 @@ pub(crate) struct MeterAccumulator {
     /// Lingering MINE effects must not re-engage a dead host in the same pull.
     host_dead: bool,
     death_history: HashMap<String, Vec<RawDeathEvent>>,
+    /// Last known HP per unit, sizing the death log bars.
+    hp: HashMap<String, UnitHp>,
+}
+
+/// `at_ms` marks the event the HP describes, so an event whose own line
+/// carried no HP (swings report the source, not the victim) is derived from
+/// its amount instead of reusing a stale reading.
+struct UnitHp {
+    /// HP standing before the event at `at_ms`, which is what overkill is
+    /// measured against; the log's own reading is already post-event.
+    before: u64,
+    current: u64,
+    max: u64,
+    at_ms: i64,
 }
 
 struct OwnedBy {
@@ -79,6 +95,10 @@ struct RecentRecord {
 struct RawDeathEvent {
     kind: MeterDeathEventKind,
     at_ms: i64,
+    /// Destination HP after the event, 0 when the log never reported it.
+    hp: u64,
+    /// Damage wasted past zero HP; only the killing blow carries any.
+    overkill: u64,
     source_name: String,
     spell_name: String,
     amount: u64,
@@ -86,6 +106,7 @@ struct RawDeathEvent {
 
 struct RawDeath {
     guid: String,
+    max_hp: u64,
     name: String,
     at_ms: i64,
     events: Vec<RawDeathEvent>,
@@ -182,6 +203,7 @@ impl MeterAccumulator {
             segmented: false,
             host_dead: false,
             death_history: HashMap::new(),
+            hp: HashMap::new(),
         }
     }
 
@@ -195,6 +217,7 @@ impl MeterAccumulator {
             segmented: true,
             host_dead: false,
             death_history: HashMap::new(),
+            hp: HashMap::new(),
         }
     }
 
@@ -442,6 +465,40 @@ impl MeterAccumulator {
             .add_transfer(transferred, transferred_overheal, bucket_end_ms);
     }
 
+    /// HP left after an event, plus the damage wasted past zero. The log's own
+    /// reading is used when this event carried one, otherwise the previous
+    /// reading moves by the event's amount. Overkill is the shortfall against
+    /// the HP standing before the hit, which matches the log's own field.
+    fn hp_after(
+        &mut self,
+        guid: &str,
+        kind: MeterDeathEventKind,
+        amount: u64,
+        at_ms: i64,
+    ) -> (u64, u64) {
+        let Some(hp) = self.hp.get_mut(guid) else {
+            return (0, 0);
+        };
+        let before = if hp.at_ms == at_ms {
+            hp.before
+        } else {
+            hp.current
+        };
+        let overkill = match kind {
+            MeterDeathEventKind::Damage => amount.saturating_sub(before),
+            MeterDeathEventKind::Healing => 0,
+        };
+        if hp.at_ms != at_ms {
+            hp.before = hp.current;
+            hp.current = match kind {
+                MeterDeathEventKind::Damage => hp.current.saturating_sub(amount),
+                MeterDeathEventKind::Healing => (hp.current + amount).min(hp.max),
+            };
+            hp.at_ms = at_ms;
+        }
+        (hp.current, overkill)
+    }
+
     fn remember_death_event(
         &mut self,
         guid: &str,
@@ -454,21 +511,41 @@ impl MeterAccumulator {
         if guid.is_empty() || amount == 0 {
             return;
         }
+        let (hp, overkill) = self.hp_after(guid, kind, amount, at_ms);
         let event = RawDeathEvent {
             kind,
             at_ms,
+            hp,
+            overkill,
             source_name: source_name.to_owned(),
             spell_name: spell_name.to_owned(),
             amount,
         };
         if let Some(events) = self.death_history.get_mut(guid) {
-            if events.len() == 10 {
+            if events.len() == DEATH_LOG_EVENTS {
                 events.remove(0);
             }
             events.push(event);
         } else {
             self.death_history.insert(guid.to_owned(), vec![event]);
         }
+    }
+
+    /// Advanced-block destination HP, which the log reports after the event.
+    pub(crate) fn note_hp(&mut self, guid: &str, current: u64, max: u64, at_ms: i64) {
+        if guid.is_empty() || max == 0 {
+            return;
+        }
+        let before = self.hp.get(guid).map_or(current, |hp| hp.current);
+        self.hp.insert(
+            guid.to_owned(),
+            UnitHp {
+                before,
+                current,
+                max,
+                at_ms,
+            },
+        );
     }
 
     pub(crate) fn death(&mut self, guid: &str, name: &str, at_ms: i64) {
@@ -479,6 +556,7 @@ impl MeterAccumulator {
             .deaths
             .push(RawDeath {
                 guid: guid.to_owned(),
+                max_hp: self.hp.get(guid).map_or(0, |hp| hp.max),
                 name: name.to_owned(),
                 at_ms,
                 events,
@@ -490,6 +568,7 @@ impl MeterAccumulator {
     pub(crate) fn cut(&mut self, at_ms: i64, new_label: String) {
         self.segmented = false;
         self.host_dead = false;
+        self.death_history.clear();
         self.begin_fight(at_ms, Some(new_label), false);
     }
 
@@ -498,6 +577,7 @@ impl MeterAccumulator {
     pub(crate) fn cut_to_trash(&mut self, at_ms: i64) {
         self.segmented = true;
         self.host_dead = false;
+        self.death_history.clear();
         self.begin_fight(at_ms, Some("Trash".to_owned()), true);
     }
 
@@ -510,9 +590,6 @@ impl MeterAccumulator {
     }
 
     fn begin_fight(&mut self, at_ms: i64, label: Option<String>, ambient: bool) {
-        // Death events describe the fight the unit died in; history from a
-        // previous pull must never bleed into a later death.
-        self.death_history.clear();
         let fight = self
             .fights
             .last_mut()
@@ -545,6 +622,11 @@ impl MeterAccumulator {
             self.host_dead = false;
         }
         let mine = !self.host_dead && (is_unit_self(source_flags) || is_unit_self(dest_flags));
+        // Only a real combat gap ends the fight a death belongs to; the host
+        // joining an ongoing pull splits the fight but keeps its history.
+        if separated {
+            self.death_history.clear();
+        }
         if separated || mine && ambient {
             self.begin_fight(at_ms, Some("Trash".to_owned()), !mine);
         }
@@ -687,6 +769,7 @@ impl RawFight {
                 .iter()
                 .map(|death| MeterDeath {
                     guid: death.guid.clone(),
+                    max_hp: death.max_hp,
                     name: death.name.clone(),
                     at_ms: relative_ms(started_at_ms, death.at_ms),
                     events: death
@@ -698,6 +781,8 @@ impl RawFight {
                             source_name: event.source_name.clone(),
                             spell_name: event.spell_name.clone(),
                             amount: event.amount,
+                            hp: event.hp,
+                            overkill: event.overkill,
                         })
                         .collect(),
                 })
@@ -1562,6 +1647,83 @@ mod tests {
     }
 
     #[test]
+    fn joining_an_ongoing_pull_keeps_the_death_log() {
+        let mut meter = MeterAccumulator::trash(0);
+        // The group is already fighting; the host has not engaged yet.
+        for (at, hp) in [(1_000, 300_000), (2_000, 220_000)] {
+            // Spell hits carry the victim's HP after the hit.
+            meter.note_hp("Player-0-ALLY", hp, 500_000, at);
+            meter.damage(
+                "Creature-0-MOB",
+                "Mob",
+                MOB,
+                "Player-0-ALLY",
+                "Ally",
+                FRIENDLY_PLAYER,
+                0,
+                "Early Hit",
+                10,
+                at,
+            );
+        }
+        // The host joins the same pull, splitting the fight into Current.
+        meter.damage(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            "Mob",
+            "Mob",
+            MOB,
+            0,
+            "Strike",
+            20,
+            3_000,
+        );
+        // A swing reports the swinger's HP, not the victim's, so the killing
+        // blow's remainder is derived from the amount.
+        meter.damage(
+            "Creature-0-MOB",
+            "Mob",
+            MOB,
+            "Player-0-ALLY",
+            "Ally",
+            FRIENDLY_PLAYER,
+            0,
+            "Kill",
+            500,
+            3_400,
+        );
+        // The killing blow's own line reports the post-hit HP, so overkill
+        // must be measured against the HP standing before it.
+        meter.note_hp("Player-0-ALLY", 0, 500_000, 3_450);
+        meter.damage(
+            "Creature-0-MOB",
+            "Mob",
+            MOB,
+            "Player-0-ALLY",
+            "Ally",
+            FRIENDLY_PLAYER,
+            0,
+            "Killing Blow",
+            300_000,
+            3_450,
+        );
+        meter.death("Player-0-ALLY", "Ally", 3_500);
+
+        let data = meter.drain(9_000, 0, "Dungeon", &HashMap::new());
+        let deaths: Vec<&MeterDeath> = data.fights.iter().flat_map(|fight| &fight.deaths).collect();
+        assert_eq!(deaths.len(), 1);
+        assert_eq!(deaths[0].events.len(), 4);
+        assert_eq!(deaths[0].max_hp, 500_000);
+        assert_eq!(deaths[0].events[1].hp, 220_000);
+        assert_eq!(deaths[0].events[2].hp, 219_500);
+        assert_eq!(deaths[0].events[2].overkill, 0);
+        // The killing blow wasted everything past the remaining 219_500.
+        assert_eq!(deaths[0].events[3].hp, 0);
+        assert_eq!(deaths[0].events[3].overkill, 80_500);
+    }
+
+    #[test]
     fn healer_joined_pull_still_splits_after_damage_silence() {
         let mut meter = MeterAccumulator::trash(0);
         meter.damage(
@@ -2059,6 +2221,7 @@ mod tests {
             project_current(&data.fights, 12_000).unwrap().deaths.len(),
             1
         );
+        assert_eq!(project_overall(&data.fights, 13_000).deaths.len(), 2);
     }
 
     #[test]

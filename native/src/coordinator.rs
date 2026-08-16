@@ -2098,6 +2098,8 @@ fn test_events(
                 dest_flags: ALLY_FLAGS,
                 dest_raid_marker: 0,
                 spell_name: "Soul Mend".to_owned(),
+                dest_current_hp: None,
+                dest_max_hp: None,
                 amount: 120_000 * quarter as u64,
                 overheal: 0,
             },

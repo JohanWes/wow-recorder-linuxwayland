@@ -551,6 +551,9 @@ fn handle_event(
                 {
                     active.meter.record_owner(source_guid, owner, None);
                 }
+                if let (Some(current), Some(maximum)) = (dest_current_hp, dest_max_hp) {
+                    active.meter.note_hp(dest_guid, *current, *maximum, at_ms);
+                }
                 active.meter.damage(
                     source_guid,
                     source_name,
@@ -576,8 +579,13 @@ fn handle_event(
             spell_name,
             amount,
             overheal,
+            dest_current_hp,
+            dest_max_hp,
         } => {
             if let Some(active) = state.active.as_mut() {
+                if let (Some(current), Some(maximum)) = (dest_current_hp, dest_max_hp) {
+                    active.meter.note_hp(dest_guid, *current, *maximum, at_ms);
+                }
                 active.meter.heal(
                     source_guid,
                     source_name,

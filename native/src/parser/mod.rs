@@ -107,6 +107,9 @@ pub enum CombatEvent {
         spell_name: String,
         amount: u64,
         overheal: u64,
+        /// Destination HP after the heal, on the same infoGUID rule as damage.
+        dest_current_hp: Option<u64>,
+        dest_max_hp: Option<u64>,
     },
     /// Damage or effective healing reassigned from the original actor to the
     /// player whose support effect contributed it.
@@ -421,6 +424,27 @@ fn lenient_hex(fields: &[String], index: usize) -> Option<u64> {
         .and_then(|value| u64::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).ok())
 }
 
+/// Destination HP from the advanced block, trusted only when its infoGUID
+/// names the destination (for swings the block describes the source).
+fn dest_hp(
+    fields: &[String],
+    block: &AdvancedBlock,
+    dest_guid: &str,
+) -> (Option<u64>, Option<u64>) {
+    if block.present
+        && fields
+            .get(block.start)
+            .is_some_and(|info_guid| info_guid == dest_guid)
+    {
+        (
+            lenient_number(fields, block.start + 2),
+            lenient_number(fields, block.start + 3),
+        )
+    } else {
+        (None, None)
+    }
+}
+
 fn parse_damage(
     event_name: &str,
     fields: &[String],
@@ -437,21 +461,7 @@ fn parse_damage(
     let event = (|| {
         let source_guid = fields.get(1)?.as_str();
         let dest_guid = fields.get(5)?.as_str();
-        // The advanced block describes the destination for spell damage and the
-        // source for swings, so destination HP is only trusted when infoGUID
-        // names the destination.
-        let (dest_current_hp, dest_max_hp) = if block.present
-            && fields
-                .get(block.start)
-                .is_some_and(|info_guid| info_guid == dest_guid)
-        {
-            (
-                lenient_number(fields, block.start + 2),
-                lenient_number(fields, block.start + 3),
-            )
-        } else {
-            (None, None)
-        };
+        let (dest_current_hp, dest_max_hp) = dest_hp(fields, &block, dest_guid);
         // SWING_DAMAGE's block names the source, so its ownerGUID is the
         // swinging pet's owner.
         let source_owner_guid = if event_name == "SWING_DAMAGE"
@@ -508,6 +518,7 @@ fn parse_heal(
                 1
             };
         let overheal = lenient_number::<u64>(fields, overheal_index).unwrap_or(0);
+        let (dest_current_hp, dest_max_hp) = dest_hp(fields, &block, fields.get(5)?.as_str());
         Some(CombatEvent::Heal {
             source_guid: fields.get(1)?.as_str().to_owned(),
             source_name: fields.get(2)?.as_str().to_owned(),
@@ -519,6 +530,8 @@ fn parse_heal(
             spell_name: fields.get(10)?.as_str().to_owned(),
             amount,
             overheal,
+            dest_current_hp,
+            dest_max_hp,
         })
     })();
     Ok(event)
@@ -1343,6 +1356,8 @@ mod tests {
                 spell_name: "Flash Heal".into(),
                 amount: 1000,
                 overheal: 400,
+                dest_current_hp: Some(500),
+                dest_max_hp: Some(500),
             }
         );
         let old = "4/9 19:27:13.200  SPELL_HEAL,Player-0-A,\"Healer\",0x511,0x0,Player-0-B,\"Tank\",0x512,0x0,2061,\"Flash Heal\",0x2,300,50,2,1";
@@ -1362,6 +1377,8 @@ mod tests {
                 spell_name: "Flash Heal".into(),
                 amount: 300,
                 overheal: 50,
+                dest_current_hp: None,
+                dest_max_hp: None,
             }
         );
     }
@@ -1570,6 +1587,8 @@ mod tests {
                 spell_name: "Flash Heal".into(),
                 amount: 1000,
                 overheal: 400,
+                dest_current_hp: Some(500),
+                dest_max_hp: Some(500),
             }
         );
     }

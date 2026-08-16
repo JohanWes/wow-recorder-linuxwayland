@@ -301,6 +301,13 @@ pub struct MeterDeathEvent {
     pub source_name: String,
     pub spell_name: String,
     pub amount: u64,
+    /// HP the unit was left on after this event; the death log draws it as a
+    /// health bar. Zero when the log never reported it.
+    #[serde(default)]
+    pub hp: u64,
+    /// Damage wasted past zero HP; only the killing blow carries any.
+    #[serde(default)]
+    pub overkill: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +315,10 @@ pub struct MeterDeath {
     pub guid: String,
     pub name: String,
     pub at_ms: u64,
+    /// Max HP of the dead unit, sizing the death log bars. Zero when the log
+    /// never reported it.
+    #[serde(default)]
+    pub max_hp: u64,
     pub events: Vec<MeterDeathEvent>,
 }
 

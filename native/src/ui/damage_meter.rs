@@ -940,7 +940,7 @@ impl Inner {
     }
 
     fn rebuild_death_breakdown(&self, deaths: &[&MeterDeath]) {
-        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
         let name = gtk4::Label::new(Some(&deaths[0].name));
         name.set_xalign(0.0);
         name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
@@ -951,28 +951,42 @@ impl Inner {
                 index + 1,
                 format_mm_ss(death.at_ms)
             )));
+            // Each bar is the health the unit was left on after the event, so
+            // the list reads as a health bar draining towards the death.
             for event in &death.events {
                 let before_ms = death.at_ms.saturating_sub(event.at_ms);
-                let sign = match event.kind {
-                    MeterDeathEventKind::Damage => "-",
-                    MeterDeathEventKind::Healing => "+",
+                let (class, sign) = match event.kind {
+                    MeterDeathEventKind::Damage => ("wr-death-damage", "-"),
+                    MeterDeathEventKind::Healing => ("wr-death-healing", "+"),
                 };
-                content.append(&death_event_row(
-                    event.kind,
+                // Sidecars written before HP was recorded draw a full bar
+                // rather than a misleading one.
+                let remaining = if death.max_hp > 0 {
+                    event.hp as f64 / death.max_hp as f64
+                } else {
+                    1.0
+                };
+                content.append(&fill_line(
+                    Some(class),
                     &format!(
                         "-{:.1}s {} ({})",
                         before_ms as f64 / 1_000.0,
                         event.spell_name,
                         event.source_name
                     ),
-                    &format!("{sign}{}", format_compact(event.amount)),
+                    &if event.overkill > 0 {
+                        format!(
+                            "{sign}{} ({} overkill)",
+                            format_compact(event.amount),
+                            format_compact(event.overkill)
+                        )
+                    } else {
+                        format!("{sign}{}", format_compact(event.amount))
+                    },
+                    remaining,
                 ));
             }
-            content.append(&death_event_row(
-                MeterDeathEventKind::Damage,
-                "0.0s Death",
-                "",
-            ));
+            content.append(&fill_line(Some("wr-death-damage"), "0.0s Death", "", 0.0));
         }
         self.set_content(&content);
     }
@@ -1176,25 +1190,6 @@ fn fill_line(class: Option<&str>, left: &str, right: &str, fraction: f64) -> gtk
     overlay.set_child(Some(&fill));
     overlay.add_overlay(&line);
     overlay
-}
-
-fn death_event_row(kind: MeterDeathEventKind, left: &str, right: &str) -> gtk4::Box {
-    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
-    row.add_css_class("wr-meter-death-event");
-    row.add_css_class(match kind {
-        MeterDeathEventKind::Damage => "damage",
-        MeterDeathEventKind::Healing => "healing",
-    });
-    let left_label = gtk4::Label::new(Some(left));
-    left_label.set_xalign(0.0);
-    left_label.set_hexpand(true);
-    left_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    let right_label = gtk4::Label::new(Some(right));
-    right_label.set_xalign(1.0);
-    right_label.add_css_class("numeric");
-    row.append(&left_label);
-    row.append(&right_label);
-    row
 }
 
 fn heading(text: &str) -> gtk4::Label {
