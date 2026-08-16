@@ -396,12 +396,10 @@ impl MeterAccumulator {
         self.begin_fight(at_ms, Some("Trash".to_owned()), true);
     }
 
-    /// Host death is an exact player-POV combat boundary for trash.
-    pub(crate) fn host_died(&mut self, at_ms: i64) {
+    /// A dead host no longer produces fresh engagement signals, but the
+    /// group's open fight continues until hostile damage stops.
+    pub(crate) fn host_died(&mut self) {
         if self.segmented {
-            if self.fights.last().is_some_and(|fight| !fight.ambient) {
-                self.begin_fight(at_ms, Some("Trash".to_owned()), true);
-            }
             self.host_dead = true;
         }
     }
@@ -1412,7 +1410,7 @@ mod tests {
     }
 
     #[test]
-    fn host_death_returns_trash_to_ambient() {
+    fn host_death_keeps_the_group_fight_current() {
         let mut meter = MeterAccumulator::trash(0);
         meter.damage(
             "Player-0-HOST",
@@ -1436,8 +1434,8 @@ mod tests {
             20,
             3_000,
         );
-        meter.host_died(4_000);
-        // Lingering host effects keep MINE after death and must not re-promote.
+        meter.host_died();
+        // Lingering host effects and surviving allies stay in the same fight.
         meter.damage(
             "Player-0-HOST",
             "Host",
@@ -1462,11 +1460,10 @@ mod tests {
         );
 
         let data = meter.drain(10_000, 0, "Dungeon", &HashMap::new());
-        assert_eq!(data.fights.len(), 3);
+        assert_eq!(data.fights.len(), 2);
         assert!(!data.fights[1].ambient);
-        assert!(data.fights[2].ambient);
         let current = project_current(&data.fights, 10_000).unwrap();
-        assert_eq!(current.elapsed_ms, 2_000);
+        assert_eq!(current.elapsed_ms, 6_000);
         assert_eq!(current.actors.len(), 2);
         assert_eq!(
             current
@@ -1475,7 +1472,7 @@ mod tests {
                 .flat_map(|actor| &actor.spells)
                 .map(|entry| entry.amount)
                 .sum::<u64>(),
-            30
+            65
         );
     }
 

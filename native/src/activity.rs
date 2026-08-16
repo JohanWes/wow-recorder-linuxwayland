@@ -1910,7 +1910,7 @@ fn handle_unit_died(
         return;
     }
     if is_unit_self(flags) {
-        active.meter.host_died(at_ms);
+        active.meter.host_died();
     }
     let friendly = is_unit_friendly(flags);
     let relative = relative_ms(active.started_at_ms, at_ms - DEATH_MARKER_BACK_OFFSET_MS);
