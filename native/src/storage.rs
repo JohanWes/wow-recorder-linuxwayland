@@ -1682,7 +1682,7 @@ fn shift_timeline(
 /// line up with the timeline bands. Fights wholly outside the media are
 /// dropped; overlapping bounds clamp into the media and the end never precedes
 /// the start. `active_ms` is activity-invariant.
-fn shift_meter(
+pub fn shift_meter(
     meter: &MeterData,
     activity_start_ms: i64,
     media_start_ms: i64,

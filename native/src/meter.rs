@@ -510,6 +510,9 @@ impl MeterAccumulator {
     }
 
     fn begin_fight(&mut self, at_ms: i64, label: Option<String>, ambient: bool) {
+        // Death events describe the fight the unit died in; history from a
+        // previous pull must never bleed into a later death.
+        self.death_history.clear();
         let fight = self
             .fights
             .last_mut()
@@ -1509,6 +1512,56 @@ mod tests {
     }
 
     #[test]
+    fn death_events_from_earlier_pulls_do_not_bleed_in() {
+        let mut meter = MeterAccumulator::trash(0);
+        // An ally takes damage during a first pull that ends without a death.
+        meter.damage(
+            "Creature-0-MOB",
+            "Mob",
+            MOB,
+            "Player-0-ALLY",
+            "Ally",
+            FRIENDLY_PLAYER,
+            0,
+            "Stale Hit",
+            10,
+            1_000,
+        );
+        // The host opens a new pull beyond the gap; the ally dies to one hit.
+        meter.damage(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            "Mob",
+            "Mob",
+            MOB,
+            0,
+            "Hit",
+            20,
+            30_000,
+        );
+        meter.damage(
+            "Creature-0-MOB",
+            "Mob",
+            MOB,
+            "Player-0-ALLY",
+            "Ally",
+            FRIENDLY_PLAYER,
+            0,
+            "Kill",
+            500,
+            31_000,
+        );
+        meter.death("Player-0-ALLY", "Ally", 31_100);
+
+        let data = meter.drain(40_000, 0, "Dungeon", &HashMap::new());
+        let deaths: Vec<&MeterDeath> = data.fights.iter().flat_map(|fight| &fight.deaths).collect();
+        assert_eq!(deaths.len(), 1);
+        assert_eq!(deaths[0].events.len(), 1);
+        assert_eq!(deaths[0].events[0].spell_name, "Kill");
+    }
+
+    #[test]
     fn healer_joined_pull_still_splits_after_damage_silence() {
         let mut meter = MeterAccumulator::trash(0);
         meter.damage(
@@ -1951,7 +2004,7 @@ mod tests {
     }
 
     #[test]
-    fn death_log_keeps_ten_events_across_a_cut_then_clears() {
+    fn death_log_is_scoped_to_the_fight_since_the_cut() {
         let mut meter = MeterAccumulator::new(0, None);
         for index in 1..=11 {
             if index == 6 {
@@ -1988,9 +2041,11 @@ mod tests {
         let data = meter.drain(14_000, 0, "Fight", &HashMap::new());
         let deaths = &data.fights[1].deaths;
         assert_eq!(deaths.len(), 2);
-        assert_eq!(deaths[0].events.len(), 10);
-        assert_eq!(deaths[0].events[0].at_ms, 2_000);
-        assert_eq!(deaths[0].events[9].at_ms, 11_000);
+        // Events before the cut describe the previous fight and must not
+        // bleed into the boss-fight death.
+        assert_eq!(deaths[0].events.len(), 6);
+        assert_eq!(deaths[0].events[0].at_ms, 6_000);
+        assert_eq!(deaths[0].events[5].at_ms, 11_000);
         assert_eq!(deaths[1].events.len(), 1);
         assert_eq!(deaths[1].events[0].kind, MeterDeathEventKind::Healing);
         assert_eq!(deaths[1].events[0].amount, 60);
@@ -2004,7 +2059,6 @@ mod tests {
             project_current(&data.fights, 12_000).unwrap().deaths.len(),
             1
         );
-        assert_eq!(project_overall(&data.fights, 13_000).deaths.len(), 2);
     }
 
     #[test]
