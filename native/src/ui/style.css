@@ -175,6 +175,20 @@ window.wr-light .wr-class-warrior { color: #7d5f36; }
 .wr-meter-fill.wr-class-warlock progress { background-color: alpha(#8788ee, 0.55); }
 .wr-meter-fill.wr-class-warrior progress { background-color: alpha(#c69b6d, 0.55); }
 
+.wr-meter-death-event {
+  min-height: 20px;
+  padding: 0 6px;
+  border-radius: 4px;
+}
+
+.wr-meter-death-event.damage {
+  background-color: alpha(#c41e3a, 0.55);
+}
+
+.wr-meter-death-event.healing {
+  background-color: alpha(#00b34f, 0.55);
+}
+
 /* Combat seek track: fixed dark geometry inside the black player area. */
 .wr-timeline {
   min-height: 26px;

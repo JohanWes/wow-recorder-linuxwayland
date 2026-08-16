@@ -281,9 +281,34 @@ pub struct MeterEntry {
 #[serde(rename_all = "snake_case")]
 pub enum MeterMetric {
     Damage,
+    DamageTaken,
     Healing,
     Interrupts,
     Dispels,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeterDeathEventKind {
+    Damage,
+    Healing,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeterDeathEvent {
+    pub kind: MeterDeathEventKind,
+    pub at_ms: u64,
+    pub source_name: String,
+    pub spell_name: String,
+    pub amount: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeterDeath {
+    pub guid: String,
+    pub name: String,
+    pub at_ms: u64,
+    pub events: Vec<MeterDeathEvent>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +337,8 @@ pub struct MeterFight {
     #[serde(default)]
     pub ambient: bool,
     pub actors: Vec<MeterActor>,
+    #[serde(default)]
+    pub deaths: Vec<MeterDeath>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

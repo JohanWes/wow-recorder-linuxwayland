@@ -46,7 +46,7 @@ pub(crate) const REACTION_FRIENDLY: u64 = 0x10;
 pub(crate) const CONTROL_PLAYER: u64 = 0x100;
 const TYPE_PLAYER: u64 = 0x400;
 
-fn is_unit_player(flags: u64) -> bool {
+pub(crate) fn is_unit_player(flags: u64) -> bool {
     flags & CONTROL_PLAYER != 0 && flags & TYPE_PLAYER != 0
 }
 
@@ -531,6 +531,7 @@ fn handle_event(
             source_name,
             source_flags,
             source_owner_guid,
+            dest_guid,
             dest_name,
             dest_flags,
             dest_raid_marker,
@@ -554,6 +555,7 @@ fn handle_event(
                     source_guid,
                     source_name,
                     *source_flags,
+                    dest_guid,
                     dest_name,
                     *dest_flags,
                     *dest_raid_marker,
@@ -567,8 +569,9 @@ fn handle_event(
             source_guid,
             source_name,
             source_flags,
+            dest_guid,
             dest_name,
-            dest_flags: _,
+            dest_flags,
             dest_raid_marker,
             spell_name,
             amount,
@@ -579,7 +582,9 @@ fn handle_event(
                     source_guid,
                     source_name,
                     *source_flags,
+                    dest_guid,
                     dest_name,
+                    *dest_flags,
                     *dest_raid_marker,
                     spell_name,
                     *amount,
@@ -1894,7 +1899,7 @@ fn process_classic_combatant(
 fn handle_unit_died(
     state: &mut FlavorState,
     rules: Rules,
-    _guid: &str,
+    guid: &str,
     name: &str,
     flags: u64,
     unconscious: bool,
@@ -1909,10 +1914,13 @@ fn handle_unit_died(
     if !is_unit_player(flags) || unconscious {
         return;
     }
+    let friendly = is_unit_friendly(flags);
+    if friendly {
+        active.meter.death(guid, name, at_ms);
+    }
     if is_unit_self(flags) {
         active.meter.host_died();
     }
-    let friendly = is_unit_friendly(flags);
     let relative = relative_ms(active.started_at_ms, at_ms - DEATH_MARKER_BACK_OFFSET_MS);
     let (plain_name, _, _) = ambiguate(name);
     let outcome = if friendly {

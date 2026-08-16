@@ -1925,6 +1925,8 @@ fn test_events(
     const ALLY_NAME: &str = "Testmage-Testrealm";
     const ALLY_FLAGS: u64 = 0x512;
     const HOSTILE_FLAGS: u64 = 0xa48;
+    const ENEMY_GUID: &str = "Creature-0-TEST";
+    const ENEMY_NAME: &str = "Test Target";
 
     let retail = |event: CombatEvent, at_ms: i64| ParsedEvent {
         flavor: GameFlavor::Retail,
@@ -2057,6 +2059,7 @@ fn test_events(
                     source_name: name.to_owned(),
                     source_flags: flags,
                     source_owner_guid: None,
+                    dest_guid: "Creature-0-TEST".to_owned(),
                     dest_name: "Test Target".to_owned(),
                     dest_flags: HOSTILE_FLAGS,
                     dest_raid_marker: 0,
@@ -2068,7 +2071,48 @@ fn test_events(
                 at_ms,
             ));
         }
+        start_events.push(retail(
+            CombatEvent::Damage {
+                source_guid: ENEMY_GUID.to_owned(),
+                source_name: ENEMY_NAME.to_owned(),
+                source_flags: HOSTILE_FLAGS,
+                source_owner_guid: None,
+                dest_guid: ALLY_GUID.to_owned(),
+                dest_name: ALLY_NAME.to_owned(),
+                dest_flags: ALLY_FLAGS,
+                dest_raid_marker: 0,
+                spell_name: "Void Strike".to_owned(),
+                amount: 180_000 * quarter as u64,
+                dest_current_hp: None,
+                dest_max_hp: None,
+            },
+            at_ms,
+        ));
+        start_events.push(retail(
+            CombatEvent::Heal {
+                source_guid: GUID.to_owned(),
+                source_name: NAME.to_owned(),
+                source_flags: SELF_FLAGS,
+                dest_guid: ALLY_GUID.to_owned(),
+                dest_name: ALLY_NAME.to_owned(),
+                dest_flags: ALLY_FLAGS,
+                dest_raid_marker: 0,
+                spell_name: "Soul Mend".to_owned(),
+                amount: 120_000 * quarter as u64,
+                overheal: 0,
+            },
+            at_ms + 1,
+        ));
     }
+    start_events.push(retail(
+        CombatEvent::UnitDied {
+            guid: ALLY_GUID.to_owned(),
+            name: ALLY_NAME.to_owned(),
+            flags: ALLY_FLAGS,
+            unconscious: false,
+        },
+        end_ms - 1,
+    ));
     Some((start_events, retail(end, end_ms)))
 }
 
@@ -2076,8 +2120,10 @@ fn test_events(
 mod tests {
     use super::{
         CAPTURE_RESTART_FAILED_PROBLEM, CAPTURE_STOPPED_PROBLEM, Problem, RecoveryAction,
-        clear_recovered_capture_problems, utc_offset_minutes,
+        clear_recovered_capture_problems, test_events, utc_offset_minutes,
     };
+    use crate::domain::Category;
+    use crate::parser::CombatEvent;
 
     #[test]
     fn timezone_offset_converts_seconds_to_minutes() {
@@ -2118,5 +2164,33 @@ mod tests {
         assert!(clear_recovered_capture_problems(&mut problems));
         assert_eq!(problems, vec![preserved]);
         assert!(!clear_recovered_capture_problems(&mut problems));
+    }
+    #[test]
+    fn test_recording_exercises_damage_taken_and_death_log() {
+        let (events, _) = test_events(&Category::MythicPlus, 0, 4_000).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.event,
+                    CombatEvent::Damage {
+                        ref dest_guid,
+                        ..
+                    } if dest_guid == "Player-1092-0B80F204"
+                ))
+                .count(),
+            3
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, CombatEvent::Heal { .. }))
+                .count(),
+            3
+        );
+        assert!(matches!(
+            events.last().map(|event| &event.event),
+            Some(CombatEvent::UnitDied { .. })
+        ));
     }
 }

@@ -1086,6 +1086,7 @@ mod tests {
                             }],
                             targets: Vec::new(),
                         }],
+                        deaths: Vec::new(),
                     }],
                 },
             }

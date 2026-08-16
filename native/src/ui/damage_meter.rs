@@ -12,7 +12,9 @@ use std::rc::Rc;
 
 use gtk4::prelude::*;
 
-use warcraft_recorder::domain::{LibraryEntry, MeterFight, MeterMetric};
+use warcraft_recorder::domain::{
+    LibraryEntry, MeterDeath, MeterDeathEventKind, MeterFight, MeterMetric,
+};
 use warcraft_recorder::meter::{
     MeterProjection, ProjectedActor, ProjectedEntry, SAMPLE_INTERVAL_MS, fight_index_at,
     has_untimed_totals, project_current, project_overall,
@@ -43,41 +45,54 @@ const MIN_HEIGHT: i32 = 140;
 /// Bounded target rows fold into "Other", which is not a selectable target.
 const OTHER_KEY: &str = "Other";
 
-fn metric_label(metric: MeterMetric) -> &'static str {
-    match metric {
-        MeterMetric::Damage => "Damage Done",
-        MeterMetric::Healing => "Healing Done",
-        MeterMetric::Interrupts => "Interrupts",
-        MeterMetric::Dispels => "Dispels",
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum View {
+    Metric(MeterMetric),
+    Deaths,
+}
+
+fn view_label(view: View) -> &'static str {
+    match view {
+        View::Metric(MeterMetric::Damage) => "Damage Done",
+        View::Metric(MeterMetric::DamageTaken) => "Damage Taken",
+        View::Metric(MeterMetric::Healing) => "Healing Done",
+        View::Metric(MeterMetric::Interrupts) => "Interrupts",
+        View::Metric(MeterMetric::Dispels) => "Dispels",
+        View::Deaths => "Deaths",
     }
 }
 
-/// `meter.view` action key (the serde snake_case name).
-fn metric_key(metric: MeterMetric) -> &'static str {
-    match metric {
-        MeterMetric::Damage => "damage",
-        MeterMetric::Healing => "healing",
-        MeterMetric::Interrupts => "interrupts",
-        MeterMetric::Dispels => "dispels",
+fn view_key(view: View) -> &'static str {
+    match view {
+        View::Metric(MeterMetric::Damage) => "damage",
+        View::Metric(MeterMetric::DamageTaken) => "damage_taken",
+        View::Metric(MeterMetric::Healing) => "healing",
+        View::Metric(MeterMetric::Interrupts) => "interrupts",
+        View::Metric(MeterMetric::Dispels) => "dispels",
+        View::Deaths => "deaths",
     }
 }
 
-fn metric_from_key(key: &str) -> Option<MeterMetric> {
+fn view_from_key(key: &str) -> Option<View> {
     Some(match key {
-        "damage" => MeterMetric::Damage,
-        "healing" => MeterMetric::Healing,
-        "interrupts" => MeterMetric::Interrupts,
-        "dispels" => MeterMetric::Dispels,
+        "damage" => View::Metric(MeterMetric::Damage),
+        "damage_taken" => View::Metric(MeterMetric::DamageTaken),
+        "healing" => View::Metric(MeterMetric::Healing),
+        "interrupts" => View::Metric(MeterMetric::Interrupts),
+        "dispels" => View::Metric(MeterMetric::Dispels),
+        "deaths" => View::Deaths,
         _ => return None,
     })
 }
 
-fn metric_empty_message(metric: MeterMetric) -> String {
-    let noun = match metric {
-        MeterMetric::Damage => "damage",
-        MeterMetric::Healing => "healing",
-        MeterMetric::Interrupts => "interrupts",
-        MeterMetric::Dispels => "dispels",
+fn view_empty_message(view: View) -> String {
+    let noun = match view {
+        View::Metric(MeterMetric::Damage) => "damage",
+        View::Metric(MeterMetric::DamageTaken) => "damage taken",
+        View::Metric(MeterMetric::Healing) => "healing",
+        View::Metric(MeterMetric::Interrupts) => "interrupts",
+        View::Metric(MeterMetric::Dispels) => "dispels",
+        View::Deaths => "deaths",
     };
     format!("No {noun} in this fight.")
 }
@@ -244,7 +259,7 @@ struct Inner {
     actions: gtk4::gio::SimpleActionGroup,
 
     entry: RefCell<Option<EntryMeter>>,
-    view: Cell<MeterMetric>,
+    view: Cell<View>,
     segment: Cell<SegmentKind>,
     /// The open actor breakdown: the actor's GUID.
     target: RefCell<TargetSel>,
@@ -346,7 +361,7 @@ impl DamageMeter {
             empty_label,
             actions,
             entry: RefCell::new(None),
-            view: Cell::new(MeterMetric::Damage),
+            view: Cell::new(View::Metric(MeterMetric::Damage)),
             segment: Cell::new(SegmentKind::Current),
             target: RefCell::new(TargetSel::All),
             position_ms: Cell::new(0),
@@ -437,7 +452,7 @@ impl Inner {
     }
 
     fn connect_actions(self: &Rc<Self>) {
-        let view = stateful_action("view", metric_key(self.view.get()));
+        let view = stateful_action("view", view_key(self.view.get()));
         self.actions.add_action(&view);
         let this = Rc::clone(self);
         view.connect_change_state(move |action, state| {
@@ -448,9 +463,9 @@ impl Inner {
             };
             action.set_state(state);
             if let Some(key) = state.str()
-                && let Some(metric) = metric_from_key(key)
+                && let Some(view) = view_from_key(key)
             {
-                this.set_view(metric);
+                this.set_view(view);
             }
         });
 
@@ -585,8 +600,10 @@ impl Inner {
         self.root.add_controller(back_click);
     }
 
-    fn set_view(self: &Rc<Self>, metric: MeterMetric) {
-        if self.view.replace(metric) != metric {
+    fn set_view(self: &Rc<Self>, view: View) {
+        if self.view.replace(view) != view {
+            self.target.replace(TargetSel::All);
+            self.breakdown.replace(None);
             self.refresh();
         }
     }
@@ -634,7 +651,7 @@ impl Inner {
     fn sync_action_states(&self) {
         let target = target_key(&self.target.borrow());
         for (name, state) in [
-            ("view", metric_key(self.view.get())),
+            ("view", view_key(self.view.get())),
             ("segment", segment_key(self.segment.get())),
             ("target", target.as_str()),
         ] {
@@ -663,10 +680,14 @@ impl Inner {
 
     /// Header text: `{mm:ss} {view}`, with the target appended when filtered.
     fn rebuild_title(&self, fight: Option<&MeterProjection>) {
-        let view = metric_label(self.view.get());
-        let title = match target_label(&self.target.borrow()) {
-            Some(target) => format!("{view} to {target}"),
-            None => view.to_owned(),
+        let view = self.view.get();
+        let label = view_label(view);
+        let title = match (view, target_label(&self.target.borrow())) {
+            (View::Metric(MeterMetric::DamageTaken), Some(target)) => {
+                format!("{label} from {target}")
+            }
+            (View::Metric(_), Some(target)) => format!("{label} to {target}"),
+            (_, _) => label.to_owned(),
         };
         match fight {
             Some(fight) => self
@@ -680,16 +701,18 @@ impl Inner {
         let menu = gtk4::gio::Menu::new();
 
         let view_section = gtk4::gio::Menu::new();
-        for metric in [
-            MeterMetric::Damage,
-            MeterMetric::Healing,
-            MeterMetric::Interrupts,
-            MeterMetric::Dispels,
+        for view in [
+            View::Metric(MeterMetric::Damage),
+            View::Metric(MeterMetric::DamageTaken),
+            View::Metric(MeterMetric::Healing),
+            View::Metric(MeterMetric::Interrupts),
+            View::Metric(MeterMetric::Dispels),
+            View::Deaths,
         ] {
-            let item = gtk4::gio::MenuItem::new(Some(metric_label(metric)), None);
+            let item = gtk4::gio::MenuItem::new(Some(view_label(view)), None);
             item.set_action_and_target_value(
                 Some("meter.view"),
-                Some(&metric_key(metric).to_variant()),
+                Some(&view_key(view).to_variant()),
             );
             view_section.append_item(&item);
         }
@@ -706,33 +729,35 @@ impl Inner {
         }
         menu.append_section(None, &segment_section);
 
-        // Only names and markers present in the selected segment; a dead
-        // entry would be a filter with no rows.
-        let target_section = gtk4::gio::Menu::new();
-        let targets = gtk4::gio::Menu::new();
-        let all = gtk4::gio::MenuItem::new(Some("All targets"), None);
-        all.set_action_and_target_value(Some("meter.target"), Some(&"all".to_variant()));
-        targets.append_item(&all);
-        let (names, markers) = self.target_choices();
-        for name in names {
-            let item = gtk4::gio::MenuItem::new(Some(&name), None);
-            item.set_action_and_target_value(
-                Some("meter.target"),
-                Some(&format!("name:{name}").to_variant()),
-            );
-            targets.append_item(&item);
+        if matches!(self.view.get(), View::Metric(_)) {
+            // Only names and markers present in the selected segment; a dead
+            // entry would be a filter with no rows.
+            let target_section = gtk4::gio::Menu::new();
+            let targets = gtk4::gio::Menu::new();
+            let all = gtk4::gio::MenuItem::new(Some("All targets"), None);
+            all.set_action_and_target_value(Some("meter.target"), Some(&"all".to_variant()));
+            targets.append_item(&all);
+            let (names, markers) = self.target_choices();
+            for name in names {
+                let item = gtk4::gio::MenuItem::new(Some(&name), None);
+                item.set_action_and_target_value(
+                    Some("meter.target"),
+                    Some(&format!("name:{name}").to_variant()),
+                );
+                targets.append_item(&item);
+            }
+            for marker in markers {
+                let label = marker_name(marker).unwrap_or("Other");
+                let item = gtk4::gio::MenuItem::new(Some(label), None);
+                item.set_action_and_target_value(
+                    Some("meter.target"),
+                    Some(&format!("marker:{marker}").to_variant()),
+                );
+                targets.append_item(&item);
+            }
+            target_section.append_submenu(Some("Target"), &targets);
+            menu.append_section(None, &target_section);
         }
-        for marker in markers {
-            let label = marker_name(marker).unwrap_or("Other");
-            let item = gtk4::gio::MenuItem::new(Some(label), None);
-            item.set_action_and_target_value(
-                Some("meter.target"),
-                Some(&format!("marker:{marker}").to_variant()),
-            );
-            targets.append_item(&item);
-        }
-        target_section.append_submenu(Some("Target"), &targets);
-        menu.append_section(None, &target_section);
 
         menu
     }
@@ -741,17 +766,16 @@ impl Inner {
     /// the selected segment for the active view. `Other` is never a
     /// selectable target.
     fn target_choices(&self) -> (Vec<String>, Vec<u8>) {
+        let View::Metric(metric) = self.view.get() else {
+            return (Vec::new(), Vec::new());
+        };
         let Some(fight) = self.selected_fight() else {
             return (Vec::new(), Vec::new());
         };
         let mut names = BTreeSet::new();
         let mut markers = Vec::new();
         for actor in &fight.actors {
-            for entry in actor
-                .targets
-                .iter()
-                .filter(|entry| entry.metric == self.view.get())
-            {
+            for entry in actor.targets.iter().filter(|entry| entry.metric == metric) {
                 if entry.key != OTHER_KEY {
                     names.insert(entry.key.clone());
                 }
@@ -784,12 +808,19 @@ impl Inner {
             return;
         };
         let view = self.view.get();
-        let target = self.target.borrow().clone();
         let breakdown = self.breakdown.borrow().clone();
+        if view == View::Deaths {
+            self.rebuild_deaths(&fight, breakdown.as_deref());
+            return;
+        }
+        let View::Metric(metric) = view else {
+            unreachable!();
+        };
+        let target = self.target.borrow().clone();
         if let Some(guid) = &breakdown
             && let Some(actor) = fight.actors.iter().find(|actor| &actor.guid == guid)
         {
-            self.rebuild_breakdown(actor, view, &target);
+            self.rebuild_breakdown(actor, metric, &target);
             return;
         }
         // A segment switch may have left the breakdown without its actor.
@@ -800,7 +831,7 @@ impl Inner {
             .actors
             .iter()
             .filter_map(|actor| {
-                let total = actor_total(actor, view, &target);
+                let total = actor_total(actor, metric, &target);
                 (total > 0).then_some((actor, total))
             })
             .collect();
@@ -813,12 +844,12 @@ impl Inner {
             if untimed {
                 self.show_empty("This recording has no time-resolved meter data.");
             } else {
-                self.show_empty(&metric_empty_message(view));
+                self.show_empty(&view_empty_message(view));
             }
             return;
         }
         ranked.sort_by(|a, b| b.1.cmp(&a.1));
-        self.rebuild_ranking(&fight, &ranked, view);
+        self.rebuild_ranking(&fight, &ranked, metric);
     }
 
     /// Dense ranked buttons: class-colored fill behind white labels, compact
@@ -861,6 +892,91 @@ impl Inner {
         self.set_content(&content);
     }
 
+    fn rebuild_deaths(self: &Rc<Self>, fight: &MeterProjection, selected_guid: Option<&str>) {
+        if let Some(guid) = selected_guid {
+            let deaths: Vec<&MeterDeath> = fight
+                .deaths
+                .iter()
+                .filter(|death| death.guid == guid)
+                .collect();
+            if !deaths.is_empty() {
+                self.rebuild_death_breakdown(&deaths);
+                return;
+            }
+            self.breakdown.replace(None);
+        }
+        let mut ranked: Vec<(String, String, u64)> = Vec::new();
+        for death in &fight.deaths {
+            if let Some((_, _, count)) = ranked.iter_mut().find(|(guid, _, _)| guid == &death.guid)
+            {
+                *count += 1;
+            } else {
+                ranked.push((death.guid.clone(), death.name.clone(), 1));
+            }
+        }
+        if ranked.is_empty() {
+            self.show_empty(&view_empty_message(View::Deaths));
+            return;
+        }
+        ranked.sort_by(|a, b| b.2.cmp(&a.2));
+        let top = ranked[0].2;
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        for (rank, (guid, name, count)) in ranked.into_iter().enumerate() {
+            let overlay = fill_line(
+                self.class_for(&guid),
+                &format!("{}. {name}", rank + 1),
+                &count.to_string(),
+                count as f64 / top as f64,
+            );
+            let button = gtk4::Button::new();
+            button.add_css_class("flat");
+            button.add_css_class("wr-meter-row");
+            button.set_child(Some(&overlay));
+            let this = Rc::clone(self);
+            button.connect_clicked(move |_| this.open_breakdown(guid.clone()));
+            content.append(&button);
+        }
+        self.set_content(&content);
+    }
+
+    fn rebuild_death_breakdown(&self, deaths: &[&MeterDeath]) {
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        let name = gtk4::Label::new(Some(&deaths[0].name));
+        name.set_xalign(0.0);
+        name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        content.append(&name);
+        for (index, death) in deaths.iter().enumerate() {
+            content.append(&heading(&format!(
+                "Death {} — {}",
+                index + 1,
+                format_mm_ss(death.at_ms)
+            )));
+            for event in &death.events {
+                let before_ms = death.at_ms.saturating_sub(event.at_ms);
+                let sign = match event.kind {
+                    MeterDeathEventKind::Damage => "-",
+                    MeterDeathEventKind::Healing => "+",
+                };
+                content.append(&death_event_row(
+                    event.kind,
+                    &format!(
+                        "-{:.1}s {} ({})",
+                        before_ms as f64 / 1_000.0,
+                        event.spell_name,
+                        event.source_name
+                    ),
+                    &format!("{sign}{}", format_compact(event.amount)),
+                ));
+            }
+            content.append(&death_event_row(
+                MeterDeathEventKind::Damage,
+                "0.0s Death",
+                "",
+            ));
+        }
+        self.set_content(&content);
+    }
+
     /// The actor drilldown in the same scroller: actor name, then the Spells
     /// and Targets lists with the active filters intact. Secondary click on
     /// the panel returns to the ranking.
@@ -887,7 +1003,11 @@ impl Inner {
             content.append(&self.breakdown_row(actor, entry, spell_total));
         }
 
-        content.append(&heading("Targets"));
+        content.append(&heading(if view == MeterMetric::DamageTaken {
+            "Sources"
+        } else {
+            "Targets"
+        }));
         let target_total: u64 = actor
             .targets
             .iter()
@@ -1056,6 +1176,25 @@ fn fill_line(class: Option<&str>, left: &str, right: &str, fraction: f64) -> gtk
     overlay.set_child(Some(&fill));
     overlay.add_overlay(&line);
     overlay
+}
+
+fn death_event_row(kind: MeterDeathEventKind, left: &str, right: &str) -> gtk4::Box {
+    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+    row.add_css_class("wr-meter-death-event");
+    row.add_css_class(match kind {
+        MeterDeathEventKind::Damage => "damage",
+        MeterDeathEventKind::Healing => "healing",
+    });
+    let left_label = gtk4::Label::new(Some(left));
+    left_label.set_xalign(0.0);
+    left_label.set_hexpand(true);
+    left_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    let right_label = gtk4::Label::new(Some(right));
+    right_label.set_xalign(1.0);
+    right_label.add_css_class("numeric");
+    row.append(&left_label);
+    row.append(&right_label);
+    row
 }
 
 fn heading(text: &str) -> gtk4::Label {

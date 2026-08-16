@@ -1725,6 +1725,22 @@ fn shift_meter(
                         entry.overheal = entry.samples.iter().map(|sample| sample.overheal).sum();
                     }
                 }
+                shifted.deaths.retain_mut(|death| {
+                    let at_ms = death.at_ms as i64 + lead_in_ms;
+                    if at_ms < 0 {
+                        return false;
+                    }
+                    death.at_ms = (at_ms as u64).clamp(shifted.start_ms, shifted.end_ms);
+                    death.events.retain_mut(|event| {
+                        let at_ms = event.at_ms as i64 + lead_in_ms;
+                        if at_ms < 0 {
+                            return false;
+                        }
+                        event.at_ms = (at_ms as u64).min(death.at_ms);
+                        true
+                    });
+                    true
+                });
                 Some(shifted)
             })
             .collect(),
@@ -1886,7 +1902,10 @@ mod tests {
     use super::*;
     use std::num::NonZeroU64;
 
-    use crate::domain::{MeterActor, MeterEntry, MeterFight, MeterMetric, MeterSample};
+    use crate::domain::{
+        MeterActor, MeterDeath, MeterDeathEvent, MeterDeathEventKind, MeterEntry, MeterFight,
+        MeterMetric, MeterSample,
+    };
 
     fn fixture_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/native/fixtures/legacy/sidecars")
@@ -2309,6 +2328,27 @@ mod tests {
                         }],
                         targets: Vec::new(),
                     }],
+                    deaths: vec![MeterDeath {
+                        guid: "Player-1000-AAAA0001".to_owned(),
+                        name: "Testone".to_owned(),
+                        at_ms: 2_000,
+                        events: vec![
+                            MeterDeathEvent {
+                                kind: MeterDeathEventKind::Healing,
+                                at_ms: 0,
+                                source_name: "Healer".to_owned(),
+                                spell_name: "Heal".to_owned(),
+                                amount: 50,
+                            },
+                            MeterDeathEvent {
+                                kind: MeterDeathEventKind::Damage,
+                                at_ms: 1_500,
+                                source_name: "Boss".to_owned(),
+                                spell_name: "Hit".to_owned(),
+                                amount: 100,
+                            },
+                        ],
+                    }],
                 },
                 // Ends beyond the media duration: the shift must clamp.
                 MeterFight {
@@ -2319,6 +2359,7 @@ mod tests {
                     active_ms: 12_000,
                     ambient: false,
                     actors: Vec::new(),
+                    deaths: Vec::new(),
                 },
                 // Ends before a media that starts after the activity: dropped
                 // under a negative lead-in, kept and shifted otherwise.
@@ -2330,6 +2371,7 @@ mod tests {
                     active_ms: 3_000,
                     ambient: false,
                     actors: Vec::new(),
+                    deaths: Vec::new(),
                 },
                 // Wholly beyond the media duration: always dropped.
                 MeterFight {
@@ -2340,6 +2382,7 @@ mod tests {
                     active_ms: 4_000,
                     ambient: false,
                     actors: Vec::new(),
+                    deaths: Vec::new(),
                 },
             ],
         }
@@ -2414,6 +2457,15 @@ mod tests {
         assert_eq!(
             entry.meter.fights[0].actors[0].spells[0].samples[0].at_ms,
             entry.meter.fights[0].end_ms
+        );
+        assert_eq!(entry.meter.fights[0].deaths[0].at_ms, 5_000);
+        assert_eq!(
+            entry.meter.fights[0].deaths[0]
+                .events
+                .iter()
+                .map(|event| event.at_ms)
+                .collect::<Vec<_>>(),
+            vec![3_000, 4_500]
         );
         assert_eq!(entry.meter.fights[1].start_ms, 78_000);
         assert_eq!(entry.meter.fights[1].end_ms, 78_000);
