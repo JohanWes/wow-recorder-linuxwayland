@@ -247,9 +247,9 @@ impl ActivityDetails {
     }
 }
 
-/// One metric delta accumulated during a single playback second. `at_ms` is
-/// the media-relative end of that second, so the UI can include only buckets
-/// that have completed at the current playhead.
+/// One metric delta accumulated during a playback interval. `at_ms` is the
+/// media-relative end of that interval, so the UI can include only completed
+/// buckets at the current playhead.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeterSample {
     pub at_ms: u64,
@@ -272,7 +272,7 @@ pub struct MeterEntry {
     pub amount: u64,
     pub hits: u32,
     pub overheal: u64,
-    /// Per-second deltas used to reconstruct this entry at the playhead.
+    /// Interval deltas used to reconstruct this entry at the playhead.
     #[serde(default)]
     pub samples: Vec<MeterSample>,
 }
@@ -307,6 +307,10 @@ pub struct MeterFight {
     pub first_event_ms: Option<u64>,
     /// First-to-last eligible event; the shared DPS/HPS denominator.
     pub active_ms: u64,
+    /// Mythic+ trash recorded before the capturing player joined combat.
+    /// Overall includes these fights; Current skips them.
+    #[serde(default)]
+    pub ambient: bool,
     pub actors: Vec<MeterActor>,
 }
 

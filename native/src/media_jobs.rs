@@ -1071,6 +1071,7 @@ mod tests {
                         end_ms: 40_000,
                         first_event_ms: Some(11_000),
                         active_ms: 28_000,
+                        ambient: false,
                         actors: vec![MeterActor {
                             guid: "Player-1000-AAAA0001".to_owned(),
                             name: "Testone".to_owned(),

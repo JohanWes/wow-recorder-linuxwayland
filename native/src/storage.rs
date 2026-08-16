@@ -30,6 +30,7 @@ use crate::domain::{
     GameFlavor, LibraryEntry, MediaFacts, MeterData, Outcome, PlayerSummary, RecordingId,
     RoundSummary, StorageLimit, TimelineItem, TimelineKind, TimelineShape,
 };
+use crate::meter::SAMPLE_INTERVAL_MS;
 use crate::parser::{
     CombatEvent, ParseTimeContext, PlayerObservationKind, days_from_civil, is_bloodlust_spell,
     parse_line, parse_timestamp,
@@ -1714,8 +1715,8 @@ fn shift_meter(
                                 return false;
                             }
                             sample.at_ms = (at_ms as u64)
-                                .div_ceil(1_000)
-                                .saturating_mul(1_000)
+                                .div_ceil(SAMPLE_INTERVAL_MS)
+                                .saturating_mul(SAMPLE_INTERVAL_MS)
                                 .clamp(shifted.start_ms, shifted.end_ms);
                             true
                         });
@@ -2288,6 +2289,7 @@ mod tests {
                     end_ms: 58_000,
                     first_event_ms: Some(1_000),
                     active_ms: 55_000,
+                    ambient: false,
                     actors: vec![MeterActor {
                         guid: "Player-1000-AAAA0001".to_owned(),
                         name: "Testone".to_owned(),
@@ -2315,6 +2317,7 @@ mod tests {
                     end_ms: 90_000,
                     first_event_ms: None,
                     active_ms: 12_000,
+                    ambient: false,
                     actors: Vec::new(),
                 },
                 // Ends before a media that starts after the activity: dropped
@@ -2325,6 +2328,7 @@ mod tests {
                     end_ms: 4_000,
                     first_event_ms: None,
                     active_ms: 3_000,
+                    ambient: false,
                     actors: Vec::new(),
                 },
                 // Wholly beyond the media duration: always dropped.
@@ -2334,6 +2338,7 @@ mod tests {
                     end_ms: 85_000,
                     first_event_ms: None,
                     active_ms: 4_000,
+                    ambient: false,
                     actors: Vec::new(),
                 },
             ],

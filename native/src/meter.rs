@@ -9,12 +9,18 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::activity::{is_player_controlled_friendly, is_unit_friendly, relative_ms};
+use crate::activity::{is_player_controlled_friendly, is_unit_friendly, is_unit_self, relative_ms};
 use crate::domain::{MeterActor, MeterData, MeterEntry, MeterFight, MeterMetric, MeterSample};
 
 /// Maximum spell or target rows kept per actor per metric; the remainder folds
 /// into a single "Other" row so totals stay exact.
 const MAX_BREAKDOWN_ROWS: usize = 16;
+/// Persisted playback resolution for meter samples and UI refreshes.
+pub const SAMPLE_INTERVAL_MS: u64 = 500;
+
+/// Total hostile-damage silence separating Mythic+ trash pulls. Chain pulls
+/// inside this window remain one fight, matching the host staying in combat.
+const PULL_GAP_MS: i64 = 6_000;
 const OTHER_KEY: &str = "Other";
 const METRICS: [MeterMetric; 4] = [
     MeterMetric::Damage,
@@ -27,6 +33,10 @@ pub(crate) struct MeterAccumulator {
     started_at_ms: i64,
     fights: Vec<RawFight>,
     owners: HashMap<String, OwnedBy>,
+    /// Mythic+ trash is split into host-current and ambient group fights.
+    segmented: bool,
+    /// Lingering MINE effects must not re-engage a dead host in the same pull.
+    host_dead: bool,
 }
 
 struct OwnedBy {
@@ -41,6 +51,8 @@ struct RawFight {
     end_ms: i64,
     first_event_ms: Option<i64>,
     last_event_ms: Option<i64>,
+    last_bucket_end_ms: i64,
+    ambient: bool,
     actors: Vec<RawActor>,
     actor_index: HashMap<String, usize>,
     recent: HashMap<(String, String, MeterMetric), RecentRecord>,
@@ -56,13 +68,15 @@ struct RecentRecord {
 }
 
 impl RawFight {
-    fn new(start_ms: i64, label: Option<String>) -> Self {
+    fn new(start_ms: i64, label: Option<String>, ambient: bool) -> Self {
         Self {
             label,
             start_ms,
             end_ms: start_ms,
             first_event_ms: None,
             last_event_ms: None,
+            last_bucket_end_ms: start_ms,
+            ambient,
             actors: Vec::new(),
             actor_index: HashMap::new(),
             recent: HashMap::new(),
@@ -138,8 +152,22 @@ impl MeterAccumulator {
     pub(crate) fn new(start_ms: i64, initial_label: Option<String>) -> Self {
         Self {
             started_at_ms: start_ms,
-            fights: vec![RawFight::new(start_ms, initial_label)],
+            fights: vec![RawFight::new(start_ms, initial_label, false)],
             owners: HashMap::new(),
+            segmented: false,
+            host_dead: false,
+        }
+    }
+
+    /// Retail Mythic+ starts outside the capturing player's combat while still
+    /// retaining the group's opening damage for Overall.
+    pub(crate) fn trash(start_ms: i64) -> Self {
+        Self {
+            started_at_ms: start_ms,
+            fights: vec![RawFight::new(start_ms, Some("Trash".to_owned()), true)],
+            owners: HashMap::new(),
+            segmented: true,
+            host_dead: false,
         }
     }
 
@@ -177,6 +205,7 @@ impl MeterAccumulator {
         amount: u64,
         at_ms: i64,
     ) {
+        self.observe_damage(at_ms, source_flags, dest_flags);
         // Known summons include CONTROL_NPC guardians whose flags are not
         // friendly. Their owner was accepted only from a friendly
         // player-controlled summoner.
@@ -211,6 +240,7 @@ impl MeterAccumulator {
         overheal: u64,
         at_ms: i64,
     ) {
+        self.observe_heal(at_ms, source_flags);
         if !is_player_controlled_friendly(source_flags) {
             return;
         }
@@ -350,14 +380,95 @@ impl MeterAccumulator {
             .add_transfer(transferred, transferred_overheal, bucket_end_ms);
     }
 
-    /// Close the open fight and start a new one labelled for the next segment.
+    /// Close the open fight and start a fixed Current segment such as a boss
+    /// encounter or arena round.
     pub(crate) fn cut(&mut self, at_ms: i64, new_label: String) {
+        self.segmented = false;
+        self.host_dead = false;
+        self.begin_fight(at_ms, Some(new_label), false);
+    }
+
+    /// A boss encounter ended; group damage remains in Overall until the host
+    /// joins the next trash pull.
+    pub(crate) fn cut_to_trash(&mut self, at_ms: i64) {
+        self.segmented = true;
+        self.host_dead = false;
+        self.begin_fight(at_ms, Some("Trash".to_owned()), true);
+    }
+
+    /// Host death is an exact player-POV combat boundary for trash.
+    pub(crate) fn host_died(&mut self, at_ms: i64) {
+        if self.segmented {
+            if self.fights.last().is_some_and(|fight| !fight.ambient) {
+                self.begin_fight(at_ms, Some("Trash".to_owned()), true);
+            }
+            self.host_dead = true;
+        }
+    }
+
+    fn begin_fight(&mut self, at_ms: i64, label: Option<String>, ambient: bool) {
         let fight = self
             .fights
             .last_mut()
             .expect("the open fight is always present");
-        fight.end_ms = at_ms;
-        self.fights.push(RawFight::new(at_ms, Some(new_label)));
+        fight.end_ms = at_ms.max(fight.last_bucket_end_ms);
+        self.fights.push(RawFight::new(at_ms, label, ambient));
+    }
+
+    /// Hostile damage is the only reliable combat-state signal in the saved
+    /// log. Group-wide silence splits pulls; MINE on either side starts Current.
+    fn observe_damage(&mut self, at_ms: i64, source_flags: u64, dest_flags: u64) {
+        if !self.segmented || is_unit_friendly(source_flags) == is_unit_friendly(dest_flags) {
+            return;
+        }
+        let (ambient, separated) = {
+            let fight = self
+                .fights
+                .last()
+                .expect("the open fight is always present");
+            (
+                fight.ambient,
+                fight
+                    .last_event_ms
+                    .is_some_and(|last| at_ms.saturating_sub(last) > PULL_GAP_MS),
+            )
+        };
+        // A new pull or an enemy hitting the host proves that stale effects
+        // from the death boundary no longer describe the host's combat state.
+        if separated || is_unit_self(dest_flags) {
+            self.host_dead = false;
+        }
+        let mine = !self.host_dead && (is_unit_self(source_flags) || is_unit_self(dest_flags));
+        if separated || mine && ambient {
+            self.begin_fight(at_ms, Some("Trash".to_owned()), !mine);
+        }
+        let fight = self
+            .fights
+            .last_mut()
+            .expect("the open fight is always present");
+        fight.first_event_ms = Some(fight.first_event_ms.map_or(at_ms, |first| first.min(at_ms)));
+        fight.last_event_ms = Some(fight.last_event_ms.map_or(at_ms, |last| last.max(at_ms)));
+    }
+
+    /// Healing a party member already fighting engages a healer host. Healing
+    /// alone never opens or extends a pull, avoiding downtime inflation.
+    fn observe_heal(&mut self, at_ms: i64, source_flags: u64) {
+        if !self.segmented || self.host_dead || !is_unit_self(source_flags) {
+            return;
+        }
+        let last_event_ms = self
+            .fights
+            .last()
+            .filter(|fight| fight.ambient)
+            .and_then(|fight| fight.last_event_ms)
+            .filter(|last| at_ms.saturating_sub(*last) <= PULL_GAP_MS);
+        if let Some(last_event_ms) = last_event_ms {
+            self.begin_fight(at_ms, Some("Trash".to_owned()), false);
+            self.fights
+                .last_mut()
+                .expect("the open fight is always present")
+                .last_event_ms = Some(last_event_ms);
+        }
     }
 
     /// Close the open fight at the activity end, resolve ownership, bound the
@@ -374,7 +485,7 @@ impl MeterAccumulator {
             .fights
             .last_mut()
             .expect("the open fight is always present");
-        fight.end_ms = ended_at_ms;
+        fight.end_ms = ended_at_ms.max(fight.last_bucket_end_ms);
         MeterData {
             fights: self
                 .fights
@@ -397,14 +508,20 @@ impl MeterAccumulator {
         overheal: u64,
         at_ms: i64,
     ) {
+        let interval_ms = SAMPLE_INTERVAL_MS as i64;
         let elapsed_ms = at_ms.saturating_sub(self.started_at_ms).max(1);
-        let bucket_end_ms = self.started_at_ms + elapsed_ms.saturating_add(999) / 1_000 * 1_000;
+        let bucket_end_ms = self.started_at_ms
+            + elapsed_ms.saturating_add(interval_ms - 1) / interval_ms * interval_ms;
         let fight = self
             .fights
             .last_mut()
             .expect("the open fight is always present");
-        fight.first_event_ms = Some(fight.first_event_ms.map_or(at_ms, |first| first.min(at_ms)));
-        fight.last_event_ms = Some(fight.last_event_ms.map_or(at_ms, |last| last.max(at_ms)));
+        if !self.segmented {
+            fight.first_event_ms =
+                Some(fight.first_event_ms.map_or(at_ms, |first| first.min(at_ms)));
+            fight.last_event_ms = Some(fight.last_event_ms.map_or(at_ms, |last| last.max(at_ms)));
+        }
+        fight.last_bucket_end_ms = fight.last_bucket_end_ms.max(bucket_end_ms);
         let actor = fight.actor(source_guid, source_name);
         actor
             .spells
@@ -457,6 +574,7 @@ impl RawFight {
                 .first_event_ms
                 .map(|at_ms| relative_ms(started_at_ms, at_ms)),
             active_ms,
+            ambient: self.ambient,
             actors: merged_actors(self, owners, names, started_at_ms),
         }
     }
@@ -675,9 +793,7 @@ pub struct ProjectedEntry {
 pub fn fight_index_at(fights: &[MeterFight], position_ms: u64) -> Option<usize> {
     fights
         .iter()
-        .position(|fight| position_ms >= fight.start_ms && position_ms < fight.end_ms)
-        .or_else(|| fights.iter().rposition(|fight| fight.end_ms <= position_ms))
-        .or((!fights.is_empty()).then_some(0))
+        .rposition(|fight| !fight.ambient && fight.start_ms <= position_ms)
 }
 
 pub fn project_current(fights: &[MeterFight], position_ms: u64) -> Option<MeterProjection> {
@@ -796,10 +912,12 @@ fn merge_projected_entries(into: &mut Vec<ProjectedEntry>, from: Vec<ProjectedEn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::activity::{CONTROL_PLAYER, REACTION_FRIENDLY};
+    use crate::activity::{AFFILIATION_MINE, CONTROL_PLAYER, REACTION_FRIENDLY};
 
     const PLAYER: u64 = CONTROL_PLAYER | REACTION_FRIENDLY;
-
+    const SELF: u64 = PLAYER | AFFILIATION_MINE;
+    const ALLY: u64 = PLAYER | 0x2;
+    const MOB: u64 = 0x10a48;
     #[test]
     fn pet_damage_before_summon_merges_into_owner() {
         let mut meter = MeterAccumulator::new(0, None);
@@ -1037,6 +1155,406 @@ mod tests {
     }
 
     #[test]
+    fn ally_trash_stays_ambient_until_the_host_engages() {
+        let mut meter = MeterAccumulator::trash(0);
+        meter.damage(
+            "Player-0-ALLY",
+            "Qeld",
+            ALLY,
+            "Trash",
+            MOB,
+            0,
+            "Thrash",
+            245_000,
+            1_000,
+        );
+        meter.damage(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            "Trash",
+            MOB,
+            0,
+            "Strike",
+            100_000,
+            31_000,
+        );
+        meter.damage(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            "Trash",
+            MOB,
+            0,
+            "Strike",
+            100_000,
+            35_000,
+        );
+
+        let data = meter.drain(40_000, 0, "Dungeon", &HashMap::new());
+        assert_eq!(data.fights.len(), 2);
+        assert!(data.fights[0].ambient);
+        assert!(!data.fights[1].ambient);
+        assert_eq!(data.fights[1].first_event_ms, Some(31_000));
+        assert!(project_current(&data.fights, 30_000).is_none());
+        let current = project_current(&data.fights, 40_000).unwrap();
+        assert_eq!(current.elapsed_ms, 4_000);
+        assert_eq!(current.actors[0].guid, "Player-0-HOST");
+        let overall = project_overall(&data.fights, 40_000);
+        assert_eq!(
+            overall
+                .actors
+                .iter()
+                .flat_map(|actor| &actor.spells)
+                .map(|entry| entry.amount)
+                .sum::<u64>(),
+            445_000
+        );
+    }
+
+    #[test]
+    fn a_pull_gap_freezes_current_and_keeps_later_ally_damage_overall() {
+        let mut meter = MeterAccumulator::trash(0);
+        meter.damage(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            "Mob",
+            MOB,
+            0,
+            "Hit",
+            10,
+            1_000,
+        );
+        meter.damage(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            "Mob",
+            MOB,
+            0,
+            "Hit",
+            20,
+            3_000,
+        );
+        meter.damage(
+            "Player-0-ALLY",
+            "Ally",
+            ALLY,
+            "Mob",
+            MOB,
+            0,
+            "Hit",
+            30,
+            30_000,
+        );
+
+        let data = meter.drain(40_000, 0, "Dungeon", &HashMap::new());
+        assert_eq!(data.fights.len(), 3);
+        assert!(!data.fights[1].ambient);
+        assert!(data.fights[2].ambient);
+        let current = project_current(&data.fights, 40_000).unwrap();
+        assert_eq!(current.elapsed_ms, 2_000);
+        assert_eq!(current.actors[0].guid, "Player-0-HOST");
+        assert_eq!(current.actors[0].spells[0].amount, 30);
+        let overall = project_overall(&data.fights, 40_000);
+        assert_eq!(
+            overall
+                .actors
+                .iter()
+                .flat_map(|actor| &actor.spells)
+                .map(|entry| entry.amount)
+                .sum::<u64>(),
+            60
+        );
+    }
+
+    #[test]
+    fn damage_taken_by_the_host_starts_current() {
+        let mut meter = MeterAccumulator::trash(0);
+        meter.damage(
+            "Player-0-ALLY",
+            "Ally",
+            ALLY,
+            "Mob",
+            MOB,
+            0,
+            "Hit",
+            10,
+            1_000,
+        );
+        meter.damage(
+            "Creature-0-MOB",
+            "Mob",
+            MOB,
+            "Host",
+            SELF,
+            0,
+            "Hit",
+            50,
+            4_000,
+        );
+        meter.damage(
+            "Player-0-ALLY",
+            "Ally",
+            ALLY,
+            "Mob",
+            MOB,
+            0,
+            "Hit",
+            20,
+            5_000,
+        );
+
+        let data = meter.drain(10_000, 0, "Dungeon", &HashMap::new());
+        assert_eq!(data.fights.len(), 2);
+        assert_eq!(data.fights[1].first_event_ms, Some(4_000));
+        assert_eq!(
+            project_current(&data.fights, 10_000).unwrap().elapsed_ms,
+            1_000
+        );
+    }
+
+    #[test]
+    fn healer_joined_pull_still_splits_after_damage_silence() {
+        let mut meter = MeterAccumulator::trash(0);
+        meter.damage(
+            "Player-0-ALLY",
+            "Ally",
+            ALLY,
+            "Mob",
+            MOB,
+            0,
+            "Hit",
+            10,
+            100_000,
+        );
+        meter.damage(
+            "Player-0-ALLY",
+            "Ally",
+            ALLY,
+            "Mob",
+            MOB,
+            0,
+            "Hit",
+            10,
+            110_000,
+        );
+        meter.heal(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            "Ally",
+            0,
+            "Heal",
+            100,
+            0,
+            112_000,
+        );
+        meter.heal(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            "Ally",
+            0,
+            "Heal",
+            100,
+            0,
+            129_000,
+        );
+        meter.damage(
+            "Player-0-ALLY",
+            "Ally",
+            ALLY,
+            "Mob 2",
+            MOB,
+            0,
+            "Hit",
+            10,
+            130_000,
+        );
+        meter.damage(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            "Mob 2",
+            MOB,
+            0,
+            "Hit",
+            10,
+            131_000,
+        );
+        meter.heal(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            "Host",
+            0,
+            "Heal",
+            50,
+            0,
+            132_000,
+        );
+
+        let data = meter.drain(140_000, 0, "Dungeon", &HashMap::new());
+        let current = project_current(&data.fights, 140_000).unwrap();
+        assert_eq!(current.elapsed_ms, 0);
+        assert_eq!(
+            current
+                .actors
+                .iter()
+                .flat_map(|actor| &actor.spells)
+                .filter(|entry| entry.metric == MeterMetric::Healing)
+                .map(|entry| entry.amount)
+                .sum::<u64>(),
+            50
+        );
+    }
+
+    #[test]
+    fn host_death_returns_trash_to_ambient() {
+        let mut meter = MeterAccumulator::trash(0);
+        meter.damage(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            "Mob",
+            MOB,
+            0,
+            "Hit",
+            10,
+            1_000,
+        );
+        meter.damage(
+            "Player-0-ALLY",
+            "Ally",
+            ALLY,
+            "Mob",
+            MOB,
+            0,
+            "Hit",
+            20,
+            3_000,
+        );
+        meter.host_died(4_000);
+        // Lingering host effects keep MINE after death and must not re-promote.
+        meter.damage(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            "Mob",
+            MOB,
+            0,
+            "DoT",
+            5,
+            5_000,
+        );
+        meter.damage(
+            "Player-0-ALLY",
+            "Ally",
+            ALLY,
+            "Mob",
+            MOB,
+            0,
+            "Hit",
+            30,
+            7_000,
+        );
+
+        let data = meter.drain(10_000, 0, "Dungeon", &HashMap::new());
+        assert_eq!(data.fights.len(), 3);
+        assert!(!data.fights[1].ambient);
+        assert!(data.fights[2].ambient);
+        let current = project_current(&data.fights, 10_000).unwrap();
+        assert_eq!(current.elapsed_ms, 2_000);
+        assert_eq!(current.actors.len(), 2);
+        assert_eq!(
+            current
+                .actors
+                .iter()
+                .flat_map(|actor| &actor.spells)
+                .map(|entry| entry.amount)
+                .sum::<u64>(),
+            30
+        );
+    }
+
+    #[test]
+    fn boss_cuts_override_host_state_then_return_to_ambient_trash() {
+        let mut meter = MeterAccumulator::trash(0);
+        meter.damage(
+            "Player-0-ALLY",
+            "Ally",
+            ALLY,
+            "Mob",
+            MOB,
+            0,
+            "Hit",
+            10,
+            1_000,
+        );
+        meter.cut(10_000, "Boss".to_owned());
+        meter.damage(
+            "Player-0-ALLY",
+            "Ally",
+            ALLY,
+            "Boss",
+            MOB,
+            0,
+            "Hit",
+            20,
+            11_000,
+        );
+        meter.damage(
+            "Player-0-ALLY",
+            "Ally",
+            ALLY,
+            "Boss",
+            MOB,
+            0,
+            "Hit",
+            30,
+            30_000,
+        );
+        meter.cut_to_trash(40_000);
+
+        let data = meter.drain(50_000, 0, "Dungeon", &HashMap::new());
+        assert_eq!(data.fights.len(), 3);
+        assert!(data.fights[0].ambient);
+        assert!(!data.fights[1].ambient);
+        assert_eq!(data.fights[1].label, "Boss");
+        assert_eq!(data.fights[1].active_ms, 19_000);
+        assert!(data.fights[2].ambient);
+    }
+
+    #[test]
+    fn projections_advance_on_half_second_samples() {
+        let mut meter = MeterAccumulator::new(0, None);
+        meter.damage("Player-0-A", "A", PLAYER, "Boss", MOB, 0, "Hit", 10, 100);
+        meter.damage("Player-0-A", "A", PLAYER, "Boss", MOB, 0, "Hit", 20, 600);
+        let data = meter.drain(1_500, 0, "Fight", &HashMap::new());
+
+        assert!(
+            project_current(&data.fights, 499)
+                .unwrap()
+                .actors
+                .is_empty()
+        );
+        assert_eq!(
+            project_current(&data.fights, 500).unwrap().actors[0].spells[0].amount,
+            10
+        );
+        assert_eq!(
+            project_current(&data.fights, 999).unwrap().actors[0].spells[0].amount,
+            10
+        );
+        assert_eq!(
+            project_current(&data.fights, 1_000).unwrap().actors[0].spells[0].amount,
+            30
+        );
+    }
+
+    #[test]
     fn cut_splits_fights_at_segment_boundaries() {
         let mut meter = MeterAccumulator::new(0, Some("Trash".to_owned()));
         meter.damage("Player-0-A", "A", PLAYER, "Boss", 0, 0, "Hit", 10, 1_000);
@@ -1056,7 +1574,7 @@ mod tests {
                 .iter()
                 .map(|sample| (sample.at_ms, sample.amount))
                 .collect::<Vec<_>>(),
-            vec![(1_000, 10), (2_000, 5)]
+            vec![(1_000, 10), (1_500, 5)]
         );
         assert_eq!(data.fights[1].label, "Boss One");
         assert_eq!(data.fights[1].start_ms, 2_000);

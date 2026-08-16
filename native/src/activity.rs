@@ -54,7 +54,7 @@ pub(crate) fn is_unit_friendly(flags: u64) -> bool {
     flags & REACTION_FRIENDLY != 0
 }
 
-fn is_unit_self(flags: u64) -> bool {
+pub(crate) fn is_unit_self(flags: u64) -> bool {
     is_unit_friendly(flags) && flags & AFFILIATION_MINE != 0
 }
 
@@ -1070,7 +1070,7 @@ fn handle_encounter_end(
                 result: None,
             });
         }
-        active.meter.cut(at_ms, "Trash".to_owned());
+        active.meter.cut_to_trash(at_ms);
         return;
     }
     let Some(info) = difficulty_info(difficulty_id) else {
@@ -1176,7 +1176,7 @@ fn handle_challenge_start(
     };
     // Classic challenge modes always record level 0 and no affixes, and have
     // no initial trash segment (one fight labelled by the activity title).
-    let (level, affixes, segments, meter_label) = match rules {
+    let (level, affixes, segments, meter) = match rules {
         Rules::Retail => (
             level,
             affixes.to_vec(),
@@ -1187,9 +1187,14 @@ fn handle_challenge_start(
                 label: None,
                 result: None,
             }],
-            Some("Trash".to_owned()),
+            MeterAccumulator::trash(at_ms),
         ),
-        _ => (0, Vec::new(), Vec::new(), None),
+        _ => (
+            0,
+            Vec::new(),
+            Vec::new(),
+            MeterAccumulator::new(at_ms, None),
+        ),
     };
     let active = ActiveActivity {
         id: RecordingId::new(),
@@ -1200,7 +1205,7 @@ fn handle_challenge_start(
         combatants: Combatants::default(),
         player_guid: None,
         timeline: Vec::new(),
-        meter: MeterAccumulator::new(at_ms, meter_label),
+        meter,
         kind: ActiveKind::Challenge(ChallengeState {
             zone_id,
             map_id,
@@ -1903,6 +1908,9 @@ fn handle_unit_died(
     };
     if !is_unit_player(flags) || unconscious {
         return;
+    }
+    if is_unit_self(flags) {
+        active.meter.host_died(at_ms);
     }
     let friendly = is_unit_friendly(flags);
     let relative = relative_ms(active.started_at_ms, at_ms - DEATH_MARKER_BACK_OFFSET_MS);

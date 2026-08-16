@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The damage-meter overlay: a compact Details/Skada-style ranking laid over
-//! the player video and fed from `LibraryEntry.meter` per-second aggregates.
-//! The player owns one instance on its `video_overlay`; visibility, filters,
-//! and drag position are session-only state. Current and Overall totals stop
-//! at the current playback second.
+//! the player video and fed from `LibraryEntry.meter` interval aggregates. The
+//! player owns one instance on its `video_overlay`; visibility, filters, and
+//! drag position are session-only state. Current and Overall totals stop at
+//! the latest completed interval.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
@@ -14,8 +14,8 @@ use gtk4::prelude::*;
 
 use warcraft_recorder::domain::{LibraryEntry, MeterFight, MeterMetric};
 use warcraft_recorder::meter::{
-    MeterProjection, ProjectedActor, ProjectedEntry, fight_index_at, has_untimed_totals,
-    project_current, project_overall,
+    MeterProjection, ProjectedActor, ProjectedEntry, SAMPLE_INTERVAL_MS, fight_index_at,
+    has_untimed_totals, project_current, project_overall,
 };
 
 use super::filters::class_css_class;
@@ -391,15 +391,16 @@ impl DamageMeter {
         inner.target.replace(TargetSel::All);
         inner.refresh();
     }
-    /// The playhead moved. Both segment modes are cumulative only through the
-    /// current playback second, so either a second tick or fight boundary
-    /// rebuilds the meter.
+    /// The playhead moved. Both segment modes are cumulative through the
+    /// latest completed sample, so refresh on each interval or fight boundary.
     pub fn set_position(&self, position_ms: u64) {
         let inner = &self.inner;
-        let previous_second = inner.position_ms.replace(position_ms) / 1_000;
+        let previous_interval = inner.position_ms.replace(position_ms) / SAMPLE_INTERVAL_MS;
         let previous_fight = inner.current_fight.get();
         inner.sync_current_fight();
-        if position_ms / 1_000 != previous_second || inner.current_fight.get() != previous_fight {
+        if position_ms / SAMPLE_INTERVAL_MS != previous_interval
+            || inner.current_fight.get() != previous_fight
+        {
             inner.refresh();
         }
     }
@@ -777,7 +778,16 @@ impl Inner {
 
     fn rebuild_content(self: &Rc<Self>, fight: Option<MeterProjection>) {
         let Some(fight) = fight else {
-            self.show_empty("No combat data for this recording.");
+            let has_fights = self
+                .entry
+                .borrow()
+                .as_ref()
+                .is_some_and(|entry| !entry.fights.is_empty());
+            self.show_empty(if has_fights {
+                "No fight yet at this point."
+            } else {
+                "No combat data for this recording."
+            });
             return;
         };
         let view = self.view.get();
