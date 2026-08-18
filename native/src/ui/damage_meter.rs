@@ -880,14 +880,7 @@ impl Inner {
                 &right,
                 *total as f64 / top as f64,
             );
-            let button = gtk4::Button::new();
-            button.add_css_class("flat");
-            button.add_css_class("wr-meter-row");
-            button.set_child(Some(&overlay));
-            let this = Rc::clone(self);
-            let guid = actor.guid.clone();
-            button.connect_clicked(move |_| this.open_breakdown(guid.clone()));
-            content.append(&button);
+            content.append(&self.row_button(&overlay, actor.guid.clone()));
         }
         self.set_content(&content);
     }
@@ -928,23 +921,13 @@ impl Inner {
                 &count.to_string(),
                 count as f64 / top as f64,
             );
-            let button = gtk4::Button::new();
-            button.add_css_class("flat");
-            button.add_css_class("wr-meter-row");
-            button.set_child(Some(&overlay));
-            let this = Rc::clone(self);
-            button.connect_clicked(move |_| this.open_breakdown(guid.clone()));
-            content.append(&button);
+            content.append(&self.row_button(&overlay, guid));
         }
         self.set_content(&content);
     }
 
     fn rebuild_death_breakdown(&self, deaths: &[&MeterDeath]) {
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-        let name = gtk4::Label::new(Some(&deaths[0].name));
-        name.set_xalign(0.0);
-        name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        content.append(&name);
         for (index, death) in deaths.iter().enumerate() {
             content.append(&heading(&format!(
                 "Death {} — {}",
@@ -1001,11 +984,6 @@ impl Inner {
         target: &TargetSel,
     ) {
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
-        let name = gtk4::Label::new(Some(&actor.name));
-        name.set_xalign(0.0);
-        name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        content.append(&name);
-
         content.append(&heading("Spells"));
         let spell_total: u64 = actor
             .spells
@@ -1065,6 +1043,27 @@ impl Inner {
         );
         row.add_css_class("wr-meter-row");
         row
+    }
+
+    /// A ranking row: the fill visual in a flat button that opens the actor's
+    /// breakdown. The click acts on press, in the capture phase, because the
+    /// half-second re-render replaces the button and a `clicked` press/release
+    /// pair straddling it would be dropped.
+    fn row_button(self: &Rc<Self>, overlay: &gtk4::Overlay, guid: String) -> gtk4::Button {
+        let button = gtk4::Button::new();
+        button.add_css_class("flat");
+        button.add_css_class("wr-meter-row");
+        button.set_child(Some(overlay));
+        let click = gtk4::GestureClick::new();
+        click.set_button(gtk4::gdk::BUTTON_PRIMARY);
+        click.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let this = Rc::clone(self);
+        click.connect_pressed(move |gesture, _, _, _| {
+            this.open_breakdown(guid.clone());
+            gesture.set_state(gtk4::EventSequenceState::Claimed);
+        });
+        button.add_controller(click);
+        button
     }
 
     fn open_breakdown(self: &Rc<Self>, guid: String) {

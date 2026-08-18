@@ -149,7 +149,16 @@ window.wr-light .wr-class-warrior { color: #7d5f36; }
 
 .wr-meter-row {
   padding: 0;
-  min-height: 20px;
+  min-height: 24px;
+  border-radius: 4px;
+}
+
+/* Trough and progress share a height so the fill covers the whole row rather
+   than a band floating in it. The gradient is a sheen over the solid class
+   color, not the fill itself. */
+.wr-meter-fill trough,
+.wr-meter-fill progress {
+  min-height: 24px;
   border-radius: 4px;
 }
 
@@ -158,26 +167,26 @@ window.wr-light .wr-class-warrior { color: #7d5f36; }
 }
 
 .wr-meter-fill progress {
-  min-height: 20px;
+  background-image: linear-gradient(to bottom, alpha(#ffffff, 0.10), alpha(#000000, 0.18));
 }
 
-.wr-meter-fill.wr-class-death-knight progress { background-color: alpha(#c41e3a, 0.55); }
-.wr-meter-fill.wr-class-demon-hunter progress { background-color: alpha(#a330c9, 0.55); }
-.wr-meter-fill.wr-class-druid progress { background-color: alpha(#ff7c0a, 0.55); }
-.wr-meter-fill.wr-class-evoker progress { background-color: alpha(#33937f, 0.55); }
-.wr-meter-fill.wr-class-hunter progress { background-color: alpha(#aad372, 0.55); }
-.wr-meter-fill.wr-class-mage progress { background-color: alpha(#3fc7eb, 0.55); }
-.wr-meter-fill.wr-class-monk progress { background-color: alpha(#00ff98, 0.55); }
-.wr-meter-fill.wr-class-paladin progress { background-color: alpha(#f48cba, 0.55); }
-.wr-meter-fill.wr-class-priest progress { background-color: alpha(#ffffff, 0.55); }
-.wr-meter-fill.wr-class-rogue progress { background-color: alpha(#fff468, 0.55); }
-.wr-meter-fill.wr-class-shaman progress { background-color: alpha(#0070dd, 0.55); }
-.wr-meter-fill.wr-class-warlock progress { background-color: alpha(#8788ee, 0.55); }
-.wr-meter-fill.wr-class-warrior progress { background-color: alpha(#c69b6d, 0.55); }
+.wr-meter-fill.wr-class-death-knight progress { background-color: mix(#c41e3a, #000000, 0.35); }
+.wr-meter-fill.wr-class-demon-hunter progress { background-color: mix(#a330c9, #000000, 0.35); }
+.wr-meter-fill.wr-class-druid progress { background-color: mix(#ff7c0a, #000000, 0.35); }
+.wr-meter-fill.wr-class-evoker progress { background-color: mix(#33937f, #000000, 0.35); }
+.wr-meter-fill.wr-class-hunter progress { background-color: mix(#aad372, #000000, 0.35); }
+.wr-meter-fill.wr-class-mage progress { background-color: mix(#3fc7eb, #000000, 0.35); }
+.wr-meter-fill.wr-class-monk progress { background-color: mix(#00ff98, #000000, 0.35); }
+.wr-meter-fill.wr-class-paladin progress { background-color: mix(#f48cba, #000000, 0.35); }
+.wr-meter-fill.wr-class-priest progress { background-color: mix(#ffffff, #000000, 0.35); }
+.wr-meter-fill.wr-class-rogue progress { background-color: mix(#fff468, #000000, 0.35); }
+.wr-meter-fill.wr-class-shaman progress { background-color: mix(#0070dd, #000000, 0.35); }
+.wr-meter-fill.wr-class-warlock progress { background-color: mix(#8788ee, #000000, 0.35); }
+.wr-meter-fill.wr-class-warrior progress { background-color: mix(#c69b6d, #000000, 0.35); }
 
 /* Death log rows are health bars, and get more air than ranking rows. */
-.wr-meter-fill.wr-death-damage progress { background-color: alpha(#c41e3a, 0.55); }
-.wr-meter-fill.wr-death-healing progress { background-color: alpha(#00b34f, 0.55); }
+.wr-meter-fill.wr-death-damage progress { background-color: mix(#c41e3a, #000000, 0.35); }
+.wr-meter-fill.wr-death-healing progress { background-color: mix(#00b34f, #000000, 0.35); }
 
 .wr-meter-fill.wr-death-damage trough,
 .wr-meter-fill.wr-death-healing trough,
