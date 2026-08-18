@@ -1741,6 +1741,9 @@ fn handle_player_observed(
     if let Some(owner) = owner_guid {
         active.meter.record_owner(guid, owner, None);
     }
+    if kind == PlayerObservationKind::CastSucceeded {
+        active.meter.cast(guid, name, flags, spell_name, at_ms);
+    }
     if kind == PlayerObservationKind::CastSucceeded && is_bloodlust_spell(spell_id) {
         let start_ms = relative_ms(active.started_at_ms, at_ms);
         let duplicate = active

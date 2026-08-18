@@ -301,6 +301,8 @@ pub enum MeterMetric {
     Healing,
     Interrupts,
     Dispels,
+    /// Successful casts: `amount` counts events, like the other count metrics.
+    Casts,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

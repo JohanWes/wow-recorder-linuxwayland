@@ -336,6 +336,13 @@ impl Player {
                 }
             });
         }
+        // Death-log and occurrence rows seek the video to the event.
+        {
+            let this = Rc::clone(&inner);
+            inner.meter.connect_seek(move |at_ms| {
+                this.request_seek(at_ms as f64 / 1_000.0, SeekMode::Settle);
+            });
+        }
         // The drag position is pixel margins: any relayout (window resize,
         // fullscreen transitions) re-clamps them to the overlay allocation.
         {

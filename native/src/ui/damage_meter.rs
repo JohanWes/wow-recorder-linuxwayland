@@ -17,7 +17,7 @@ use warcraft_recorder::domain::{
 };
 use warcraft_recorder::meter::{
     MeterProjection, ProjectedActor, ProjectedEntry, SAMPLE_INTERVAL_MS, fight_index_at,
-    has_untimed_totals, project_current, project_overall,
+    has_untimed_totals, is_count_metric, project_current, project_overall,
 };
 
 use super::filters::class_css_class;
@@ -44,6 +44,12 @@ const MIN_WIDTH: i32 = 240;
 const MIN_HEIGHT: i32 = 140;
 /// Bounded target rows fold into "Other", which is not a selectable target.
 const OTHER_KEY: &str = "Other";
+/// A seek into the player, in media-relative milliseconds.
+type SeekFn = Box<dyn Fn(u64)>;
+
+/// Seeking from a meter row lands this far before the event, so the moment
+/// plays out on screen instead of having already happened.
+const SEEK_LEAD_MS: u64 = 3_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum View {
@@ -58,6 +64,7 @@ fn view_label(view: View) -> &'static str {
         View::Metric(MeterMetric::Healing) => "Healing Done",
         View::Metric(MeterMetric::Interrupts) => "Interrupts",
         View::Metric(MeterMetric::Dispels) => "Dispels",
+        View::Metric(MeterMetric::Casts) => "Casts",
         View::Deaths => "Deaths",
     }
 }
@@ -69,6 +76,7 @@ fn view_key(view: View) -> &'static str {
         View::Metric(MeterMetric::Healing) => "healing",
         View::Metric(MeterMetric::Interrupts) => "interrupts",
         View::Metric(MeterMetric::Dispels) => "dispels",
+        View::Metric(MeterMetric::Casts) => "casts",
         View::Deaths => "deaths",
     }
 }
@@ -80,6 +88,7 @@ fn view_from_key(key: &str) -> Option<View> {
         "healing" => View::Metric(MeterMetric::Healing),
         "interrupts" => View::Metric(MeterMetric::Interrupts),
         "dispels" => View::Metric(MeterMetric::Dispels),
+        "casts" => View::Metric(MeterMetric::Casts),
         "deaths" => View::Deaths,
         _ => return None,
     })
@@ -92,6 +101,7 @@ fn view_empty_message(view: View) -> String {
         View::Metric(MeterMetric::Healing) => "healing",
         View::Metric(MeterMetric::Interrupts) => "interrupts",
         View::Metric(MeterMetric::Dispels) => "dispels",
+        View::Metric(MeterMetric::Casts) => "casts",
         View::Deaths => "deaths",
     };
     format!("No {noun} in this fight.")
@@ -280,6 +290,8 @@ struct Inner {
     /// Last playhead position, kept so a segment switch can pick the Current
     /// fight even while another segment was rendered.
     position_ms: Cell<u64>,
+    /// Seek request into the player, installed by it at construction.
+    seek: RefCell<Option<SeekFn>>,
 }
 
 pub struct DamageMeter {
@@ -373,6 +385,7 @@ impl DamageMeter {
             drag_mode: Cell::new(None),
             drag_geometry: Cell::new((16, 16, 0, 0)),
             desired_size: Cell::new(None),
+            seek: RefCell::new(None),
         });
 
         inner.connect_actions();
@@ -442,6 +455,12 @@ impl DamageMeter {
             f64::from(inner.root.margin_end()),
             f64::from(inner.root.margin_bottom()),
         );
+    }
+
+    /// Route seeks from clickable meter rows (death log events, occurrence
+    /// times) back into the player. Media-relative milliseconds.
+    pub fn connect_seek(&self, seek: impl Fn(u64) + 'static) {
+        self.inner.seek.replace(Some(Box::new(seek)));
     }
 
     /// Install the meter's drag gesture on the overlay it was added to.
@@ -720,6 +739,7 @@ impl Inner {
             View::Metric(MeterMetric::Healing),
             View::Metric(MeterMetric::Interrupts),
             View::Metric(MeterMetric::Dispels),
+            View::Metric(MeterMetric::Casts),
             View::Deaths,
         ] {
             let item = gtk4::gio::MenuItem::new(Some(view_label(view)), None);
@@ -742,7 +762,8 @@ impl Inner {
         }
         menu.append_section(None, &segment_section);
 
-        if matches!(self.view.get(), View::Metric(_)) {
+        let (names, markers) = self.target_choices();
+        if matches!(self.view.get(), View::Metric(_)) && !(names.is_empty() && markers.is_empty()) {
             // Only names and markers present in the selected segment; a dead
             // entry would be a filter with no rows.
             let target_section = gtk4::gio::Menu::new();
@@ -750,7 +771,6 @@ impl Inner {
             let all = gtk4::gio::MenuItem::new(Some("All targets"), None);
             all.set_action_and_target_value(Some("meter.target"), Some(&"all".to_variant()));
             targets.append_item(&all);
-            let (names, markers) = self.target_choices();
             for name in names {
                 let item = gtk4::gio::MenuItem::new(Some(&name), None);
                 item.set_action_and_target_value(
@@ -875,10 +895,17 @@ impl Inner {
         view: MeterMetric,
     ) {
         let top = ranked.first().map_or(1, |(_, total)| *total);
-        let utility = matches!(view, MeterMetric::Interrupts | MeterMetric::Dispels);
+        let counted = is_count_metric(view);
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         for (rank, (actor, total)) in ranked.iter().enumerate() {
-            let right = if utility || fight.elapsed_ms == 0 {
+            let right = if fight.elapsed_ms == 0 {
+                format_compact(*total)
+            } else if view == MeterMetric::Casts {
+                // Casts per minute: a per-second rate on a handful of casts
+                // rounds to nothing.
+                let cpm = *total as f64 * 60_000.0 / fight.elapsed_ms as f64;
+                format!("{total} ({cpm:.1} CPM)")
+            } else if counted {
                 format_compact(*total)
             } else {
                 let rate = u128::from(*total) * 1_000 / u128::from(fight.elapsed_ms);
@@ -945,7 +972,7 @@ impl Inner {
         self.set_content(&content);
     }
 
-    fn rebuild_death_breakdown(&self, deaths: &[&MeterDeath]) {
+    fn rebuild_death_breakdown(self: &Rc<Self>, deaths: &[&MeterDeath]) {
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
         for (index, death) in deaths.iter().enumerate() {
             content.append(&heading(&format!(
@@ -968,7 +995,7 @@ impl Inner {
                 } else {
                     1.0
                 };
-                content.append(&fill_line(
+                let row = fill_line(
                     Some(class),
                     &format!(
                         "-{:.1}s {} ({})",
@@ -986,9 +1013,13 @@ impl Inner {
                         format!("{sign}{}", format_compact(event.amount))
                     },
                     remaining,
-                ));
+                );
+                let at_ms = event.at_ms;
+                content.append(&self.row_button(&row, move |this| this.seek_to(at_ms)));
             }
-            content.append(&fill_line(Some("wr-death-damage"), "0.0s Death", "", 0.0));
+            let row = fill_line(Some("wr-death-damage"), "0.0s Death", "", 0.0);
+            let at_ms = death.at_ms;
+            content.append(&self.row_button(&row, move |this| this.seek_to(at_ms)));
         }
         self.set_content(&content);
     }
@@ -1002,12 +1033,7 @@ impl Inner {
         view: MeterMetric,
         target: &TargetSel,
     ) {
-        // Interrupts and Dispels count events, so per-hit statistics would be
-        // a list of ones; only the amount metrics drill into a spell.
-        let drillable = !matches!(view, MeterMetric::Interrupts | MeterMetric::Dispels);
-        if let Some(key) = self.spell.borrow().clone()
-            && drillable
-        {
+        if let Some(key) = self.spell.borrow().clone() {
             if let Some(entry) = actor
                 .spells
                 .iter()
@@ -1028,33 +1054,28 @@ impl Inner {
             .sum();
         for entry in actor.spells.iter().filter(|entry| entry.metric == view) {
             let row = self.breakdown_row(actor, entry, spell_total);
-            if drillable {
-                let key = entry.key.clone();
-                content.append(&self.row_button(&row, move |this| {
-                    this.spell.replace(Some(key.clone()));
-                }));
-            } else {
-                content.append(&row);
-            }
+            let key = entry.key.clone();
+            content.append(&self.row_button(&row, move |this| {
+                this.spell.replace(Some(key.clone()));
+            }));
         }
 
-        content.append(&heading(if view == MeterMetric::DamageTaken {
-            "Sources"
-        } else {
-            "Targets"
-        }));
-        let target_total: u64 = actor
+        // Casts keep no target rows, so the heading would stand alone.
+        let targets: Vec<&ProjectedEntry> = actor
             .targets
             .iter()
             .filter(|entry| entry.metric == view && matches_target(entry, target))
-            .map(|entry| entry.amount)
-            .sum();
-        for entry in actor
-            .targets
-            .iter()
-            .filter(|entry| entry.metric == view && matches_target(entry, target))
-        {
-            content.append(&self.breakdown_row(actor, entry, target_total));
+            .collect();
+        if !targets.is_empty() {
+            content.append(&heading(if view == MeterMetric::DamageTaken {
+                "Sources"
+            } else {
+                "Targets"
+            }));
+            let target_total: u64 = targets.iter().map(|entry| entry.amount).sum();
+            for entry in targets {
+                content.append(&self.breakdown_row(actor, entry, target_total));
+            }
         }
         self.set_content(&content);
     }
@@ -1069,6 +1090,22 @@ impl Inner {
     ) {
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
         let class = self.class_for(&actor.guid);
+        // Count metrics have nothing per-hit to report: every event is worth
+        // one. Their detail is when each happened, and each row seeks there.
+        if is_count_metric(view) {
+            for at_ms in &entry.times {
+                let target = entry
+                    .targets
+                    .iter()
+                    .find(|target| target.times.contains(at_ms))
+                    .map_or("", |target| target.key.as_str());
+                let row = fill_line(class, &format_mm_ss(*at_ms), target, 1.0);
+                let at_ms = *at_ms;
+                content.append(&self.row_button(&row, move |this| this.seek_to(at_ms)));
+            }
+            self.set_content(&content);
+            return;
+        }
         let average = if entry.hits == 0 {
             0
         } else {
@@ -1098,6 +1135,22 @@ impl Inner {
         let hits = fill_line(class, "Hits", &entry.hits.to_string(), 1.0);
         hits.add_css_class("wr-meter-row");
         content.append(&hits);
+        if view == MeterMetric::Healing {
+            let raw = entry.amount + entry.overheal;
+            let share = if raw == 0 {
+                0.0
+            } else {
+                entry.overheal as f64 / raw as f64
+            };
+            let row = fill_line(
+                class,
+                "Overheal",
+                &format!("{} {:.1}%", format_compact(entry.overheal), share * 100.0),
+                share,
+            );
+            row.add_css_class("wr-meter-row");
+            content.append(&row);
+        }
 
         // A sidecar without the per-spell split would otherwise leave a
         // heading with nothing under it.
@@ -1168,6 +1221,14 @@ impl Inner {
         button.add_controller(click);
         button
     }
+    /// Seek the player a beat before `at_ms`, so the event plays rather than
+    /// having just happened. Inert until the player installs the callback.
+    fn seek_to(&self, at_ms: u64) {
+        if let Some(seek) = self.seek.borrow().as_ref() {
+            seek(at_ms.saturating_sub(SEEK_LEAD_MS));
+        }
+    }
+
     fn class_for(&self, guid: &str) -> Option<&'static str> {
         let entry = self.entry.borrow();
         entry

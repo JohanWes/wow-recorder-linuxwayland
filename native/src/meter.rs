@@ -28,14 +28,27 @@ pub const SAMPLE_INTERVAL_MS: u64 = 500;
 const PULL_GAP_MS: i64 = 6_000;
 /// Events kept per unit for the death log breakdown.
 const DEATH_LOG_EVENTS: usize = 20;
+/// A cast row above one per second of fight, over at least this many casts, is
+/// the game's own book-keeping rather than a human pressing a button.
+const HIDDEN_CAST_FLOOR: u32 = 20;
 const OTHER_KEY: &str = "Other";
-const METRICS: [MeterMetric; 5] = [
+const METRICS: [MeterMetric; 6] = [
     MeterMetric::Damage,
     MeterMetric::DamageTaken,
     MeterMetric::Healing,
     MeterMetric::Interrupts,
     MeterMetric::Dispels,
+    MeterMetric::Casts,
 ];
+
+/// Metrics whose `amount` counts events rather than measuring one, so the UI
+/// shows occurrence times instead of per-hit statistics.
+pub fn is_count_metric(metric: MeterMetric) -> bool {
+    matches!(
+        metric,
+        MeterMetric::Interrupts | MeterMetric::Dispels | MeterMetric::Casts
+    )
+}
 
 pub(crate) struct MeterAccumulator {
     started_at_ms: i64,
@@ -413,6 +426,40 @@ impl MeterAccumulator {
         );
     }
 
+    /// One successful cast by a friendly player. Pets and guardians are
+    /// excluded: their casts are the game acting, not a button press, and
+    /// merging them into their owner is what made the row unreadable. Casts
+    /// are counted, never timed: they land outside combat too, so they must
+    /// not widen the fight's DPS window.
+    pub(crate) fn cast(
+        &mut self,
+        source_guid: &str,
+        source_name: &str,
+        source_flags: u64,
+        spell_name: &str,
+        at_ms: i64,
+    ) {
+        if !is_unit_player(source_flags) || !is_unit_friendly(source_flags) {
+            return;
+        }
+        // An area effect re-logs its owner's cast from a nil source carrying
+        // the owner's own flags; counting it doubles the button press.
+        if source_guid.is_empty() || source_guid.chars().all(|character| character == '0') {
+            return;
+        }
+        self.record(
+            source_guid,
+            source_name,
+            MeterMetric::Casts,
+            spell_name,
+            "",
+            0,
+            1,
+            0,
+            at_ms,
+        );
+    }
+
     /// Move support-contributed damage or effective healing from the actor who
     /// produced the base event to the supporting player. Support rows follow
     /// their base event in the combat log; a missing base is ignored.
@@ -733,7 +780,7 @@ impl MeterAccumulator {
             .fights
             .last_mut()
             .expect("the open fight is always present");
-        if !self.segmented && metric != MeterMetric::DamageTaken {
+        if !self.segmented && !matches!(metric, MeterMetric::DamageTaken | MeterMetric::Casts) {
             fight.first_event_ms =
                 Some(fight.first_event_ms.map_or(at_ms, |first| first.min(at_ms)));
             fight.last_event_ms = Some(fight.last_event_ms.map_or(at_ms, |last| last.max(at_ms)));
@@ -745,6 +792,10 @@ impl MeterAccumulator {
             .entry((metric, spell_name.to_owned()))
             .or_default()
             .add(amount, overheal, bucket_end_ms);
+        // A cast's target says nothing worth a row: most are self or nothing.
+        if metric == MeterMetric::Casts {
+            return;
+        }
         actor
             .targets
             .entry((metric, dest_name.to_owned(), marker))
@@ -870,6 +921,19 @@ fn merged_actors(
                 targets: entries_targets(&raw.targets, started_at_ms),
             });
         }
+    }
+    // Hidden book-keeping casts (soul fragment pickups, proc "casts") share
+    // SPELL_CAST_SUCCESS with real button presses and the log gives nothing to
+    // tell them apart. Nothing a player presses sustains a cast a second for a
+    // whole fight, so that rate is the cut.
+    // ponytail: rate heuristic; a spell list is the upgrade if it misfires.
+    let seconds = (fight.end_ms - fight.start_ms).max(0) as u64 / 1_000;
+    for actor in &mut actors {
+        actor.spells.retain(|entry| {
+            entry.metric != MeterMetric::Casts
+                || entry.hits < HIDDEN_CAST_FLOOR
+                || u64::from(entry.hits) <= seconds
+        });
     }
     for actor in &mut actors {
         actor.spells = bounded(std::mem::take(&mut actor.spells));
@@ -1094,6 +1158,9 @@ pub struct ProjectedEntry {
     pub max: u64,
     /// This spell's own target split, projected to the same playhead.
     pub targets: Vec<ProjectedEntry>,
+    /// Occurrence times up to the playhead, sample-bucket accurate. Filled for
+    /// count metrics only; the amount metrics would list every hit.
+    pub times: Vec<u64>,
 }
 
 pub fn fight_index_at(fights: &[MeterFight], position_ms: u64) -> Option<usize> {
@@ -1194,6 +1261,7 @@ fn project_entries(entries: &[MeterEntry], position_ms: u64) -> Vec<ProjectedEnt
                 min: 0,
                 max: 0,
                 targets: project_entries(&entry.targets, position_ms),
+                times: Vec::new(),
             };
             for sample in entry
                 .samples
@@ -1203,6 +1271,11 @@ fn project_entries(entries: &[MeterEntry], position_ms: u64) -> Vec<ProjectedEnt
                 projected.amount += sample.amount;
                 projected.hits += sample.hits;
                 projected.overheal += sample.overheal;
+                if is_count_metric(entry.metric) {
+                    projected
+                        .times
+                        .extend(std::iter::repeat_n(sample.at_ms, sample.hits as usize));
+                }
                 if sample.max > 0 {
                     projected.min = if projected.max == 0 {
                         sample.min
@@ -1236,6 +1309,8 @@ fn merge_projected_entries(into: &mut Vec<ProjectedEntry>, from: Vec<ProjectedEn
                 };
                 existing.max = existing.max.max(entry.max);
             }
+            existing.times.extend(entry.times);
+            existing.times.sort_unstable();
             merge_projected_entries(&mut existing.targets, entry.targets);
         } else {
             into.push(entry);
@@ -1612,6 +1687,77 @@ mod tests {
         assert_eq!(spells[0].metric, MeterMetric::Healing);
         assert_eq!(spells[0].amount, 600);
         assert_eq!(spells[0].overheal, 400);
+    }
+
+    /// Casts count the player's own button presses: no pets, no hidden
+    /// book-keeping casts, and no widening of the active window every rate
+    /// divides by.
+    #[test]
+    fn casts_count_player_button_presses_only() {
+        let mut meter = MeterAccumulator::new(0, None);
+        meter.cast(
+            "Player-0-A",
+            "A",
+            FRIENDLY_PLAYER,
+            "Arcane Intellect",
+            1_000,
+        );
+        // A pet's own casts are the game acting, never a button press.
+        meter.cast("Pet-0-1", "Imp", PLAYER, "Firebolt", 5_000);
+        meter.damage(
+            "Player-0-A",
+            "A",
+            PLAYER,
+            "Boss",
+            "Boss",
+            MOB,
+            0,
+            "Frostbolt",
+            50_000,
+            10_000,
+        );
+        meter.damage(
+            "Player-0-A",
+            "A",
+            PLAYER,
+            "Boss",
+            "Boss",
+            MOB,
+            0,
+            "Frostbolt",
+            50_000,
+            15_000,
+        );
+        meter.cast("Player-0-A", "A", FRIENDLY_PLAYER, "Frostbolt", 20_000);
+        // Book-keeping casts the game fires for itself, well above any rate a
+        // player presses a button at.
+        for index in 0..40 {
+            meter.cast(
+                "Player-0-A",
+                "A",
+                FRIENDLY_PLAYER,
+                "Soul Fragment",
+                1_000 + index * 500,
+            );
+        }
+        let data = meter.drain(30_000, 0, "Fight", &HashMap::new());
+        let fight = &data.fights[0];
+        assert_eq!(fight.active_ms, 5_000);
+        let casts: Vec<&MeterEntry> = fight.actors[0]
+            .spells
+            .iter()
+            .filter(|entry| entry.metric == MeterMetric::Casts)
+            .collect();
+        assert_eq!(casts.len(), 2);
+        assert_eq!(casts.iter().map(|entry| entry.amount).sum::<u64>(), 2);
+        let keys: Vec<&str> = fight
+            .actors
+            .iter()
+            .flat_map(|actor| &actor.spells)
+            .map(|entry| entry.key.as_str())
+            .collect();
+        assert!(!keys.contains(&"Firebolt"));
+        assert!(!keys.contains(&"Soul Fragment"));
     }
 
     #[test]
