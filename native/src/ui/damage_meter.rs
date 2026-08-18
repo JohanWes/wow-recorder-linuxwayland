@@ -264,6 +264,8 @@ struct Inner {
     /// The open actor breakdown: the actor's GUID.
     target: RefCell<TargetSel>,
     breakdown: RefCell<Option<String>>,
+    /// The open spell detail inside that breakdown: the spell key.
+    spell: RefCell<Option<String>>,
     /// Fight index the Current segment last rendered from.
     current_fight: Cell<Option<usize>>,
     /// Drag mode chosen at drag begin, if the sequence was claimed.
@@ -366,6 +368,7 @@ impl DamageMeter {
             target: RefCell::new(TargetSel::All),
             position_ms: Cell::new(0),
             breakdown: RefCell::new(None),
+            spell: RefCell::new(None),
             current_fight: Cell::new(None),
             drag_mode: Cell::new(None),
             drag_geometry: Cell::new((16, 16, 0, 0)),
@@ -395,6 +398,7 @@ impl DamageMeter {
         inner.position_ms.set(0);
         inner.current_fight.set(None);
         inner.breakdown.replace(None);
+        inner.spell.replace(None);
         inner.target.replace(TargetSel::All);
         inner.refresh();
     }
@@ -590,10 +594,14 @@ impl Inner {
         back_click.set_button(gtk4::gdk::BUTTON_SECONDARY);
         let this = Rc::clone(self);
         back_click.connect_pressed(move |gesture, _, _, _| {
-            if this.breakdown.borrow().is_none() {
+            // One level per click: spell detail, then actor breakdown.
+            if this.spell.borrow().is_some() {
+                this.spell.replace(None);
+            } else if this.breakdown.borrow().is_some() {
+                this.breakdown.replace(None);
+            } else {
                 return;
             }
-            this.breakdown.replace(None);
             this.refresh();
             gesture.set_state(gtk4::EventSequenceState::Claimed);
         });
@@ -604,6 +612,7 @@ impl Inner {
         if self.view.replace(view) != view {
             self.target.replace(TargetSel::All);
             self.breakdown.replace(None);
+            self.spell.replace(None);
             self.refresh();
         }
     }
@@ -688,6 +697,10 @@ impl Inner {
             }
             (View::Metric(_), Some(target)) => format!("{label} to {target}"),
             (_, _) => label.to_owned(),
+        };
+        let title = match self.spell.borrow().as_deref() {
+            Some(spell) => format!("{title} — {spell}"),
+            None => title,
         };
         match fight {
             Some(fight) => self
@@ -826,6 +839,7 @@ impl Inner {
         // A segment switch may have left the breakdown without its actor.
         if breakdown.is_some() {
             self.breakdown.replace(None);
+            self.spell.replace(None);
         }
         let mut ranked: Vec<(&ProjectedActor, u64)> = fight
             .actors
@@ -880,7 +894,10 @@ impl Inner {
                 &right,
                 *total as f64 / top as f64,
             );
-            content.append(&self.row_button(&overlay, actor.guid.clone()));
+            let guid = actor.guid.clone();
+            content.append(&self.row_button(&overlay, move |this| {
+                this.breakdown.replace(Some(guid.clone()));
+            }));
         }
         self.set_content(&content);
     }
@@ -921,7 +938,9 @@ impl Inner {
                 &count.to_string(),
                 count as f64 / top as f64,
             );
-            content.append(&self.row_button(&overlay, guid));
+            content.append(&self.row_button(&overlay, move |this| {
+                this.breakdown.replace(Some(guid.clone()));
+            }));
         }
         self.set_content(&content);
     }
@@ -974,15 +993,31 @@ impl Inner {
         self.set_content(&content);
     }
 
-    /// The actor drilldown in the same scroller: actor name, then the Spells
-    /// and Targets lists with the active filters intact. Secondary click on
-    /// the panel returns to the ranking.
+    /// The actor drilldown in the same scroller: the Spells and Targets lists
+    /// with the active filters intact. Secondary click on the panel returns to
+    /// the ranking.
     fn rebuild_breakdown(
         self: &Rc<Self>,
         actor: &ProjectedActor,
         view: MeterMetric,
         target: &TargetSel,
     ) {
+        // Interrupts and Dispels count events, so per-hit statistics would be
+        // a list of ones; only the amount metrics drill into a spell.
+        let drillable = !matches!(view, MeterMetric::Interrupts | MeterMetric::Dispels);
+        if let Some(key) = self.spell.borrow().clone()
+            && drillable
+        {
+            if let Some(entry) = actor
+                .spells
+                .iter()
+                .find(|entry| entry.metric == view && entry.key == key)
+            {
+                self.rebuild_spell_breakdown(actor, entry, view);
+                return;
+            }
+            self.spell.replace(None);
+        }
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
         content.append(&heading("Spells"));
         let spell_total: u64 = actor
@@ -992,7 +1027,15 @@ impl Inner {
             .map(|entry| entry.amount)
             .sum();
         for entry in actor.spells.iter().filter(|entry| entry.metric == view) {
-            content.append(&self.breakdown_row(actor, entry, spell_total));
+            let row = self.breakdown_row(actor, entry, spell_total);
+            if drillable {
+                let key = entry.key.clone();
+                content.append(&self.row_button(&row, move |this| {
+                    this.spell.replace(Some(key.clone()));
+                }));
+            } else {
+                content.append(&row);
+            }
         }
 
         content.append(&heading(if view == MeterMetric::DamageTaken {
@@ -1012,6 +1055,61 @@ impl Inner {
             .filter(|entry| entry.metric == view && matches_target(entry, target))
         {
             content.append(&self.breakdown_row(actor, entry, target_total));
+        }
+        self.set_content(&content);
+    }
+
+    /// One spell's per-hit statistics and its own target split. The spell name
+    /// is in the panel title, so no row is spent on it.
+    fn rebuild_spell_breakdown(
+        self: &Rc<Self>,
+        actor: &ProjectedActor,
+        entry: &ProjectedEntry,
+        view: MeterMetric,
+    ) {
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        let class = self.class_for(&actor.guid);
+        let average = if entry.hits == 0 {
+            0
+        } else {
+            entry.amount / u64::from(entry.hits)
+        };
+        for (label, value) in [
+            ("Average", average),
+            ("Maximum", entry.max),
+            ("Minimum", entry.min),
+        ] {
+            // A sidecar written before per-hit statistics existed has no
+            // extremes; showing 0 would read as a real measurement.
+            let right = if entry.max == 0 {
+                "—".to_owned()
+            } else {
+                format_compact(value)
+            };
+            let fraction = if entry.max == 0 {
+                0.0
+            } else {
+                value as f64 / entry.max as f64
+            };
+            let row = fill_line(class, label, &right, fraction);
+            row.add_css_class("wr-meter-row");
+            content.append(&row);
+        }
+        let hits = fill_line(class, "Hits", &entry.hits.to_string(), 1.0);
+        hits.add_css_class("wr-meter-row");
+        content.append(&hits);
+
+        // A sidecar without the per-spell split would otherwise leave a
+        // heading with nothing under it.
+        if !entry.targets.is_empty() {
+            content.append(&heading(if view == MeterMetric::DamageTaken {
+                "Sources"
+            } else {
+                "Targets"
+            }));
+            for target in &entry.targets {
+                content.append(&self.breakdown_row(actor, target, entry.amount));
+            }
         }
         self.set_content(&content);
     }
@@ -1049,7 +1147,11 @@ impl Inner {
     /// breakdown. The click acts on press, in the capture phase, because the
     /// half-second re-render replaces the button and a `clicked` press/release
     /// pair straddling it would be dropped.
-    fn row_button(self: &Rc<Self>, overlay: &gtk4::Overlay, guid: String) -> gtk4::Button {
+    fn row_button(
+        self: &Rc<Self>,
+        overlay: &gtk4::Overlay,
+        open: impl Fn(&Rc<Self>) + 'static,
+    ) -> gtk4::Button {
         let button = gtk4::Button::new();
         button.add_css_class("flat");
         button.add_css_class("wr-meter-row");
@@ -1059,16 +1161,12 @@ impl Inner {
         click.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let this = Rc::clone(self);
         click.connect_pressed(move |gesture, _, _, _| {
-            this.open_breakdown(guid.clone());
+            open(&this);
+            this.refresh();
             gesture.set_state(gtk4::EventSequenceState::Claimed);
         });
         button.add_controller(click);
         button
-    }
-
-    fn open_breakdown(self: &Rc<Self>, guid: String) {
-        self.breakdown.replace(Some(guid));
-        self.refresh();
     }
     fn class_for(&self, guid: &str) -> Option<&'static str> {
         let entry = self.entry.borrow();

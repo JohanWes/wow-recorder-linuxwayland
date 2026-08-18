@@ -256,6 +256,12 @@ pub struct MeterSample {
     pub amount: u64,
     pub hits: u32,
     pub overheal: u64,
+    /// Smallest and largest single hit in this interval. Both combine across
+    /// intervals, so a playhead-limited projection stays exact.
+    #[serde(default)]
+    pub min: u64,
+    #[serde(default)]
+    pub max: u64,
 }
 
 /// One damage-meter aggregate: a spell or target bucket for one actor and one
@@ -272,9 +278,19 @@ pub struct MeterEntry {
     pub amount: u64,
     pub hits: u32,
     pub overheal: u64,
+    /// Smallest and largest single hit; `max == 0` means the entry carries no
+    /// per-hit statistics.
+    #[serde(default)]
+    pub min: u64,
+    #[serde(default)]
+    pub max: u64,
     /// Interval deltas used to reconstruct this entry at the playhead.
     #[serde(default)]
     pub samples: Vec<MeterSample>,
+    /// This spell's own per-target split. Spell rows only; empty on target
+    /// rows and on the folded "Other" row.
+    #[serde(default)]
+    pub targets: Vec<MeterEntry>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

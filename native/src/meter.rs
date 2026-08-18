@@ -82,9 +82,12 @@ struct RawFight {
     deaths: Vec<RawDeath>,
 }
 
+type SpellTargetKey = (MeterMetric, String, String, u8);
+
 struct RecentRecord {
     spell_key: (MeterMetric, String),
     target_key: (MeterMetric, String, u8),
+    spell_target_key: SpellTargetKey,
     at_ms: i64,
     bucket_end_ms: i64,
     remaining: u64,
@@ -139,6 +142,7 @@ impl RawFight {
             name: name.to_owned(),
             spells: HashMap::new(),
             targets: HashMap::new(),
+            spell_targets: HashMap::new(),
         });
         self.actors.last_mut().expect("just pushed")
     }
@@ -149,6 +153,9 @@ struct RawActor {
     name: String,
     spells: HashMap<(MeterMetric, String), RawEntry>,
     targets: HashMap<(MeterMetric, String, u8), RawEntry>,
+    /// `(metric, spell, target, marker)`: the cross tabulation behind the
+    /// per-spell target list.
+    spell_targets: HashMap<SpellTargetKey, RawEntry>,
 }
 
 #[derive(Clone, Default)]
@@ -156,6 +163,9 @@ struct RawValue {
     amount: u64,
     hits: u32,
     overheal: u64,
+    /// Per-hit extremes; `max == 0` while no hit has landed.
+    min: u64,
+    max: u64,
 }
 
 #[derive(Default)]
@@ -173,6 +183,12 @@ impl RawEntry {
             value.amount += amount;
             value.hits += 1;
             value.overheal += overheal;
+            value.min = if value.hits == 1 {
+                amount
+            } else {
+                value.min.min(amount)
+            };
+            value.max = value.max.max(amount);
         }
     }
 
@@ -451,6 +467,9 @@ impl MeterAccumulator {
             if let Some(entry) = source.targets.get_mut(&recent.target_key) {
                 entry.subtract_transfer(transferred, transferred_overheal, bucket_end_ms);
             }
+            if let Some(entry) = source.spell_targets.get_mut(&recent.spell_target_key) {
+                entry.subtract_transfer(transferred, transferred_overheal, bucket_end_ms);
+            }
         }
         let supporter = fight.actor(supporter_guid, "");
         supporter
@@ -461,6 +480,16 @@ impl MeterAccumulator {
         supporter
             .targets
             .entry((metric, dest_name.to_owned(), marker))
+            .or_default()
+            .add_transfer(transferred, transferred_overheal, bucket_end_ms);
+        supporter
+            .spell_targets
+            .entry((
+                metric,
+                support_spell.to_owned(),
+                dest_name.to_owned(),
+                marker,
+            ))
             .or_default()
             .add_transfer(transferred, transferred_overheal, bucket_end_ms);
     }
@@ -721,12 +750,18 @@ impl MeterAccumulator {
             .entry((metric, dest_name.to_owned(), marker))
             .or_default()
             .add(amount, overheal, bucket_end_ms);
+        actor
+            .spell_targets
+            .entry((metric, spell_name.to_owned(), dest_name.to_owned(), marker))
+            .or_default()
+            .add(amount, overheal, bucket_end_ms);
         if matches!(metric, MeterMetric::Damage | MeterMetric::Healing) {
             fight.recent.insert(
                 (source_guid.to_owned(), dest_name.to_owned(), metric),
                 RecentRecord {
                     spell_key: (metric, spell_name.to_owned()),
                     target_key: (metric, dest_name.to_owned(), marker),
+                    spell_target_key: (metric, spell_name.to_owned(), dest_name.to_owned(), marker),
                     at_ms,
                     bucket_end_ms,
                     remaining: amount,
@@ -831,7 +866,7 @@ fn merged_actors(
             actors.push(MeterActor {
                 guid: resolved.to_owned(),
                 name,
-                spells: entries(&raw.spells, started_at_ms),
+                spells: entries(&raw.spells, &raw.spell_targets, started_at_ms),
                 targets: entries_targets(&raw.targets, started_at_ms),
             });
         }
@@ -839,15 +874,34 @@ fn merged_actors(
     for actor in &mut actors {
         actor.spells = bounded(std::mem::take(&mut actor.spells));
         actor.targets = bounded(std::mem::take(&mut actor.targets));
+        for spell in &mut actor.spells {
+            spell.targets = bounded(std::mem::take(&mut spell.targets));
+        }
     }
     actors
 }
 
 /// Collect raw spell entries into `MeterEntry`s; spell rows never carry a
-/// marker.
-fn entries(raw: &HashMap<(MeterMetric, String), RawEntry>, started_at_ms: i64) -> Vec<MeterEntry> {
+/// marker, and each carries its own slice of the target cross tabulation.
+fn entries(
+    raw: &HashMap<(MeterMetric, String), RawEntry>,
+    cross: &HashMap<SpellTargetKey, RawEntry>,
+    started_at_ms: i64,
+) -> Vec<MeterEntry> {
     raw.iter()
-        .map(|((metric, key), entry)| meter_entry(*metric, key.clone(), 0, entry, started_at_ms))
+        .map(|((metric, key), entry)| {
+            let mut spell = meter_entry(*metric, key.clone(), 0, entry, started_at_ms);
+            spell.targets = cross
+                .iter()
+                .filter(|((cross_metric, spell_name, _, _), _)| {
+                    cross_metric == metric && spell_name == key
+                })
+                .map(|((_, _, target, marker), entry)| {
+                    meter_entry(*metric, target.clone(), *marker, entry, started_at_ms)
+                })
+                .collect();
+            spell
+        })
         .collect()
 }
 
@@ -877,6 +931,9 @@ fn meter_entry(
         amount: entry.total.amount,
         hits: entry.total.hits,
         overheal: entry.total.overheal,
+        min: entry.total.min,
+        max: entry.total.max,
+        targets: Vec::new(),
         samples: entry
             .samples
             .iter()
@@ -885,17 +942,16 @@ fn meter_entry(
                 amount: value.amount,
                 hits: value.hits,
                 overheal: value.overheal,
+                min: value.min,
+                max: value.max,
             })
             .collect(),
     }
 }
 
 fn append_entries(actor: &mut MeterActor, raw: &RawActor, started_at_ms: i64) {
-    for ((metric, key), entry) in &raw.spells {
-        append(
-            &mut actor.spells,
-            meter_entry(*metric, key.clone(), 0, entry, started_at_ms),
-        );
+    for spell in entries(&raw.spells, &raw.spell_targets, started_at_ms) {
+        append(&mut actor.spells, spell);
     }
     for ((metric, key, marker), entry) in &raw.targets {
         append(
@@ -914,10 +970,28 @@ fn append(entries: &mut Vec<MeterEntry>, entry: MeterEntry) {
         existing.amount += entry.amount;
         existing.hits += entry.hits;
         existing.overheal += entry.overheal;
+        merge_extremes(existing, entry.min, entry.max);
         merge_samples(&mut existing.samples, &entry.samples);
+        for target in entry.targets {
+            append(&mut existing.targets, target);
+        }
     } else {
         entries.push(entry);
     }
+}
+
+/// Combine per-hit extremes; `max == 0` marks an entry that has none, so a
+/// zero `min` from such an entry must not win.
+fn merge_extremes(into: &mut MeterEntry, min: u64, max: u64) {
+    if max == 0 {
+        return;
+    }
+    into.min = if into.max == 0 {
+        min
+    } else {
+        into.min.min(min)
+    };
+    into.max = into.max.max(max);
 }
 
 fn merge_samples(into: &mut Vec<MeterSample>, from: &[MeterSample]) {
@@ -926,6 +1000,14 @@ fn merge_samples(into: &mut Vec<MeterSample>, from: &[MeterSample]) {
             existing.amount += sample.amount;
             existing.hits += sample.hits;
             existing.overheal += sample.overheal;
+            if sample.max > 0 {
+                existing.min = if existing.max == 0 {
+                    sample.min
+                } else {
+                    existing.min.min(sample.min)
+                };
+                existing.max = existing.max.max(sample.max);
+            }
         } else {
             into.push(sample.clone());
         }
@@ -961,12 +1043,18 @@ fn bounded(entries: Vec<MeterEntry>) -> Vec<MeterEntry> {
                 amount: 0,
                 hits: 0,
                 overheal: 0,
+                min: 0,
+                max: 0,
+                // A fold of many spells has no single target list worth
+                // drilling into.
+                targets: Vec::new(),
                 samples: Vec::new(),
             };
             for entry in rest {
                 other.amount += entry.amount;
                 other.hits += entry.hits;
                 other.overheal += entry.overheal;
+                merge_extremes(&mut other, entry.min, entry.max);
                 merge_samples(&mut other.samples, &entry.samples);
             }
             group.push(other);
@@ -1000,6 +1088,12 @@ pub struct ProjectedEntry {
     pub amount: u64,
     pub hits: u32,
     pub overheal: u64,
+    /// Per-hit extremes up to the playhead; `max == 0` means the entry carries
+    /// none, which is what a sidecar written before spell detail existed does.
+    pub min: u64,
+    pub max: u64,
+    /// This spell's own target split, projected to the same playhead.
+    pub targets: Vec<ProjectedEntry>,
 }
 
 pub fn fight_index_at(fights: &[MeterFight], position_ms: u64) -> Option<usize> {
@@ -1097,6 +1191,9 @@ fn project_entries(entries: &[MeterEntry], position_ms: u64) -> Vec<ProjectedEnt
                 amount: 0,
                 hits: 0,
                 overheal: 0,
+                min: 0,
+                max: 0,
+                targets: project_entries(&entry.targets, position_ms),
             };
             for sample in entry
                 .samples
@@ -1106,6 +1203,14 @@ fn project_entries(entries: &[MeterEntry], position_ms: u64) -> Vec<ProjectedEnt
                 projected.amount += sample.amount;
                 projected.hits += sample.hits;
                 projected.overheal += sample.overheal;
+                if sample.max > 0 {
+                    projected.min = if projected.max == 0 {
+                        sample.min
+                    } else {
+                        projected.min.min(sample.min)
+                    };
+                    projected.max = projected.max.max(sample.max);
+                }
             }
             (projected.hits > 0 || projected.amount > 0 || projected.overheal > 0)
                 .then_some(projected)
@@ -1123,6 +1228,15 @@ fn merge_projected_entries(into: &mut Vec<ProjectedEntry>, from: Vec<ProjectedEn
             existing.amount += entry.amount;
             existing.hits += entry.hits;
             existing.overheal += entry.overheal;
+            if entry.max > 0 {
+                existing.min = if existing.max == 0 {
+                    entry.min
+                } else {
+                    existing.min.min(entry.min)
+                };
+                existing.max = existing.max.max(entry.max);
+            }
+            merge_projected_entries(&mut existing.targets, entry.targets);
         } else {
             into.push(entry);
         }
@@ -1139,6 +1253,80 @@ mod tests {
     const ALLY: u64 = PLAYER | 0x2;
     const MOB: u64 = 0x10a48;
     const FRIENDLY_PLAYER: u64 = PLAYER | 0x400;
+    /// Per-hit extremes and the per-spell target split, both limited to the
+    /// playhead like every other projected figure.
+    #[test]
+    fn spell_detail_carries_extremes_and_targets() {
+        let mut meter = MeterAccumulator::new(0, None);
+        meter.damage(
+            "Player-0-A",
+            "A",
+            PLAYER,
+            "Boss-1",
+            "Boss",
+            0,
+            0,
+            "Bolt",
+            100,
+            1_000,
+        );
+        meter.damage(
+            "Player-0-A",
+            "A",
+            PLAYER,
+            "Add-1",
+            "Add",
+            0,
+            0,
+            "Bolt",
+            40,
+            1_000,
+        );
+        meter.damage(
+            "Player-0-A",
+            "A",
+            PLAYER,
+            "Boss-1",
+            "Boss",
+            0,
+            0,
+            "Bolt",
+            300,
+            4_000,
+        );
+        let data = meter.drain(5_000, 0, "Fight", &HashMap::new());
+        let fight = &data.fights[0];
+
+        let early = project_current(&fight_slice(fight), 2_000).expect("fight at 2s");
+        let bolt = &early.actors[0].spells[0];
+        assert_eq!(
+            (bolt.amount, bolt.hits, bolt.min, bolt.max),
+            (140, 2, 40, 100)
+        );
+        let mut targets: Vec<(&str, u64)> = bolt
+            .targets
+            .iter()
+            .map(|entry| (entry.key.as_str(), entry.amount))
+            .collect();
+        targets.sort();
+        assert_eq!(targets, [("Add", 40), ("Boss", 100)]);
+
+        let late = project_current(&fight_slice(fight), 5_000).expect("fight at 5s");
+        let bolt = &late.actors[0].spells[0];
+        assert_eq!((bolt.amount, bolt.min, bolt.max), (440, 40, 300));
+        assert_eq!(
+            bolt.targets
+                .iter()
+                .find(|entry| entry.key == "Boss")
+                .map(|entry| entry.amount),
+            Some(400)
+        );
+    }
+
+    fn fight_slice(fight: &MeterFight) -> Vec<MeterFight> {
+        vec![fight.clone()]
+    }
+
     #[test]
     fn pet_damage_before_summon_merges_into_owner() {
         let mut meter = MeterAccumulator::new(0, None);
