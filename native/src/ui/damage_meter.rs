@@ -882,7 +882,7 @@ impl Inner {
             }
             return;
         }
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        ranked.sort_by_key(|(_, total)| std::cmp::Reverse(*total));
         self.rebuild_ranking(&fight, &ranked, metric);
     }
 
@@ -955,7 +955,7 @@ impl Inner {
             self.show_empty(&view_empty_message(View::Deaths));
             return;
         }
-        ranked.sort_by(|a, b| b.2.cmp(&a.2));
+        ranked.sort_by_key(|(_, _, count)| std::cmp::Reverse(*count));
         let top = ranked[0].2;
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         for (rank, (guid, name, count)) in ranked.into_iter().enumerate() {

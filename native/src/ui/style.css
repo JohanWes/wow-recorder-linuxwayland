@@ -153,6 +153,15 @@ window.wr-light .wr-class-warrior { color: #7d5f36; }
   border-radius: 4px;
 }
 
+/* Rows are data, not controls to invite: the fill is the whole visual, so the
+   flat-button hover tint is suppressed. That also stops the prelight restyle
+   churn while the cursor rests on rows that playback re-creates every
+   interval. */
+.wr-meter button.wr-meter-row:hover {
+  background-color: transparent;
+  background-image: none;
+}
+
 /* Trough and progress share a height so the fill covers the whole row rather
    than a band floating in it. The gradient is a sheen over the solid class
    color, not the fill itself. */
