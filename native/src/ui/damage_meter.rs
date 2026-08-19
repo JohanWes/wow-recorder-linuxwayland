@@ -51,6 +51,11 @@ type SeekFn = Box<dyn Fn(u64)>;
 /// plays out on screen instead of having already happened.
 const SEEK_LEAD_MS: u64 = 3_000;
 
+/// How long a bar fill eases from its previous on-screen position toward
+/// the new one. Kept under the 500 ms sample cadence so consecutive
+/// updates chain into continuous motion instead of jagged jumps.
+const FILL_ANIMATE_MS: i64 = 400;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum View {
     Metric(MeterMetric),
@@ -292,6 +297,10 @@ struct Inner {
     position_ms: Cell<u64>,
     /// Seek request into the player, installed by it at construction.
     seek: RefCell<Option<SeekFn>>,
+    /// On-screen fill fractions per animated row key, written every
+    /// animation frame so a rebuild mid-transition resumes from the value
+    /// currently visible instead of jumping.
+    bar_fractions: RefCell<HashMap<String, f64>>,
 }
 
 pub struct DamageMeter {
@@ -386,6 +395,7 @@ impl DamageMeter {
             drag_geometry: Cell::new((16, 16, 0, 0)),
             desired_size: Cell::new(None),
             seek: RefCell::new(None),
+            bar_fractions: RefCell::new(HashMap::new()),
         });
 
         inner.connect_actions();
@@ -413,6 +423,7 @@ impl DamageMeter {
         inner.breakdown.replace(None);
         inner.spell.replace(None);
         inner.target.replace(TargetSel::All);
+        inner.bar_fractions.borrow_mut().clear();
         inner.refresh();
     }
     /// The playhead moved. Both segment modes are cumulative through the
@@ -632,6 +643,7 @@ impl Inner {
             self.target.replace(TargetSel::All);
             self.breakdown.replace(None);
             self.spell.replace(None);
+            self.bar_fractions.borrow_mut().clear();
             self.refresh();
         }
     }
@@ -641,6 +653,7 @@ impl Inner {
             // Pick the Current fight from the last known playhead before the
             // re-render; positions arrived while Overall was shown too.
             self.sync_current_fight();
+            self.bar_fractions.borrow_mut().clear();
             self.refresh();
         }
     }
@@ -660,6 +673,7 @@ impl Inner {
     fn set_target(self: &Rc<Self>, target: TargetSel) {
         if *self.target.borrow() != target {
             self.target.replace(target);
+            self.bar_fractions.borrow_mut().clear();
             self.refresh();
         }
     }
@@ -915,7 +929,8 @@ impl Inner {
                     format_compact(rate as u64)
                 )
             };
-            let overlay = fill_line(
+            let overlay = self.fill_line(
+                Some(&format!("r:{}", actor.guid)),
                 self.class_for(&actor.guid),
                 &format!("{}. {}", rank + 1, actor.name),
                 &right,
@@ -959,7 +974,8 @@ impl Inner {
         let top = ranked[0].2;
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         for (rank, (guid, name, count)) in ranked.into_iter().enumerate() {
-            let overlay = fill_line(
+            let overlay = self.fill_line(
+                Some(&format!("r:{guid}")),
                 self.class_for(&guid),
                 &format!("{}. {name}", rank + 1),
                 &count.to_string(),
@@ -995,7 +1011,8 @@ impl Inner {
                 } else {
                     1.0
                 };
-                let row = fill_line(
+                let row = self.fill_line(
+                    None,
                     Some(class),
                     &format!(
                         "-{:.1}s {} ({})",
@@ -1017,7 +1034,7 @@ impl Inner {
                 let at_ms = event.at_ms;
                 content.append(&self.row_button(&row, move |this| this.seek_to(at_ms)));
             }
-            let row = fill_line(Some("wr-death-damage"), "0.0s Death", "", 0.0);
+            let row = self.fill_line(None, Some("wr-death-damage"), "0.0s Death", "", 0.0);
             let at_ms = death.at_ms;
             content.append(&self.row_button(&row, move |this| this.seek_to(at_ms)));
         }
@@ -1053,7 +1070,7 @@ impl Inner {
             .map(|entry| entry.amount)
             .sum();
         for entry in actor.spells.iter().filter(|entry| entry.metric == view) {
-            let row = self.breakdown_row(actor, entry, spell_total);
+            let row = self.breakdown_row(&format!("s:{}", entry.key), actor, entry, spell_total);
             let key = entry.key.clone();
             content.append(&self.row_button(&row, move |this| {
                 this.spell.replace(Some(key.clone()));
@@ -1074,7 +1091,9 @@ impl Inner {
             }));
             let target_total: u64 = targets.iter().map(|entry| entry.amount).sum();
             for entry in targets {
-                content.append(&self.breakdown_row(actor, entry, target_total));
+                let row =
+                    self.breakdown_row(&format!("t:{}", entry.key), actor, entry, target_total);
+                content.append(&row);
             }
         }
         self.set_content(&content);
@@ -1099,7 +1118,7 @@ impl Inner {
                     .iter()
                     .find(|target| target.times.contains(at_ms))
                     .map_or("", |target| target.key.as_str());
-                let row = fill_line(class, &format_mm_ss(*at_ms), target, 1.0);
+                let row = self.fill_line(None, class, &format_mm_ss(*at_ms), target, 1.0);
                 let at_ms = *at_ms;
                 content.append(&self.row_button(&row, move |this| this.seek_to(at_ms)));
             }
@@ -1128,11 +1147,17 @@ impl Inner {
             } else {
                 value as f64 / entry.max as f64
             };
-            let row = fill_line(class, label, &right, fraction);
+            let row = self.fill_line(
+                Some(&format!("stat:{label}")),
+                class,
+                label,
+                &right,
+                fraction,
+            );
             row.add_css_class("wr-meter-row");
             content.append(&row);
         }
-        let hits = fill_line(class, "Hits", &entry.hits.to_string(), 1.0);
+        let hits = self.fill_line(None, class, "Hits", &entry.hits.to_string(), 1.0);
         hits.add_css_class("wr-meter-row");
         content.append(&hits);
         if view == MeterMetric::Healing {
@@ -1142,7 +1167,8 @@ impl Inner {
             } else {
                 entry.overheal as f64 / raw as f64
             };
-            let row = fill_line(
+            let row = self.fill_line(
+                Some("stat:Overheal"),
                 class,
                 "Overheal",
                 &format!("{} {:.1}%", format_compact(entry.overheal), share * 100.0),
@@ -1161,7 +1187,9 @@ impl Inner {
                 "Targets"
             }));
             for target in &entry.targets {
-                content.append(&self.breakdown_row(actor, target, entry.amount));
+                let row =
+                    self.breakdown_row(&format!("st:{}", target.key), actor, target, entry.amount);
+                content.append(&row);
             }
         }
         self.set_content(&content);
@@ -1170,7 +1198,8 @@ impl Inner {
     /// One breakdown line: `name … amount share% hits`, sharing the ranking
     /// row visual with the fill proportional to the share.
     fn breakdown_row(
-        &self,
+        self: &Rc<Self>,
+        key: &str,
         actor: &ProjectedActor,
         entry: &ProjectedEntry,
         total: u64,
@@ -1186,7 +1215,8 @@ impl Inner {
             share,
             entry.hits
         );
-        let row = fill_line(
+        let row = self.fill_line(
+            Some(key),
             self.class_for(&actor.guid),
             &entry.key,
             &right,
@@ -1320,36 +1350,93 @@ impl Inner {
         let overlay = self.root.parent().and_downcast::<gtk4::Overlay>()?;
         Some((overlay.width(), overlay.height()))
     }
-}
 
-/// One dense meter row visual: class-colored fill behind always-white labels,
-/// left label expanding, right label aligned end.
-fn fill_line(class: Option<&str>, left: &str, right: &str, fraction: f64) -> gtk4::Overlay {
-    let fill = gtk4::ProgressBar::new();
-    fill.set_show_text(false);
-    fill.set_fraction(fraction.clamp(0.0, 1.0));
-    fill.add_css_class("wr-meter-fill");
-    if let Some(class) = class {
-        fill.add_css_class(class);
+    /// One dense meter row visual: class-colored fill behind always-white
+    /// labels, left label expanding, right label aligned end. A keyed row
+    /// eases from the fraction last on screen toward `fraction`; a `None`
+    /// key is a static bar that simply jumps.
+    fn fill_line(
+        self: &Rc<Self>,
+        key: Option<&str>,
+        class: Option<&str>,
+        left: &str,
+        right: &str,
+        fraction: f64,
+    ) -> gtk4::Overlay {
+        let fill = gtk4::ProgressBar::new();
+        fill.set_show_text(false);
+        fill.add_css_class("wr-meter-fill");
+        if let Some(class) = class {
+            fill.add_css_class(class);
+        }
+        let target = fraction.clamp(0.0, 1.0);
+        match key {
+            Some(key) => {
+                let start = self.bar_fractions.borrow().get(key).copied().unwrap_or(0.0);
+                fill.set_fraction(start);
+                if (start - target).abs() > f64::EPSILON {
+                    self.animate_fill(&fill, key, start, target);
+                } else {
+                    self.bar_fractions
+                        .borrow_mut()
+                        .insert(key.to_owned(), target);
+                }
+            }
+            None => fill.set_fraction(target),
+        }
+        let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+        line.set_margin_start(6);
+        line.set_margin_end(6);
+        let left_label = gtk4::Label::new(Some(left));
+        left_label.set_xalign(0.0);
+        left_label.set_hexpand(true);
+        left_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        let right_label = gtk4::Label::new(Some(right));
+        right_label.set_xalign(1.0);
+        right_label.add_css_class("numeric");
+        line.append(&left_label);
+        line.append(&right_label);
+        let overlay = gtk4::Overlay::new();
+        overlay.set_child(Some(&fill));
+        overlay.add_overlay(&line);
+        overlay
     }
-    let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
-    line.set_margin_start(6);
-    line.set_margin_end(6);
-    let left_label = gtk4::Label::new(Some(left));
-    left_label.set_xalign(0.0);
-    left_label.set_hexpand(true);
-    left_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    let right_label = gtk4::Label::new(Some(right));
-    right_label.set_xalign(1.0);
-    right_label.add_css_class("numeric");
-    line.append(&left_label);
-    line.append(&right_label);
-    let overlay = gtk4::Overlay::new();
-    overlay.set_child(Some(&fill));
-    overlay.add_overlay(&line);
-    overlay
-}
 
+    /// Ease one fill bar from `start` to `target` over [`FILL_ANIMATE_MS`]
+    /// on the frame clock, writing every eased frame back into
+    /// `bar_fractions` so the half-second re-render mid-transition picks up
+    /// the value currently visible and the motion stays continuous.
+    fn animate_fill(self: &Rc<Self>, fill: &gtk4::ProgressBar, key: &str, start: f64, target: f64) {
+        let this = Rc::clone(self);
+        let key = key.to_owned();
+        let begin = Cell::new(None);
+        fill.add_tick_callback(move |fill, clock| {
+            let now = clock.frame_time();
+            let begin = match begin.get() {
+                Some(begin) => begin,
+                None => {
+                    begin.set(Some(now));
+                    now
+                }
+            };
+            let progress = (now - begin) as f64 / (FILL_ANIMATE_MS as f64 * 1_000.0);
+            let eased = if progress >= 1.0 {
+                target
+            } else {
+                // Ease-out cubic: quick off the old position, settling on
+                // the new one.
+                start + (target - start) * (1.0 - (1.0 - progress).powi(3))
+            };
+            fill.set_fraction(eased);
+            this.bar_fractions.borrow_mut().insert(key.clone(), eased);
+            if progress >= 1.0 {
+                gtk4::glib::ControlFlow::Break
+            } else {
+                gtk4::glib::ControlFlow::Continue
+            }
+        });
+    }
+}
 fn heading(text: &str) -> gtk4::Label {
     let label = gtk4::Label::new(Some(text));
     label.add_css_class("caption-heading");
