@@ -797,9 +797,19 @@ pub(crate) fn parse_timestamp(value: &str, context: ParseTimeContext) -> Result<
     if !(1..=9999).contains(&year) {
         return Err(ParseFailure::MalformedTimestamp);
     }
-    let (whole_time, fraction) = time
+    let (whole_time, raw_fraction) = time
         .split_once('.')
         .ok_or(ParseFailure::MalformedTimestamp)?;
+    // Newer combat logs append a UTC-offset suffix directly onto the
+    // milliseconds field with no separating character (e.g. "038-4" for
+    // milliseconds=038, offset=-4). Strip it before validating/parsing the
+    // fractional-second digits. The offset itself is intentionally ignored
+    // here; timestamps continue to be interpreted using the caller-supplied
+    // `context.utc_offset_minutes`, matching prior (no-offset-suffix) logs.
+    let fraction = match raw_fraction.find(['+', '-']) {
+        Some(index) => &raw_fraction[..index],
+        None => raw_fraction,
+    };
     if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(ParseFailure::MalformedTimestamp);
     }
@@ -1217,6 +1227,32 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(event.occurred_at_ms, 1_753_918_505_586);
+    }
+
+    #[test]
+    fn timestamp_with_utc_offset_suffix_is_accepted() {
+        // Newer combat logs append a UTC-offset suffix directly onto the
+        // milliseconds field with no separating character, e.g. "038-4" for
+        // milliseconds=038, offset=-4. Confirms the offset suffix is
+        // stripped rather than causing the whole line to be rejected as a
+        // malformed timestamp, and that both "-" and "+" offsets parse.
+        let minus_offset = parse_line(
+            GameFlavor::Retail,
+            CONTEXT,
+            "8/19/2026 21:00:24.038-4  CHALLENGE_MODE_START,\"Den of Nalorakk\",2825,586,10,[162,10,9]",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(minus_offset.occurred_at_ms, 1_787_166_024_038);
+
+        let plus_offset = parse_line(
+            GameFlavor::Retail,
+            CONTEXT,
+            "8/19/2026 21:00:24.038+4  ZONE_CHANGE,1,Zone,0",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(plus_offset.occurred_at_ms, 1_787_166_024_038);
     }
 
     #[test]
