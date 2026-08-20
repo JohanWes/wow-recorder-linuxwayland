@@ -263,6 +263,19 @@ fn actor_total(actor: &ProjectedActor, view: MeterMetric, target: &TargetSel) ->
     }
 }
 
+/// Spell rows for one metric, ranked by their share of the actor's total.
+/// Since every row uses the same total as its denominator, descending amount
+/// is exactly descending percentage; the name makes equal shares stable.
+fn ranked_spells(actor: &ProjectedActor, view: MeterMetric) -> Vec<&ProjectedEntry> {
+    let mut spells: Vec<_> = actor
+        .spells
+        .iter()
+        .filter(|entry| entry.metric == view)
+        .collect();
+    spells.sort_by(|a, b| b.amount.cmp(&a.amount).then_with(|| a.key.cmp(&b.key)));
+    spells
+}
+
 /// The active target filter, applied to target rows only: by name across all
 /// markers, or by marker across all names.
 fn matches_target(entry: &ProjectedEntry, target: &TargetSel) -> bool {
@@ -1182,7 +1195,7 @@ impl Inner {
             .filter(|entry| entry.metric == view)
             .map(|entry| entry.amount)
             .sum();
-        for entry in actor.spells.iter().filter(|entry| entry.metric == view) {
+        for entry in ranked_spells(actor, view) {
             let row =
                 self.breakdown_row(&format!("s:{}", entry.key), actor, entry, spell_total, true);
             let key = entry.key.clone();
@@ -1736,4 +1749,46 @@ fn stateful_action(name: &str, state: &str) -> gtk4::gio::SimpleAction {
         Some(gtk4::glib::VariantTy::STRING),
         &state.to_variant(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spell(key: &str, metric: MeterMetric, amount: u64) -> ProjectedEntry {
+        ProjectedEntry {
+            metric,
+            key: key.to_owned(),
+            marker: 0,
+            amount,
+            hits: 1,
+            overheal: 0,
+            min: amount,
+            max: amount,
+            targets: Vec::new(),
+            times: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn spell_breakdown_is_ranked_by_percentage() {
+        let actor = ProjectedActor {
+            guid: "Player-1".to_owned(),
+            name: "Shaman".to_owned(),
+            spells: vec![
+                spell("First Seen", MeterMetric::Damage, 20),
+                spell("Chain Lightning", MeterMetric::Damage, 50),
+                spell("Healing Surge", MeterMetric::Healing, 100),
+                spell("Lightning Bolt", MeterMetric::Damage, 30),
+            ],
+            targets: Vec::new(),
+        };
+
+        let keys: Vec<_> = ranked_spells(&actor, MeterMetric::Damage)
+            .into_iter()
+            .map(|entry| entry.key.as_str())
+            .collect();
+
+        assert_eq!(keys, ["Chain Lightning", "Lightning Bolt", "First Seen"]);
+    }
 }
