@@ -22,3 +22,6 @@
 *.flatpak.sha256
 
 __pycache__/
+
+# Spell database fetch cache (scripts/fetch-spell-data.py)
+/scripts/.cache-spelldb/

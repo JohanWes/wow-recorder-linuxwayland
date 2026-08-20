@@ -10,6 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
+use gtk4::gdk::Texture;
 use gtk4::prelude::*;
 
 use warcraft_recorder::domain::{
@@ -19,6 +20,7 @@ use warcraft_recorder::meter::{
     MeterProjection, ProjectedActor, ProjectedEntry, SAMPLE_INTERVAL_MS, fight_index_at,
     has_untimed_totals, is_count_metric, project_current, project_overall,
 };
+use warcraft_recorder::spelldb::SpellDb;
 
 use super::filters::class_css_class;
 use super::timeline::format_mm_ss;
@@ -55,6 +57,15 @@ const SEEK_LEAD_MS: u64 = 3_000;
 /// the new one. Kept under the 500 ms sample cadence so consecutive
 /// updates chain into continuous motion instead of jagged jumps.
 const FILL_ANIMATE_MS: i64 = 400;
+
+/// Pixels between the meter's left edge and the tooltip that opens to its
+/// left.
+const TOOLTIP_GAP: i32 = 8;
+/// The small spell icon shown on each spell row, in pixels.
+const SPELL_ICON_SIZE: i32 = 20;
+/// Resource paths for the bundled spell database and its icons.
+const SPELLS_JSON_RESOURCE: &str = "/io/github/JohanWes/WarcraftRecorder/spells/spells.json";
+const SPELL_ICON_RESOURCE: &str = "/io/github/JohanWes/WarcraftRecorder/spells/";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum View {
@@ -301,6 +312,28 @@ struct Inner {
     /// animation frame so a rebuild mid-transition resumes from the value
     /// currently visible instead of jumping.
     bar_fractions: RefCell<HashMap<String, f64>>,
+    /// The bundled spell database, loaded lazily on first icon/tooltip use.
+    spell_db: RefCell<Option<Rc<SpellDb>>>,
+    /// Decoded spell-icon textures keyed by basename, so the 500 ms row
+    /// rebuilds reuse them instead of re-decoding.
+    icons: RefCell<HashMap<String, Texture>>,
+    /// The video overlay the meter sits on; the tooltip lives here, outside
+    /// the meter, so it survives rebuilds and is never clipped by the
+    /// scroller.
+    overlay: RefCell<Option<gtk4::Overlay>>,
+    /// The spell whose tooltip is showing. Rows are rebuilt every 500 ms,
+    /// destroying the icon the pointer entered without a leave event, so the
+    /// hover state is remembered and re-armed by the rebuilt row.
+    hovered_spell: RefCell<Option<String>>,
+    /// Whether the content currently being built contains the hovered
+    /// spell's icon; `clear_content` drops a tooltip whose spell left the
+    /// list.
+    tooltip_rearmed: Cell<bool>,
+    /// The shared spell tooltip, shown directly left of the meter.
+    tooltip: gtk4::Box,
+    tooltip_icon: gtk4::Picture,
+    tooltip_name: gtk4::Label,
+    tooltip_desc: gtk4::Label,
 }
 
 pub struct DamageMeter {
@@ -369,6 +402,32 @@ impl DamageMeter {
         let actions = gtk4::gio::SimpleActionGroup::new();
         root.insert_action_group("meter", Some(&actions));
 
+        // The spell tooltip: a compact panel shown directly left of the
+        // meter, parented to the video overlay in `attach_drag` so it is
+        // never clipped by the meter scroller. Its position is anchored to
+        // the meter, not the hovered row, so it stays still while rows
+        // rebuild every half second.
+        let tooltip = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+        tooltip.add_css_class("wr-tooltip");
+        tooltip.set_visible(false);
+        let tooltip_head = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let tooltip_icon = gtk4::Picture::new();
+        tooltip_icon.add_css_class("wr-tooltip-icon");
+        let tooltip_name = gtk4::Label::new(None);
+        tooltip_name.add_css_class("wr-tooltip-name");
+        tooltip_name.set_xalign(0.0);
+        tooltip_name.set_halign(gtk4::Align::Start);
+        let tooltip_desc = gtk4::Label::new(None);
+        tooltip_desc.add_css_class("wr-tooltip-desc");
+        tooltip_desc.set_xalign(0.0);
+        tooltip_desc.set_halign(gtk4::Align::Start);
+        tooltip_desc.set_wrap(true);
+        tooltip_desc.set_max_width_chars(48);
+        tooltip_head.append(&tooltip_icon);
+        tooltip_head.append(&tooltip_name);
+        tooltip.append(&tooltip_head);
+        tooltip.append(&tooltip_desc);
+
         root.append(&header);
         root.append(&scroller);
         root.append(&grip);
@@ -396,6 +455,15 @@ impl DamageMeter {
             desired_size: Cell::new(None),
             seek: RefCell::new(None),
             bar_fractions: RefCell::new(HashMap::new()),
+            spell_db: RefCell::new(None),
+            icons: RefCell::new(HashMap::new()),
+            overlay: RefCell::new(None),
+            hovered_spell: RefCell::new(None),
+            tooltip_rearmed: Cell::new(false),
+            tooltip,
+            tooltip_icon,
+            tooltip_name,
+            tooltip_desc,
         });
 
         inner.connect_actions();
@@ -403,6 +471,36 @@ impl DamageMeter {
         {
             let inner = Rc::clone(&inner);
             close.connect_clicked(move |_| inner.set_visible(false));
+        }
+        // Tooltip drop conditions beyond the icon enter handlers. The
+        // meter-level controller outlives every row: a rebuild destroys the
+        // entered icon without any leave event, so the tooltip is dropped
+        // when the pointer next moves somewhere other than a spell icon, and
+        // when it leaves the meter entirely.
+        {
+            let this = Rc::clone(&inner);
+            let motion = gtk4::EventControllerMotion::new();
+            {
+                let this = Rc::clone(&this);
+                motion.connect_motion(move |_, x, y| {
+                    let over_icon = this
+                        .root
+                        .pick(x, y, gtk4::PickFlags::DEFAULT)
+                        .is_some_and(|picked| is_within_spell_icon(&picked));
+                    if !over_icon {
+                        this.hovered_spell.borrow_mut().take();
+                        this.hide_tooltip();
+                    }
+                });
+            }
+            {
+                let this = Rc::clone(&this);
+                motion.connect_leave(move |_| {
+                    this.hovered_spell.borrow_mut().take();
+                    this.hide_tooltip();
+                });
+            }
+            inner.root.add_controller(motion);
         }
         inner.refresh();
 
@@ -441,11 +539,11 @@ impl DamageMeter {
     }
 
     pub fn set_visible(&self, visible: bool) {
-        self.widget.set_visible(visible);
+        self.inner.set_visible(visible);
     }
 
     pub fn toggle(&self) {
-        self.widget.set_visible(!self.widget.is_visible());
+        self.inner.set_visible(!self.widget.is_visible());
     }
 
     /// Re-clamp the drag margins to the current overlay allocation; once
@@ -482,6 +580,12 @@ impl DamageMeter {
 
 impl Inner {
     fn set_visible(&self, visible: bool) {
+        // The tooltip lives on the video overlay, outside the meter: hiding
+        // the meter must hide it too or it would float over the video alone.
+        if !visible {
+            self.hovered_spell.borrow_mut().take();
+            self.hide_tooltip();
+        }
         self.root.set_visible(visible);
     }
 
@@ -543,6 +647,14 @@ impl Inner {
     /// clicks survive. The controller lives on the stationary overlay because
     /// overlay-relative drag coordinates stay valid while the meter moves.
     fn connect_drag(self: &Rc<Self>, overlay: &gtk4::Overlay) {
+        // Keep the overlay for tooltip positioning, and park the tooltip on
+        // it so it floats over the video, left of the meter, instead of
+        // being clipped by the meter scroller. It must not take pointer
+        // events, or it would eat row clicks and break the drag pick below.
+        self.overlay.replace(Some(overlay.clone()));
+        overlay.add_overlay(&self.tooltip);
+        self.tooltip.set_can_target(false);
+
         let drag = gtk4::GestureDrag::new();
         {
             let overlay = (*overlay).clone();
@@ -1032,6 +1144,7 @@ impl Inner {
                     remaining,
                 );
                 let at_ms = event.at_ms;
+                self.attach_spell_icon(&row, &event.spell_name);
                 content.append(&self.row_button(&row, move |this| this.seek_to(at_ms)));
             }
             let row = self.fill_line(None, Some("wr-death-damage"), "0.0s Death", "", 0.0);
@@ -1070,7 +1183,8 @@ impl Inner {
             .map(|entry| entry.amount)
             .sum();
         for entry in actor.spells.iter().filter(|entry| entry.metric == view) {
-            let row = self.breakdown_row(&format!("s:{}", entry.key), actor, entry, spell_total);
+            let row =
+                self.breakdown_row(&format!("s:{}", entry.key), actor, entry, spell_total, true);
             let key = entry.key.clone();
             content.append(&self.row_button(&row, move |this| {
                 this.spell.replace(Some(key.clone()));
@@ -1091,8 +1205,13 @@ impl Inner {
             }));
             let target_total: u64 = targets.iter().map(|entry| entry.amount).sum();
             for entry in targets {
-                let row =
-                    self.breakdown_row(&format!("t:{}", entry.key), actor, entry, target_total);
+                let row = self.breakdown_row(
+                    &format!("t:{}", entry.key),
+                    actor,
+                    entry,
+                    target_total,
+                    false,
+                );
                 content.append(&row);
             }
         }
@@ -1187,8 +1306,13 @@ impl Inner {
                 "Targets"
             }));
             for target in &entry.targets {
-                let row =
-                    self.breakdown_row(&format!("st:{}", target.key), actor, target, entry.amount);
+                let row = self.breakdown_row(
+                    &format!("st:{}", target.key),
+                    actor,
+                    target,
+                    entry.amount,
+                    false,
+                );
                 content.append(&row);
             }
         }
@@ -1203,6 +1327,7 @@ impl Inner {
         actor: &ProjectedActor,
         entry: &ProjectedEntry,
         total: u64,
+        spell: bool,
     ) -> gtk4::Overlay {
         let share = if total == 0 {
             0.0
@@ -1223,6 +1348,9 @@ impl Inner {
             share / 100.0,
         );
         row.add_css_class("wr-meter-row");
+        if spell {
+            self.attach_spell_icon(&row, &entry.key);
+        }
         row
     }
 
@@ -1268,6 +1396,141 @@ impl Inner {
             .and_then(|spec| class_css_class(*spec))
     }
 
+    /// Load the bundled spell database once, from its gresource JSON.
+    fn load_db(&self) -> Option<Rc<SpellDb>> {
+        if let Some(db) = self.spell_db.borrow().as_ref() {
+            return Some(Rc::clone(db));
+        }
+        let db = gtk4::gio::resources_lookup_data(
+            SPELLS_JSON_RESOURCE,
+            gtk4::gio::ResourceLookupFlags::NONE,
+        )
+        .ok()
+        .and_then(|bytes| {
+            let text = std::str::from_utf8(bytes.as_ref()).ok()?;
+            SpellDb::parse(text).ok()
+        })
+        .map(Rc::new)?;
+        *self.spell_db.borrow_mut() = Some(Rc::clone(&db));
+        Some(db)
+    }
+
+    /// The row's icon basename if the database knows this spell.
+    fn spell_icon_basename(&self, name: &str) -> Option<String> {
+        self.load_db()?.lookup(name).map(|info| info.icon.clone())
+    }
+
+    /// A cached icon texture for `basename`, decoded once from the resource.
+    fn icon_texture(&self, basename: &str) -> Option<Texture> {
+        if let Some(texture) = self.icons.borrow().get(basename) {
+            return Some(texture.clone());
+        }
+        let resource = format!("{SPELL_ICON_RESOURCE}{basename}.png");
+        if gtk4::gio::resources_lookup_data(&resource, gtk4::gio::ResourceLookupFlags::NONE)
+            .is_err()
+        {
+            return None;
+        }
+        let texture = Texture::from_resource(&resource);
+        self.icons
+            .borrow_mut()
+            .insert(basename.to_owned(), texture.clone());
+        Some(texture)
+    }
+
+    /// Prepend a small spell icon to a row and arm its hover tooltip.
+    fn attach_spell_icon(self: &Rc<Self>, row: &gtk4::Overlay, spell: &str) {
+        let Some(basename) = self.spell_icon_basename(spell) else {
+            return;
+        };
+        let Some(texture) = self.icon_texture(&basename) else {
+            return;
+        };
+        // `fill_line`'s row is an overlay whose main child is the fill bar and
+        // whose overlay child is the label line; find that line Box.
+        let mut next = row.first_child();
+        let line = loop {
+            let Some(child) = next else {
+                return;
+            };
+            next = child.next_sibling();
+            if let Ok(line) = child.downcast::<gtk4::Box>() {
+                break line;
+            }
+        };
+        let icon = gtk4::Picture::for_paintable(&texture);
+        icon.add_css_class("wr-spell-icon");
+        icon.set_size_request(SPELL_ICON_SIZE, SPELL_ICON_SIZE);
+        line.prepend(&icon);
+        // A rebuild under a stationary pointer replaces the entered icon
+        // without any leave event; mark the spell as re-armed so the tooltip
+        // survives, and let the meter-level motion controller drop it once
+        // the pointer moves off an icon again.
+        if self.hovered_spell.borrow().as_deref() == Some(spell) {
+            self.tooltip_rearmed.set(true);
+        }
+        let this = Rc::clone(self);
+        let spell = spell.to_owned();
+        let motion = gtk4::EventControllerMotion::new();
+        motion.connect_enter(move |_, _, _| {
+            // Playback replaces this icon every 500 ms. GTK emits `enter`
+            // for the replacement under a stationary pointer; the tooltip
+            // is already populated and positioned, so touching it again can
+            // only make it jump during the transient row allocation.
+            if this.hovered_spell.borrow().as_deref() == Some(spell.as_str())
+                && this.tooltip.is_visible()
+            {
+                return;
+            }
+            this.hovered_spell.borrow_mut().replace(spell.clone());
+            this.show_tooltip(&spell);
+        });
+        icon.add_controller(motion);
+    }
+
+    /// Populate the shared tooltip and place it directly left of the meter,
+    /// bottom-aligned with it inside the video overlay.
+    /// Anchoring to the meter rather than the hovered row keeps the panel
+    /// still while rows rebuild around it.
+    fn show_tooltip(&self, spell: &str) {
+        let Some(info) = self.load_db().and_then(|db| db.lookup(spell).cloned()) else {
+            return;
+        };
+        if let Some(texture) = self.icon_texture(&info.icon) {
+            self.tooltip_icon.set_paintable(Some(&texture));
+            self.tooltip_icon.set_visible(true);
+        } else {
+            self.tooltip_icon.set_visible(false);
+        }
+        self.tooltip_name.set_text(spell);
+        self.tooltip_desc.set_text(&info.description);
+        self.tooltip_desc.set_visible(!info.description.is_empty());
+        let overlay_borrow = self.overlay.borrow();
+        let Some(overlay) = overlay_borrow.as_ref() else {
+            return;
+        };
+        let overlay_width = overlay.width();
+        if overlay_width <= 0 {
+            return;
+        }
+        // Both widgets are end/bottom aligned overlay children. Reuse the
+        // meter's stable margins and allocated width instead of measuring its
+        // transient height during a playback rebuild. Their lower edges then
+        // remain level and the tooltip cannot fall into the playback bar.
+        let margin_end =
+            (self.root.margin_end() + self.root.width() + TOOLTIP_GAP).clamp(0, overlay_width);
+        self.tooltip.set_halign(gtk4::Align::End);
+        self.tooltip.set_valign(gtk4::Align::End);
+        self.tooltip.set_margin_top(0);
+        self.tooltip.set_margin_end(margin_end);
+        self.tooltip.set_margin_bottom(self.root.margin_bottom());
+        self.tooltip.set_visible(true);
+    }
+
+    fn hide_tooltip(&self) {
+        self.tooltip.set_visible(false);
+    }
+
     /// Replace the scroller content; the empty state label is shown only by
     /// `show_empty`.
     fn set_content(&self, content: &impl IsA<gtk4::Widget>) {
@@ -1282,6 +1545,14 @@ impl Inner {
     }
 
     fn clear_content(&self) {
+        // A rebuild replaces every row while the new rows were already
+        // built. If the hovered spell's icon did not come back (the re-arm
+        // flag), the tooltip would describe a row that no longer exists.
+        if self.hovered_spell.borrow().is_some() && !self.tooltip_rearmed.get() {
+            self.hovered_spell.borrow_mut().take();
+            self.hide_tooltip();
+        }
+        self.tooltip_rearmed.set(false);
         while let Some(child) = self.content.first_child() {
             self.content.remove(&child);
         }
@@ -1442,6 +1713,20 @@ fn heading(text: &str) -> gtk4::Label {
     label.add_css_class("caption-heading");
     label.set_xalign(0.0);
     label
+}
+
+/// Whether a picked widget is a spell icon, or sits inside one; the
+/// meter-level motion controller uses this to tell a hover that is still
+/// live from a pointer that has moved on to a non-icon part of a row.
+fn is_within_spell_icon(widget: &gtk4::Widget) -> bool {
+    let mut current = Some(widget.clone());
+    while let Some(widget) = current {
+        if widget.has_css_class("wr-spell-icon") {
+            return true;
+        }
+        current = widget.parent();
+    }
+    false
 }
 
 /// A stateful string action for the meter action group.

@@ -14,4 +14,5 @@ pub mod meter;
 pub mod parser;
 pub mod process;
 pub mod recorder;
+pub mod spelldb;
 pub mod storage;

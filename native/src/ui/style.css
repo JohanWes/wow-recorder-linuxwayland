@@ -204,6 +204,38 @@ window.wr-light .wr-class-warrior { color: #7d5f36; }
   min-height: 26px;
 }
 
+/* Spell icons sit at the left of a row, before the spell name. */
+.wr-spell-icon {
+  margin-right: 4px;
+  border-radius: 3px;
+}
+
+/* The shared spell tooltip: a compact panel parked on the video overlay to
+   the left of the hovered icon. It must not inherit widget text colour; the
+   labels carry their own rules below. */
+.wr-tooltip {
+  background-color: #141414;
+  border: 1px solid alpha(#ffffff, 0.12);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.wr-tooltip-icon {
+  border-radius: 4px;
+}
+
+.wr-tooltip-name {
+  color: #ffffff;
+  font-weight: 600;
+  font-size: 1em;
+}
+
+.wr-tooltip-desc {
+  color: alpha(#ffffff, 0.85);
+  font-size: 0.85em;
+  line-height: 1.25;
+}
+
 /* Combat seek track: fixed dark geometry inside the black player area. */
 .wr-timeline {
   min-height: 26px;

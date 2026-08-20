@@ -21,6 +21,13 @@ fn main() {
         let entry = entry.expect("icon asset entry");
         println!("cargo:rerun-if-changed={}", entry.path().display());
     }
+    // The spell database: the JSON plus every bundled spell icon.
+    let spells = xml.with_file_name("spells");
+    if let Ok(entries) = std::fs::read_dir(&spells) {
+        for entry in entries.flatten() {
+            println!("cargo:rerun-if-changed={}", entry.path().display());
+        }
+    }
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join("src/ui/style.css").display()
