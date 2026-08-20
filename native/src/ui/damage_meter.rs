@@ -1332,8 +1332,9 @@ impl Inner {
         self.set_content(&content);
     }
 
-    /// One breakdown line: `name … amount share% hits`, sharing the ranking
-    /// row visual with the fill proportional to the share.
+    /// One breakdown line, sharing the ranking row visual with the fill
+    /// proportional to the share. Spell rows keep hit counts in their detail
+    /// view; target/source rows show them inline.
     fn breakdown_row(
         self: &Rc<Self>,
         key: &str,
@@ -1347,12 +1348,16 @@ impl Inner {
         } else {
             entry.amount as f64 / total as f64 * 100.0
         };
-        let right = format!(
-            "{} {:.1}% {}",
-            format_compact(entry.amount),
-            share,
-            entry.hits
-        );
+        let right = if spell {
+            format!("{} {:.1}%", format_compact(entry.amount), share)
+        } else {
+            format!(
+                "{} {:.1}% {}",
+                format_compact(entry.amount),
+                share,
+                entry.hits
+            )
+        };
         let row = self.fill_line(
             Some(key),
             self.class_for(&actor.guid),
