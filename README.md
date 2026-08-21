@@ -106,12 +106,12 @@ same machine, with the app open and idle on an empty library:
 
 | | This version | Old Electron version |
 |---|---|---|
-| Install | 20 MB | 187 MB |
+| Install | ~43 MB | 187 MB |
 | Memory (idle) | ~150 MB | ~650 MB |
 | Application processes | 1 | 7 |
 | CPU (idle) | ~0% | ~0% |
 
-The whole application is a single 7.8 MB binary built on eleven direct
+The whole application is a single 29 MB binary built on eleven direct
 dependencies, with no browser engine, no database and no background services.
 Recording itself costs almost nothing either way: `gpu-screen-recorder` encodes
 on the GPU, exactly as it did before.
