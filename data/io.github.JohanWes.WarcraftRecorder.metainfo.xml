@@ -21,8 +21,8 @@
   <url type="bugtracker">https://github.com/JohanWes/wow-recorder-linuxwayland/issues</url>
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/data/screenshots/warcraft-recorder.png</image>
-      <caption>Native library and player view with combat recording status.</caption>
+      <image>https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/data/screenshots/warcraft-recorder-library.png</image>
+      <caption>Recording library and player with a combat timeline.</caption>
     </screenshot>
   </screenshots>
   <developer id="io.github.johanwes">

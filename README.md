@@ -3,9 +3,24 @@
 Warcraft Recorder records your World of Warcraft gameplay by itself. It watches
 the combat log and saves a video for every raid pull, Mythic+ dungeon, arena,
 solo shuffle and battleground, with a death timeline you can jump through,
-clipping, slow motion and a local-POV switch.
+clipping, slow motion, a local-POV switch and a detailed local combat meter.
 
 Linux and Wayland only. Everything stays on your machine.
+
+![Warcraft Recorder library with a selected Mythic+ recording](data/screenshots/warcraft-recorder-library.png)
+
+## Combat review without leaving the recorder
+
+The built-in meter shows damage done and taken, healing, interrupts, dispels,
+casts and deaths alongside the video. Switch between the current fight and
+overall data, filter by target, drill into each player's spells and jump to
+the relevant moment in the recording.
+
+For many reviews this can replace finding or uploading a report on Warcraft
+Logs: the detailed combat data is already available inside the recorder and
+stays on your machine.
+
+![Damage meter drill-down, options, target filter and spell tooltip](data/screenshots/damage-meter-demo.gif)
 
 ## Install
 
