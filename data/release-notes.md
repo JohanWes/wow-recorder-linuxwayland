@@ -4,6 +4,28 @@ Commit subjects per release, written by `scripts/generate-release-notes.sh` and
 compiled into the binary: the "What's new" dialog reads the section matching the
 running version. Only `## <version>` headings and `- ` lines are parsed.
 
+## 1.0.7
+- Add focused combat review tools
+- Add resizable combat damage meter
+- local dmg meter improvements
+- Improve local damage meter accuracy and menus
+- Sync local meter fights to capturing player combat
+- Keep group meter fight active after host death
+- Simplify combat meter navigation controls
+- Add damage taken and death meter views
+- Scope death logs to their fight
+- Draw death log rows as draining health bars
+- Fix meter row clicks and solidify bar fills
+- Add per-spell statistics and target split to meter
+- Add casts meter view, overheal detail, and seekable meter rows
+- Remove meter row hover highlight and stray images
+- Animate meter bar fills between samples
+- Strip UTC-offset suffix from combat log timestamps before parsing
+- Add spell icons and stable tooltips
+- order by spell %
+- remove casts in non detailed view
+- Document the local combat meter
+
 ## 1.0.6
 - Add Midnight patch 12.1 content IDs
 

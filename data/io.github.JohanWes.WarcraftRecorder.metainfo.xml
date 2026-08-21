@@ -34,6 +34,17 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.7" date="2026-08-21">
+      <description>
+        <p>
+          Added a detailed local combat meter alongside each recording, with
+          current-fight and overall views for damage, healing, utility, casts,
+          and deaths; player spell and target breakdowns; and direct seeking
+          into the video. Combat logs carrying the newer UTC-offset timestamp
+          suffix are now parsed correctly.
+        </p>
+      </description>
+    </release>
     <release version="1.0.6" date="2026-08-13">
       <description>
         <p>

@@ -7,6 +7,23 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## 1.0.7 - 2026-08-21
+
+### Added
+- A local combat meter is available alongside each recording, with damage
+  done, damage taken, healing, interrupts, dispels, casts and deaths. It
+  supports current-fight and overall views, player spell and target
+  breakdowns, and seeking from meter rows into the video.
+- Previous and next controls jump between the visible combat-timeline markers.
+
+### Changed
+- Player controls now focus on video and combat review; the drawing overlay
+  has been removed.
+
+### Fixed
+- Combat logs with the newer UTC-offset timestamp suffix are parsed instead of
+  silently rejecting every event.
+
 ## 1.0.6 - 2026-08-13
 
 ### Added
