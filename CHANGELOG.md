@@ -7,6 +7,15 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## 1.0.8 - 2026-09-03
+
+### Fixed
+- Captures that begin and end in the same moment no longer desynchronize the
+  gpu-screen-recorder recording toggle, which had silently stopped every later
+  capture from producing a file.
+- A capture that produces no video file now replaces the recorder child, so
+  the next recording still saves instead of going silent.
+
 ## 1.0.7 - 2026-08-21
 
 ### Added

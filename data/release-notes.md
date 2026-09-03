@@ -4,6 +4,12 @@ Commit subjects per release, written by `scripts/generate-release-notes.sh` and
 compiled into the binary: the "What's new" dialog reads the section matching the
 running version. Only `## <version>` headings and `- ` lines are parsed.
 
+## 1.0.8
+- Correct the documented application sizes
+- Replace the GSR child when a capture produces no video file
+- Stop the GSR recording toggle from desyncing
+- Prove the next recording saves after a desync
+
 ## 1.0.7
 - Add focused combat review tools
 - Add resizable combat damage meter

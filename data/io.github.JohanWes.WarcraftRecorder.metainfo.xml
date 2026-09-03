@@ -34,6 +34,16 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.8" date="2026-09-03">
+      <description>
+        <p>
+          Fixed screen-capture reliability: captures that begin and end in the
+          same moment no longer desynchronize the recorder toggle, and a
+          capture that produces no video file now replaces the recorder so the
+          next recording still saves.
+        </p>
+      </description>
+    </release>
     <release version="1.0.7" date="2026-08-21">
       <description>
         <p>
