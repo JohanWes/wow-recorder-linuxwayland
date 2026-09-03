@@ -9,6 +9,7 @@ running version. Only `## <version>` headings and `- ` lines are parsed.
 - Replace the GSR child when a capture produces no video file
 - Stop the GSR recording toggle from desyncing
 - Prove the next recording saves after a desync
+- Use as_chunks for the MD5 block loop
 
 ## 1.0.7
 - Add focused combat review tools

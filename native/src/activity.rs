@@ -3098,7 +3098,7 @@ fn md5_hex(input: &[u8]) -> String {
 
     let (mut a0, mut b0, mut c0, mut d0) =
         (0x67452301u32, 0xefcdab89u32, 0x98badcfeu32, 0x10325476u32);
-    for chunk in message.chunks_exact(64) {
+    for chunk in message.as_chunks::<64>().0 {
         let mut words = [0u32; 16];
         for (index, word) in words.iter_mut().enumerate() {
             *word = u32::from_le_bytes([
