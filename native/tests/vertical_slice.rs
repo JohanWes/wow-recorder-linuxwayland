@@ -194,6 +194,7 @@ fn setup(root: &Path) -> Setup {
             // clear assertion. Only the missing-artifact test waits it out.
             regular_event: Duration::from_secs(2),
             exit_grace: Duration::from_millis(500),
+            toggle_gap: Duration::from_millis(20),
         },
         poll_interval: Duration::from_millis(5),
         test_duration: Duration::from_millis(200),

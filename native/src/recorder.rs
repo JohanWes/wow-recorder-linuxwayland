@@ -156,6 +156,9 @@ pub struct Timeouts {
     /// Wait for the old child to exit during reselection/shutdown before
     /// escalating.
     pub exit_grace: Duration,
+    /// Minimum spacing between the SIGRTMIN toggles GSR reads once per
+    /// capture-loop iteration.
+    pub toggle_gap: Duration,
 }
 
 impl Default for Timeouts {
@@ -165,6 +168,7 @@ impl Default for Timeouts {
             replay_event: Duration::from_secs(20),
             regular_event: Duration::from_secs(30),
             exit_grace: Duration::from_secs(2),
+            toggle_gap: Duration::from_millis(250),
         }
     }
 }
@@ -209,6 +213,7 @@ pub struct Recorder {
     ending: Option<PendingEnd>,
     last_token: Option<String>,
     ignored_events: u32,
+    last_toggle_at: Option<Instant>,
     timeouts: Timeouts,
 }
 
@@ -243,6 +248,7 @@ impl Recorder {
             ending: None,
             last_token: None,
             ignored_events: 0,
+            last_toggle_at: None,
             timeouts,
         }
     }
@@ -407,6 +413,7 @@ impl Recorder {
         };
         process::send_signal(child, libc::SIGUSR1)?;
         process::send_signal(child, process::sigrtmin())?;
+        self.last_toggle_at = Some(Instant::now());
         self.active = Some(ActiveCapture {
             id: request.id,
             requested_replay_ms: request.requested_replay_ms,
@@ -433,12 +440,23 @@ impl Recorder {
             Some(active) if &active.id != id => return Err(RecorderError::WrongId),
             Some(_) => {}
         }
+        // GSR reads the toggle as a flag, once per capture-loop iteration, so
+        // two inside one iteration collapse into one and invert it for good. A
+        // discard ends a capture from the batch that began it, so only that
+        // case ever waits here.
+        if let Some(sent_at) = self.last_toggle_at {
+            let remaining = self.timeouts.toggle_gap.saturating_sub(sent_at.elapsed());
+            if !remaining.is_zero() {
+                std::thread::sleep(remaining);
+            }
+        }
         let child = self.live_child()?;
         // The stop timestamp is sampled before the signal: the hook event
         // that arrives later is admitted against this bound, never a clock
         // read taken while the end resolves.
         let regular_stopped_at_ms = now_wall_ms();
         process::send_signal(child, process::sigrtmin())?;
+        self.last_toggle_at = Some(Instant::now());
         let config = self.config.clone().expect("armed with config");
         let active = self.active.take().expect("checked above");
         self.ending = Some(PendingEnd {
@@ -517,12 +535,10 @@ impl Recorder {
                 if now < ending.regular_deadline {
                     return;
                 }
-                // GSR drops a SIGRTMIN now and then, inverting the toggle for
-                // good: every later stop starts a recording instead. The state
-                // cannot be read back, so replace the child. Resolving is left
-                // to its exit, which poll reports as `ChildExited` before it
-                // reaches here again, so the coordinator disarms before a
-                // deferred capture can start on a child that is going away.
+                // The toggle inverted, and it cannot be read back: replace the
+                // child. Its exit resolves this end, and poll reports that
+                // first so the coordinator disarms before a deferred capture
+                // can start on a child that is going away.
                 if !ending.sigint_sent {
                     ending.sigint_sent = true;
                     ending.regular_deadline = now + self.timeouts.exit_grace;
@@ -532,9 +548,7 @@ impl Recorder {
                     return;
                 }
                 // The child ignored SIGINT. Consume any valid replay event so
-                // it is not counted as unexpected noise; without a regular
-                // recording it is discarded either way, and the coordinator's
-                // sweep quarantines the file.
+                // it is not counted as noise; the coordinator sweeps the file.
                 let replay_bound = ending.active.regular_started_at_ms;
                 let _ = self.take_event("replay", &Self::replay_dir(&config), replay_bound);
                 self.resolve_end(None, events);
@@ -1081,6 +1095,7 @@ mod tests {
             replay_event: Duration::from_millis(300),
             regular_event: Duration::from_millis(300),
             exit_grace: Duration::from_millis(500),
+            toggle_gap: Duration::from_millis(20),
         }
     }
 
@@ -1283,9 +1298,7 @@ mod tests {
             end_artifacts(&mut recorder).is_none(),
             "a session with no regular event resolves to no artifacts"
         );
-        // A missing regular event means the SIGRTMIN toggle desynced, so the
-        // child is replaced rather than reused: nothing starts until poll has
-        // respawned it.
+        // The toggle desynced, so the child is replaced, not reused.
         assert!(matches!(
             recorder.begin(StartRequest {
                 id: RecordingId::new(),
@@ -1294,6 +1307,27 @@ mod tests {
             }),
             Err(RecorderError::NotArmed)
         ));
+        recorder.shutdown().unwrap();
+    }
+
+    /// Two toggles inside one GSR loop iteration collapse into one.
+    #[test]
+    fn an_immediate_end_waits_before_toggling_gsr_again() {
+        let mut recorder = Recorder::with_timeouts(test_timeouts());
+        let config = test_config("toggle-gap");
+        recorder.arm(&config).unwrap();
+
+        let id = RecordingId::new();
+        recorder
+            .begin(StartRequest {
+                id: id.clone(),
+                requested_replay_ms: 0,
+                mode: RecordingMode::Automatic,
+            })
+            .unwrap();
+        let started = Instant::now();
+        recorder.request_end(&id).unwrap();
+        assert!(started.elapsed() >= test_timeouts().toggle_gap);
         recorder.shutdown().unwrap();
     }
 
