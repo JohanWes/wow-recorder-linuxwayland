@@ -819,6 +819,13 @@ fn missing_regular_artifact_reports_a_problem() {
         "problems: {:?}",
         harness.latest.problems
     );
+    // A missing regular recording means the toggle desynced; replace the child.
+    harness.pump(|snapshot| {
+        snapshot
+            .problems
+            .iter()
+            .any(|problem| problem.summary.contains("stopped unexpectedly"))
+    });
 }
 
 #[test]

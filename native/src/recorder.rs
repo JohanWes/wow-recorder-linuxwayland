@@ -194,6 +194,7 @@ struct PendingEnd {
     regular_deadline: Instant,
     regular_stopped_at_ms: i64,
     regular: Option<PathBuf>,
+    sigint_sent: bool,
 }
 
 pub struct Recorder {
@@ -446,6 +447,7 @@ impl Recorder {
             regular_deadline: Instant::now() + self.timeouts.regular_event,
             regular_stopped_at_ms,
             regular: None,
+            sigint_sent: false,
         });
         Ok(())
     }
@@ -515,10 +517,24 @@ impl Recorder {
                 if now < ending.regular_deadline {
                     return;
                 }
-                // The bounded wait expired. Consume any valid replay event
-                // first so it is not counted as unexpected noise; without a
-                // regular recording it is discarded either way, and the
-                // coordinator's sweep quarantines the file.
+                // GSR drops a SIGRTMIN now and then, inverting the toggle for
+                // good: every later stop starts a recording instead. The state
+                // cannot be read back, so replace the child. Resolving is left
+                // to its exit, which poll reports as `ChildExited` before it
+                // reaches here again, so the coordinator disarms before a
+                // deferred capture can start on a child that is going away.
+                if !ending.sigint_sent {
+                    ending.sigint_sent = true;
+                    ending.regular_deadline = now + self.timeouts.exit_grace;
+                    if let Some(child) = self.child.as_ref() {
+                        let _ = process::send_signal(child, libc::SIGINT);
+                    }
+                    return;
+                }
+                // The child ignored SIGINT. Consume any valid replay event so
+                // it is not counted as unexpected noise; without a regular
+                // recording it is discarded either way, and the coordinator's
+                // sweep quarantines the file.
                 let replay_bound = ending.active.regular_started_at_ms;
                 let _ = self.take_event("replay", &Self::replay_dir(&config), replay_bound);
                 self.resolve_end(None, events);
@@ -1267,14 +1283,17 @@ mod tests {
             end_artifacts(&mut recorder).is_none(),
             "a session with no regular event resolves to no artifacts"
         );
-        // The failed session was cleared; a new begin works.
-        recorder
-            .begin(StartRequest {
+        // A missing regular event means the SIGRTMIN toggle desynced, so the
+        // child is replaced rather than reused: nothing starts until poll has
+        // respawned it.
+        assert!(matches!(
+            recorder.begin(StartRequest {
                 id: RecordingId::new(),
                 requested_replay_ms: 0,
                 mode: RecordingMode::Manual,
-            })
-            .unwrap();
+            }),
+            Err(RecorderError::NotArmed)
+        ));
         recorder.shutdown().unwrap();
     }
 
