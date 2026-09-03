@@ -802,7 +802,7 @@ fn missing_replay_falls_back_to_the_regular_recording() {
 }
 
 #[test]
-fn missing_regular_artifact_reports_a_problem() {
+fn missing_regular_artifact_replaces_the_child_and_recovers() {
     let mut harness = Harness::new("failure");
     let start_ms = now_unix_ms() - 1_000;
     harness.log(&raid_start(start_ms));
@@ -827,6 +827,18 @@ fn missing_regular_artifact_reports_a_problem() {
             .iter()
             .any(|problem| problem.summary.contains("stopped unexpectedly"))
     });
+    // The replacement re-arms, so the next recording still saves instead of
+    // every later capture going silent.
+    harness.pump(|snapshot| snapshot.status == RecorderStatus::Ready);
+    let start_ms = now_unix_ms() - 1_000;
+    harness.log(&raid_start(start_ms));
+    harness.pump(|snapshot| snapshot.active.is_some());
+    harness.emit_artifacts(true);
+    harness.log(&[raid_end(now_unix_ms(), true)]);
+    harness.pump(|snapshot| !snapshot.entries.is_empty());
+    let entry = &harness.latest.entries[0];
+    assert_eq!(entry.category, Category::Raids);
+    assert!(entry.media_path.exists(), "media was not written");
 }
 
 #[test]
