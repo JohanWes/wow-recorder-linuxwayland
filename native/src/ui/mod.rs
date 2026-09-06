@@ -41,7 +41,6 @@ use tray_backend::{TrayBackend, TrayEvent};
 
 /// Everything `run` needs that is not the coordinator or the tray.
 pub struct ShellOptions {
-    pub app_id: &'static str,
     /// Recorder diagnostics directory (`gsr.log`, events, hook, token).
     pub data_dir: PathBuf,
     /// Fallback directory for "Open logs" when `data_dir` does not exist yet.
@@ -171,6 +170,58 @@ impl LayoutStore {
     }
 }
 
+/// Outcome of claiming the single application instance.
+pub enum Registration {
+    /// This process owns the application and must run the shell.
+    Primary(adw::Application),
+    /// Another process owns it; the caller must hand activation to the
+    /// primary via `run_remote` and exit before touching shared state.
+    Secondary(adw::Application),
+}
+
+/// Build the application, wire the startup handler (GResource, CSS, icons),
+/// and register with the session bus. Registration must happen before any
+/// work with side effects: a second launcher is reported as `Secondary` so it
+/// can activate the primary and exit instead of rotating the shared log,
+/// sweeping live capture files, or arming a second recorder. A successful
+/// primary registration can emit `startup` immediately, which is why
+/// resources and the provider hookup are connected before `register`.
+pub fn register(app_id: &'static str) -> Result<Registration, gtk4::glib::Error> {
+    gtk4::gio::resources_register_include!("warcraft-recorder.gresource")
+        .expect("register compiled GResource bundle");
+
+    let application = adw::Application::builder().application_id(app_id).build();
+
+    application.connect_startup(|_| {
+        let Some(display) = gtk4::gdk::Display::default() else {
+            return;
+        };
+        let provider = gtk4::CssProvider::new();
+        provider.load_from_resource("/io/github/JohanWes/WarcraftRecorder/style.css");
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        gtk4::IconTheme::for_display(&display)
+            .add_resource_path("/io/github/JohanWes/WarcraftRecorder/icons");
+    });
+
+    application.register(None::<&gtk4::gio::Cancellable>)?;
+    if application.is_remote() {
+        Ok(Registration::Secondary(application))
+    } else {
+        Ok(Registration::Primary(application))
+    }
+}
+
+/// Hand activation to the primary instance on the session bus. The remote
+/// `run` skips the main loop and unregisters cleanly, so this returns as
+/// soon as the primary has been notified; the return value is the exit code.
+pub fn run_remote(application: adw::Application) -> i32 {
+    application.run_with_args(&[env!("CARGO_PKG_NAME")]).into()
+}
+
 /// Category rail metadata in rail order: label and symbolic icon.
 pub const CATEGORIES: [(Category, &str, &str); 10] = [
     (Category::TwoVTwo, "2v2", "wr-category-2v2-symbolic"),
@@ -219,36 +270,16 @@ pub fn category_label(category: &Category) -> &str {
         .unwrap_or("Recordings")
 }
 
-/// Build and run the application; returns the process exit code. The caller
-/// joins the coordinator and tray handles after this returns.
+/// Run the shell for the already-registered primary application; returns the
+/// process exit code. The caller joins the coordinator and tray handles after
+/// this returns.
 pub fn run(
+    application: adw::Application,
     options: &ShellOptions,
     coordinator: Rc<RefCell<CoordinatorHandle>>,
     tray: Option<Rc<TrayBackend>>,
     tray_events: Receiver<TrayEvent>,
 ) -> i32 {
-    gtk4::gio::resources_register_include!("warcraft-recorder.gresource")
-        .expect("register compiled GResource bundle");
-
-    let application = adw::Application::builder()
-        .application_id(options.app_id)
-        .build();
-
-    application.connect_startup(|_| {
-        let Some(display) = gtk4::gdk::Display::default() else {
-            return;
-        };
-        let provider = gtk4::CssProvider::new();
-        provider.load_from_resource("/io/github/JohanWes/WarcraftRecorder/style.css");
-        gtk4::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-        gtk4::IconTheme::for_display(&display)
-            .add_resource_path("/io/github/JohanWes/WarcraftRecorder/icons");
-    });
-
     let shell: Rc<RefCell<Option<window::Shell>>> = Rc::new(RefCell::new(None));
     {
         let shell_cell = Rc::clone(&shell);
@@ -260,7 +291,11 @@ pub fn run(
         let close_to_tray = options.close_to_tray;
         let minimize_to_tray = options.minimize_to_tray;
         application.connect_activate(move |application| {
-            if shell_cell.borrow().is_none() {
+            // Start-minimized is a first-activation flag only: a later
+            // activation (second launcher invocation, tray "Open") must
+            // reveal a window that is already running hidden.
+            let first_activation = shell_cell.borrow().is_none();
+            if first_activation {
                 let built = window::Shell::build(
                     application,
                     Rc::clone(&activate_coordinator),
@@ -278,7 +313,7 @@ pub fn run(
             let watcher_available = activate_tray
                 .as_ref()
                 .is_some_and(|tray| tray.is_available());
-            if watcher_available && start_minimized {
+            if first_activation && watcher_available && start_minimized {
                 built.hide_to_tray();
             } else {
                 built.present();

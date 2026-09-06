@@ -32,8 +32,24 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // Claim the single instance before anything with side effects runs: a
+    // second launcher must only activate the primary and exit, or it would
+    // rotate the shared log, sweep live capture files into Recovery, and arm
+    // a second gpu-screen-recorder against the shared events file.
+    let application = match ui::register(APP_ID) {
+        Ok(ui::Registration::Primary(application)) => application,
+        Ok(ui::Registration::Secondary(application)) => {
+            std::process::exit(ui::run_remote(application));
+        }
+        Err(error) => {
+            eprintln!("warcraft-recorder: cannot register the application: {error}");
+            std::process::exit(1);
+        }
+    };
+
     init_logging(&setup.data_dir);
-    let options = shell_options(APP_ID, &setup);
+    let options = shell_options(&setup);
 
     // One latch shared by everything that can make the shell's drain useful,
     // so a burst of wakes costs a single queued main-loop callback.
@@ -55,6 +71,7 @@ fn main() {
 
     tracing::info!(application_id = APP_ID, "starting application");
     let code = ui::run(
+        application,
         &options,
         Rc::clone(&coordinator),
         tray.clone(),
@@ -74,10 +91,9 @@ fn main() {
 /// The shell options that come from outside the GTK loop: paths the shell
 /// launches but never reads, plus the initial interface flags read once
 /// before the loop starts (live values arrive with the first snapshot).
-fn shell_options(app_id: &'static str, setup: &coordinator::Setup) -> ui::ShellOptions {
+fn shell_options(setup: &coordinator::Setup) -> ui::ShellOptions {
     let config = Config::load(&setup.config_path).unwrap_or_default();
     ui::ShellOptions {
-        app_id,
         data_dir: setup.data_dir.clone(),
         config_dir: config_dir(&setup.config_path),
         start_minimized: config.interface.start_minimized,
