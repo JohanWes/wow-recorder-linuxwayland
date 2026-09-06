@@ -26,7 +26,7 @@ use warcraft_recorder::domain::{
 use super::damage_meter::DamageMeter;
 use super::library::Selection;
 use super::multipov;
-use super::player_backend::{PlayerBackend, SeekMode, VideoStreamToken};
+use super::player_backend::{PlayerBackend, PlayerState, SeekMode, VideoStreamToken};
 use super::timeline::{self, MarkerDirection, MarkerPrefs, Timeline};
 use super::{ActionSink, ShellAction};
 
@@ -99,7 +99,10 @@ struct Inner {
     clip_mode: Cell<bool>,
 
     /// Async seek: the newest requested target with the precision it needs,
-    /// and whether one is in flight.
+    /// and whether a seek Clapper is executing has not completed yet. Targets
+    /// requested while the item is still loading wait here until Clapper
+    /// reports readiness, because a seek issued that early is cached and —
+    /// for a zero target — silently dropped without a completion.
     pending_seek: Cell<Option<(f64, SeekMode)>>,
     seek_in_flight: Cell<bool>,
     /// Bumped by every load and unload so timers armed for an earlier media
@@ -461,6 +464,8 @@ impl Inner {
         let this = Rc::clone(self);
         backend.connect_seek_done(move || this.on_seek_done());
         let this = Rc::clone(self);
+        backend.connect_state_changed(move |state| this.on_state_changed(state));
+        let this = Rc::clone(self);
         backend.connect_position_updated(move |seconds| this.on_position(seconds));
         let this = Rc::clone(self);
         backend.widget().connect_toggle_fullscreen(move |_| {
@@ -811,22 +816,60 @@ impl Inner {
         self.speed_button.set_label(&format!("{speed}x"));
     }
 
-    /// Asynchronous seeking: keep only the newest target while one is pending.
-    /// A preview target may be superseded by a settling one, so the mode
-    /// travels with the position.
+    /// Asynchronous seeking. While the loaded item is ready, Clapper executes
+    /// seeks immediately and reports completion, so only the newest target is
+    /// kept while one is in flight. While the item is still loading, the
+    /// request waits here instead of being handed to Clapper: it would cache
+    /// it and — for a zero target — silently drop it at preroll, leaving no
+    /// completion to clear the in-flight flag. A preview target may be
+    /// superseded by a settling one, so the mode travels with the position.
     fn request_seek(self: &Rc<Self>, seconds: f64, mode: SeekMode) {
         if !self.media_usable.get() {
             return;
         }
         let seconds = seconds.clamp(0.0, self.duration_ms.get() as f64 / 1_000.0);
         self.show_position(seconds);
-        if self.seek_in_flight.get() {
-            self.pending_seek.set(Some((seconds, mode)));
+        let Some(backend) = &self.backend else {
             return;
+        };
+        if backend.is_ready() {
+            if !self.seek_in_flight.replace(true) {
+                // Nothing is in flight to coalesce against, so this target is
+                // the only one left: a queue entry kept here would be applied
+                // on top of it by the completion below.
+                self.pending_seek.set(None);
+                backend.seek(seconds, mode);
+                return;
+            }
+        } else {
+            // A stale in-flight flag cannot belong to a live seek: its item
+            // is gone, and its completion would only coalesce this target.
+            self.seek_in_flight.set(false);
         }
-        self.seek_in_flight.set(true);
-        if let Some(backend) = &self.backend {
-            backend.seek(seconds, mode);
+        self.pending_seek.set(Some((seconds, mode)));
+    }
+
+    fn on_state_changed(self: &Rc<Self>, state: PlayerState) {
+        match state {
+            // First readiness of the loaded item: hand over a seek that was
+            // queued during loading. Clapper executes it and reports a
+            // completion of its own.
+            PlayerState::Playing | PlayerState::Paused => {
+                if let Some((target, mode)) = self.pending_seek.take() {
+                    self.seek_in_flight.set(true);
+                    if let Some(backend) = &self.backend {
+                        backend.seek(target, mode);
+                    }
+                }
+            }
+            // The item the in-flight seek was issued against is gone, so its
+            // completion can never arrive. Buffering is deliberately not
+            // included: it is a state a live seek passes through, and clearing
+            // the flag there would strand the target queued behind it.
+            PlayerState::Stopped => {
+                self.seek_in_flight.set(false);
+            }
+            _ => {}
         }
     }
 
@@ -853,8 +896,9 @@ impl Inner {
     }
 
     fn on_position(&self, seconds: f64) {
-        // While a seek is pending, presentation keeps the requested target.
-        if self.seek_in_flight.get() {
+        // While a seek is queued or in flight, presentation keeps the
+        // requested target.
+        if self.seek_in_flight.get() || self.pending_seek.get().is_some() {
             return;
         }
         self.show_position(seconds);

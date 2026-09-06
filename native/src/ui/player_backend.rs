@@ -17,6 +17,8 @@ pub enum SeekMode {
     Exact,
 }
 
+pub use clapper::PlayerState;
+
 /// The concrete Clapper objects used by Warcraft Recorder's player UI.
 #[derive(Clone)]
 pub struct PlayerBackend {
@@ -134,6 +136,14 @@ impl PlayerBackend {
     pub fn connect_position_updated(&self, callback: impl Fn(f64) + 'static) {
         self.player
             .connect_position_notify(move |player| callback(player.position()));
+    }
+
+    /// Typed player-state changes. Clapper suppresses these while a seek is
+    /// progressing, so an arrival also proves any in-flight seek was
+    /// abandoned and can never complete.
+    pub fn connect_state_changed(&self, callback: impl Fn(PlayerState) + 'static) {
+        self.player
+            .connect_state_notify(move |player| callback(player.state()));
     }
 
     pub fn connect_seek_done(&self, callback: impl Fn() + 'static) {
