@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -839,6 +840,149 @@ fn missing_regular_artifact_replaces_the_child_and_recovers() {
     let entry = &harness.latest.entries[0];
     assert_eq!(entry.category, Category::Raids);
     assert!(entry.media_path.exists(), "media was not written");
+}
+
+/// A harness over a tree that already holds one scanned legacy recording
+/// (`canary-old`), optionally protected. Its media is removed right after
+/// startup, so any full library rescan would drop it: the canary stays in the
+/// index only while completion, mutation, and eviction update incrementally.
+fn canary_harness(
+    name: &str,
+    protected: bool,
+) -> (Harness, warcraft_recorder::domain::LibraryEntry) {
+    let root = std::env::temp_dir().join(format!("wr-slice-{name}-{}", uuid::Uuid::new_v4()));
+    let library = root.join("recordings with space");
+    let capture_root = root.join("buffer");
+    let log_dir = root.join("wow/_retail_/Logs");
+    for directory in [&library, &capture_root, &log_dir] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    let log_file = log_dir.join("WoWCombatLog.txt");
+    fs::write(&log_file, b"").unwrap();
+    write_config(&root, &library, &capture_root, &log_dir);
+    let start = now_unix_ms() - 61_000;
+    fs::write(
+        library.join("canary-old.json"),
+        format!(r#"{{"category":"Raids","duration":60,"start":{start},"protected":{protected}}}"#),
+    )
+    .unwrap();
+    fs::write(library.join("canary-old.mp4"), b"canary media").unwrap();
+
+    let harness = Harness::attach(root, library, capture_root, log_file);
+    assert_eq!(harness.latest.entries.len(), 1);
+    let canary = harness.latest.entries[0].clone();
+    fs::remove_file(&canary.media_path).unwrap();
+    (harness, canary)
+}
+
+/// Media plus sidecar bytes for every entry still counted by the coordinator.
+fn counted_usage(entries: &[&warcraft_recorder::domain::LibraryEntry]) -> u64 {
+    entries
+        .iter()
+        .flat_map(|entry| [&entry.media_path, &entry.sidecar_path])
+        .map(|path| fs::metadata(path).map(|meta| meta.len()).unwrap_or(0))
+        .sum()
+}
+
+#[test]
+fn completion_updates_the_library_without_a_full_rescan() {
+    let (mut harness, canary) = canary_harness("incremental", false);
+
+    let start_ms = now_unix_ms() - 1_000;
+    harness.log(&raid_start(start_ms));
+    harness.pump(|snapshot| snapshot.active.is_some());
+    harness.emit_artifacts(true);
+    harness.log(&[raid_end(now_unix_ms(), true)]);
+    harness.pump(|snapshot| snapshot.entries.len() == 2);
+
+    // The completed recording is the newest entry and the canary kept its
+    // place despite its missing media, which a rescan would have dropped.
+    let raid = harness.latest.entries[0].clone();
+    assert_eq!(raid.category, Category::Raids);
+    assert_eq!(harness.latest.entries[1].id, canary.id);
+    // Correlation groups follow the same order.
+    assert_eq!(harness.latest.correlations.len(), 2);
+    assert_eq!(harness.latest.correlations[0].primary_id, raid.id);
+    assert_eq!(harness.latest.correlations[1].primary_id, canary.id);
+    // Usage tracks the real files, including the canary's missing media.
+    assert_eq!(
+        harness.latest.storage_used_bytes,
+        counted_usage(&[&raid, &canary])
+    );
+
+    // Tag and protect fold into the index the same way.
+    harness.send(Command::SetTag {
+        id: raid.id.clone(),
+        tag: "keeper".to_owned(),
+    });
+    harness.pump(|snapshot| snapshot.entries[0].tag.as_deref() == Some("keeper"));
+    assert_eq!(harness.latest.entries[1].id, canary.id);
+
+    // Deletion removes only the deleted entry.
+    harness.send(Command::Delete {
+        ids: vec![raid.id.clone()],
+    });
+    harness.pump(|snapshot| snapshot.entries.len() == 1);
+    assert_eq!(harness.latest.entries[0].id, canary.id);
+    assert_eq!(
+        harness.latest.storage_used_bytes,
+        counted_usage(&[&harness.latest.entries[0]])
+    );
+    assert!(!raid.media_path.exists());
+    assert!(!raid.sidecar_path.exists());
+}
+
+#[test]
+fn completion_eviction_updates_the_index_without_a_full_rescan() {
+    let (mut harness, canary) = canary_harness("eviction", true);
+
+    // One unprotected raid, then a storage cap below its padded size.
+    let start_ms = now_unix_ms() - 1_000;
+    harness.log(&raid_start(start_ms));
+    harness.pump(|snapshot| snapshot.active.is_some());
+    harness.emit_artifacts(true);
+    harness.log(&[raid_end(now_unix_ms(), true)]);
+    harness.pump(|snapshot| snapshot.entries.len() == 2);
+    let raid = harness.latest.entries[0].clone();
+    assert_eq!(raid.category, Category::Raids);
+
+    let mut draft = harness.latest.config.clone();
+    draft.storage.limit = StorageLimit::Gib(NonZeroU64::new(1).expect("nonzero"));
+    harness.send(Command::SaveConfig {
+        draft: Box::new(draft),
+    });
+    harness.pump(|snapshot| {
+        snapshot.config.storage.limit == StorageLimit::Gib(NonZeroU64::new(1).expect("nonzero"))
+    });
+
+    // Sparse-pad the raid past the cap without touching its bytes.
+    let padded = fs::OpenOptions::new()
+        .write(true)
+        .open(&raid.media_path)
+        .unwrap();
+    padded.set_len(2 * 1024 * 1024 * 1024).unwrap();
+
+    harness.log(&raid_start(now_unix_ms()));
+    harness.pump(|snapshot| snapshot.active.is_some());
+    harness.emit_artifacts(true);
+    harness.log(&[raid_end(now_unix_ms(), true)]);
+    let raid_id = raid.id.clone();
+    harness.pump(|snapshot| {
+        snapshot.entries.len() == 2 && snapshot.entries.iter().all(|entry| entry.id != raid_id)
+    });
+
+    // Eviction removed the oldest unprotected recording; the protected canary
+    // survived and, with its media missing, only if no rescan ran.
+    let newest = harness.latest.entries[0].clone();
+    assert_eq!(newest.category, Category::Raids);
+    assert_ne!(newest.id, raid.id);
+    assert_eq!(harness.latest.entries[1].id, canary.id);
+    assert!(!raid.media_path.exists(), "evicted media was not removed");
+    assert_eq!(harness.latest.correlations.len(), 2);
+    assert_eq!(
+        harness.latest.storage_used_bytes,
+        counted_usage(&[&newest, &canary])
+    );
 }
 
 #[test]

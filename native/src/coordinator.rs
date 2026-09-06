@@ -1242,10 +1242,13 @@ impl Coordinator {
                     }
                 }
                 MediaEvent::Progress(progress) => self.work = Some(progress),
-                MediaEvent::Completed { .. } => {
+                MediaEvent::Completed { entry, .. } => {
                     self.media_busy = None;
                     self.work = None;
-                    self.rescan();
+                    // The worker already wrote the sidecar: fold its entry
+                    // into the index instead of re-parsing the library.
+                    self.index.upsert_entry(*entry);
+                    self.recount();
                     self.enforce_limit();
                 }
                 MediaEvent::Failed { kind, message } => {
@@ -1356,10 +1359,16 @@ impl Coordinator {
                 Some(RecoveryAction::Retry),
             );
         }
-        // Files went away: reconcile entries, correlations and usage with the
-        // directory. Rebuilding the groups by hand loses any activity whose
-        // primary was deleted while one of its viewpoints survived a failure.
-        self.rescan();
+        // Fold the deletions into the index the way completion folds in a new
+        // entry: correlations rebuild over what remains, so a surviving
+        // viewpoint becomes its own group exactly as a rescan would produce.
+        // Only a sidecar that outlived its media needs the directory itself.
+        if result.partially_deleted {
+            self.rescan();
+        } else {
+            self.index.remove_entries(&result.deleted);
+            self.recount();
+        }
     }
 
     fn rescan(&mut self) {
@@ -1392,11 +1401,17 @@ impl Coordinator {
             .storage
             .enforce_limit(self.config.storage.limit, &self.index.entries);
         self.protected_over_limit = result.protected_over_limit;
-        if result.evicted.is_empty() && !result.partially_deleted {
-            self.recount();
-        } else {
+        if result.partially_deleted {
+            // A sidecar outlived its media; only a rescan can reconcile.
             self.rescan();
+            return;
         }
+        if result.evicted.is_empty() {
+            return;
+        }
+        self.index.remove_entries(&result.evicted);
+        self.storage_used_bytes = result.remaining_bytes;
+        self.dirty = true;
     }
 
     // --- Configuration ---

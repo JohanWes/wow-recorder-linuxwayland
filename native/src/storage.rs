@@ -73,12 +73,63 @@ pub struct SkippedEntry {
 pub struct LibraryIndex {
     /// Reverse chronological.
     pub entries: Arc<Vec<LibraryEntry>>,
+    /// Per-entry recorded activity start used for multi-POV correlation,
+    /// parallel to `entries`. Legacy sidecars without a start time cannot
+    /// correlate, so incremental updates can rebuild groups exactly like a
+    /// full scan would.
+    pub correlation_starts: Vec<Option<i64>>,
     pub correlations: Arc<Vec<CorrelatedActivity>>,
     /// Entries whose sidecar was written by the legacy application.
     pub legacy_ids: HashSet<RecordingId>,
     pub skipped: Vec<SkippedEntry>,
     /// Bounded summary: how many unrelated/unsupported files were ignored.
     pub ignored_files: usize,
+}
+
+impl LibraryIndex {
+    /// Fold in an entry the media worker just wrote, keeping the newest-first
+    /// order, the correlation groups, and legacy tracking in step with a full
+    /// scan. The entry carries its own sidecar start, so no file is read.
+    pub fn upsert_entry(&mut self, entry: LibraryEntry) {
+        let entries = Arc::make_mut(&mut self.entries);
+        if let Some(existing) = entries
+            .iter()
+            .position(|candidate| candidate.id == entry.id)
+        {
+            entries.remove(existing);
+            self.correlation_starts.remove(existing);
+            self.legacy_ids.remove(&entry.id);
+        }
+        let position = match entries.binary_search_by(|probe| entry_order(probe, &entry)) {
+            Ok(position) | Err(position) => position,
+        };
+        let start = Some(entry.start_unix_ms);
+        entries.insert(position, entry);
+        self.correlation_starts.insert(position, start);
+        self.correlations = Arc::new(correlate(entries, &self.correlation_starts));
+    }
+
+    /// Drop the given ids (those actually present), rebuilding the correlation
+    /// groups over what remains. A surviving viewpoint becomes its own group,
+    /// the same result a rescan produces.
+    pub fn remove_entries(&mut self, ids: &[RecordingId]) {
+        let before = self.entries.len();
+        let entries = Arc::make_mut(&mut self.entries);
+        let removed: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| ids.contains(&entry.id))
+            .map(|(position, _)| position)
+            .collect();
+        for position in removed.into_iter().rev() {
+            self.legacy_ids.remove(&entries[position].id);
+            entries.remove(position);
+            self.correlation_starts.remove(position);
+        }
+        if entries.len() != before {
+            self.correlations = Arc::new(correlate(entries, &self.correlation_starts));
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +143,9 @@ pub enum EntryUpdate {
 pub struct DeleteResult {
     pub deleted: Vec<RecordingId>,
     pub failures: Vec<(RecordingId, String)>,
+    /// A deletion removed the media but could not remove its sidecar, so the
+    /// library no longer matches the directory. The caller has to rescan.
+    pub partially_deleted: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -352,20 +406,14 @@ impl Storage {
 
         // Reverse chronological, ties broken by media path for determinism.
         let mut order: Vec<usize> = (0..index.entries.len()).collect();
-        order.sort_by(|left, right| {
-            let left_entry = &index.entries[*left];
-            let right_entry = &index.entries[*right];
-            right_entry
-                .start_unix_ms
-                .cmp(&left_entry.start_unix_ms)
-                .then_with(|| left_entry.media_path.cmp(&right_entry.media_path))
-        });
+        order.sort_by(|left, right| entry_order(&index.entries[*left], &index.entries[*right]));
         let entries: Vec<LibraryEntry> = order
             .iter()
             .map(|position| index.entries[*position].clone())
             .collect();
         let starts: Vec<Option<i64>> = order.iter().map(|position| starts[*position]).collect();
         index.correlations = Arc::new(correlate(&entries, &starts));
+        index.correlation_starts = starts;
         index.entries = Arc::new(entries);
         index
     }
@@ -585,7 +633,14 @@ impl Storage {
         for entry in entries {
             match self.delete_one(entry) {
                 Ok(()) => result.deleted.push(entry.id.clone()),
-                Err(error) => result.failures.push((entry.id.clone(), error)),
+                Err(error) => {
+                    // Same rule as eviction: only a sidecar-stage failure
+                    // leaves the media gone while its sidecar remains.
+                    if error.starts_with("sidecar:") {
+                        result.partially_deleted = true;
+                    }
+                    result.failures.push((entry.id.clone(), error));
+                }
             }
         }
         result
@@ -1422,6 +1477,14 @@ fn legacy_combatant(combatant: &LegacyCombatant) -> CombatantSummary {
 }
 
 // --- Correlation ---
+
+/// The library's one ordering: newest first, ties broken by media path.
+fn entry_order(left: &LibraryEntry, right: &LibraryEntry) -> std::cmp::Ordering {
+    right
+        .start_unix_ms
+        .cmp(&left.start_unix_ms)
+        .then_with(|| left.media_path.cmp(&right.media_path))
+}
 
 /// Correlation: identical unique hash and activity start times within one
 /// minute. Clips, solo shuffle, and manual recordings only ever group with the
