@@ -1176,7 +1176,11 @@ impl Inner {
         view: MeterMetric,
         target: &TargetSel,
     ) {
-        if let Some(key) = self.spell.borrow().clone() {
+        // Bound to a `let` first: an `if let` scrutinee guard lives through
+        // the body, and dropping a spell that left the projection below must
+        // mutate `spell`.
+        let spell_key = self.spell.borrow().clone();
+        if let Some(key) = spell_key {
             if let Some(entry) = actor
                 .spells
                 .iter()
