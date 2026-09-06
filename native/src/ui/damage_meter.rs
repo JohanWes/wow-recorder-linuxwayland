@@ -319,6 +319,17 @@ struct Inner {
     /// Last playhead position, kept so a segment switch can pick the Current
     /// fight even while another segment was rendered.
     position_ms: Cell<u64>,
+    /// Whether the meter was last asked to show itself, so a refresh arriving
+    /// while hidden defers instead of building widgets nobody can see.
+    visible: Cell<bool>,
+    /// Set when a refresh was deferred while hidden; the next reveal renders
+    /// it.
+    dirty: Cell<bool>,
+    /// The virtualized history list on screen and its data key. Occurrence
+    /// times and deaths are frozen between playhead ticks, so a matching key
+    /// keeps the widget — scroll position and bound rows included — instead
+    /// of rebuilding it every tick.
+    list_cache: RefCell<Option<(String, gtk4::ListView)>>,
     /// Seek request into the player, installed by it at construction.
     seek: RefCell<Option<SeekFn>>,
     /// On-screen fill fractions per animated row key, written every
@@ -460,6 +471,9 @@ impl DamageMeter {
             segment: Cell::new(SegmentKind::Current),
             target: RefCell::new(TargetSel::All),
             position_ms: Cell::new(0),
+            visible: Cell::new(false),
+            dirty: Cell::new(false),
+            list_cache: RefCell::new(None),
             breakdown: RefCell::new(None),
             spell: RefCell::new(None),
             current_fight: Cell::new(None),
@@ -556,7 +570,7 @@ impl DamageMeter {
     }
 
     pub fn toggle(&self) {
-        self.inner.set_visible(!self.widget.is_visible());
+        self.inner.set_visible(!self.inner.visible.get());
     }
 
     /// Re-clamp the drag margins to the current overlay allocation; once
@@ -592,14 +606,18 @@ impl DamageMeter {
 }
 
 impl Inner {
-    fn set_visible(&self, visible: bool) {
+    fn set_visible(self: &Rc<Self>, visible: bool) {
         // The tooltip lives on the video overlay, outside the meter: hiding
         // the meter must hide it too or it would float over the video alone.
         if !visible {
             self.hovered_spell.borrow_mut().take();
             self.hide_tooltip();
         }
+        self.visible.set(visible);
         self.root.set_visible(visible);
+        if visible && self.dirty.take() {
+            self.refresh();
+        }
     }
 
     fn connect_actions(self: &Rc<Self>) {
@@ -807,6 +825,13 @@ impl Inner {
     /// state and selected entry. Menu models are built only when opened, so a
     /// playback tick never replaces an open popover.
     fn refresh(self: &Rc<Self>) {
+        // A tick's projection work and widget rebuilds are unobservable while
+        // hidden; defer them to the reveal instead.
+        if !self.visible.get() {
+            self.dirty.set(true);
+            return;
+        }
+        self.dirty.set(false);
         self.sync_action_states();
         let fight = self.selected_fight();
         self.rebuild_title(fight.as_ref());
@@ -1077,7 +1102,7 @@ impl Inner {
                 .filter(|death| death.guid == guid)
                 .collect();
             if !deaths.is_empty() {
-                self.rebuild_death_breakdown(&deaths);
+                self.rebuild_death_breakdown(guid, &deaths);
                 return;
             }
             self.breakdown.replace(None);
@@ -1113,9 +1138,22 @@ impl Inner {
         self.set_content(&content);
     }
 
-    fn rebuild_death_breakdown(self: &Rc<Self>, deaths: &[&MeterDeath]) {
-        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-        for (index, death) in deaths.iter().enumerate() {
+    fn rebuild_death_breakdown(self: &Rc<Self>, guid: &str, deaths: &[&MeterDeath]) {
+        // Deaths are frozen for the fight like occurrence times; keying on
+        // the filter and the list bounds keeps the list across half-second
+        // ticks that add nothing.
+        let key = death_list_key(guid, deaths);
+        if self.list_cached(&key) {
+            return;
+        }
+        let this = Rc::clone(self);
+        let items: Vec<(usize, MeterDeath)> = deaths
+            .iter()
+            .enumerate()
+            .map(|(index, death)| (index, (*death).clone()))
+            .collect();
+        let list = history_list(items, move |(index, death)| {
+            let content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
             content.append(&heading(&format!(
                 "Death {} — {}",
                 index + 1,
@@ -1136,7 +1174,7 @@ impl Inner {
                 } else {
                     1.0
                 };
-                let row = self.fill_line(
+                let row = this.fill_line(
                     None,
                     Some(class),
                     &format!(
@@ -1157,14 +1195,15 @@ impl Inner {
                     remaining,
                 );
                 let at_ms = event.at_ms;
-                self.attach_spell_icon(&row, &event.spell_name);
-                content.append(&self.row_button(&row, move |this| this.seek_to(at_ms)));
+                this.attach_spell_icon(&row, &event.spell_name);
+                content.append(&this.row_button(&row, move |this| this.seek_to(at_ms)));
             }
-            let row = self.fill_line(None, Some("wr-death-damage"), "0.0s Death", "", 0.0);
+            let row = this.fill_line(None, Some("wr-death-damage"), "0.0s Death", "", 0.0);
             let at_ms = death.at_ms;
-            content.append(&self.row_button(&row, move |this| this.seek_to(at_ms)));
-        }
-        self.set_content(&content);
+            content.append(&this.row_button(&row, move |this| this.seek_to(at_ms)));
+            content.upcast()
+        });
+        self.set_list_content(&key, &list);
     }
 
     /// The actor drilldown in the same scroller: the Spells and Targets lists
@@ -1243,24 +1282,41 @@ impl Inner {
         entry: &ProjectedEntry,
         view: MeterMetric,
     ) {
-        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
         let class = self.class_for(&actor.guid);
         // Count metrics have nothing per-hit to report: every event is worth
         // one. Their detail is when each happened, and each row seeks there.
+        // The history can hold hundreds of entries, so it is virtualized and
+        // kept across half-second ticks that change nothing — scrubbing
+        // neither rebuilds nor scrolls it.
         if is_count_metric(view) {
-            for at_ms in &entry.times {
-                let target = entry
-                    .targets
-                    .iter()
-                    .find(|target| target.times.contains(at_ms))
-                    .map_or("", |target| target.key.as_str());
-                let row = self.fill_line(None, class, &format_mm_ss(*at_ms), target, 1.0);
-                let at_ms = *at_ms;
-                content.append(&self.row_button(&row, move |this| this.seek_to(at_ms)));
+            let key = occurrence_key(view, &actor.guid, entry);
+            if self.list_cached(&key) {
+                return;
             }
-            self.set_content(&content);
+            let this = Rc::clone(self);
+            let items: Vec<(u64, String)> = entry
+                .times
+                .iter()
+                .map(|at_ms| {
+                    let target = entry
+                        .targets
+                        .iter()
+                        .find(|target| target.times.contains(at_ms))
+                        .map_or("", |target| target.key.as_str())
+                        .to_owned();
+                    (*at_ms, target)
+                })
+                .collect();
+            let list = history_list(items, move |(at_ms, target)| {
+                let at_ms = *at_ms;
+                let row = this.fill_line(None, class, &format_mm_ss(at_ms), target, 1.0);
+                this.row_button(&row, move |this| this.seek_to(at_ms))
+                    .upcast()
+            });
+            self.set_list_content(&key, &list);
             return;
         }
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
         let average = if entry.hits == 0 {
             0
         } else {
@@ -1575,9 +1631,35 @@ impl Inner {
             self.hide_tooltip();
         }
         self.tooltip_rearmed.set(false);
+        self.list_cache.borrow_mut().take();
+        // A history list may have replaced the content box as the scroller's
+        // child; normal content always lives in the box again.
+        if self.scroller.child().as_ref() != Some(self.content.upcast_ref()) {
+            self.scroller.set_child(Some(&self.content));
+        }
         while let Some(child) = self.content.first_child() {
             self.content.remove(&child);
         }
+    }
+
+    /// Whether the scroller currently shows the history list built for `key`.
+    fn list_cached(&self, key: &str) -> bool {
+        self.list_cache
+            .borrow()
+            .as_ref()
+            .is_some_and(|(cached_key, cached)| {
+                cached_key == key && self.scroller.child().as_ref() == Some(cached.upcast_ref())
+            })
+    }
+
+    /// Show a virtualized history list; callers only reach here on a cache
+    /// miss, so the previous content is dropped and the list cached.
+    fn set_list_content(&self, key: &str, list: &gtk4::ListView) {
+        self.clear_content();
+        self.list_cache
+            .borrow_mut()
+            .replace((key.to_owned(), list.clone()));
+        self.scroller.set_child(Some(list));
     }
 
     /// Grip drag: resize the root from the captured geometry, clamped to the
@@ -1737,6 +1819,61 @@ fn heading(text: &str) -> gtk4::Label {
     label
 }
 
+/// Cache key for a virtualized occurrence history: the list is frozen for the
+/// fight, so len plus first/last times identify it between playhead ticks.
+fn occurrence_key(view: MeterMetric, guid: &str, entry: &ProjectedEntry) -> String {
+    format!(
+        "occ:{}:{}:{}:{}:{:?}:{:?}",
+        view_key(View::Metric(view)),
+        guid,
+        entry.key,
+        entry.times.len(),
+        entry.times.first(),
+        entry.times.last(),
+    )
+}
+
+/// Cache key for a virtualized death history: the actor filter plus the list
+/// bounds.
+fn death_list_key(guid: &str, deaths: &[&MeterDeath]) -> String {
+    format!(
+        "death:{}:{}:{:?}:{:?}",
+        guid,
+        deaths.len(),
+        deaths.first().map(|death| death.at_ms),
+        deaths.last().map(|death| death.at_ms),
+    )
+}
+
+/// A virtualized ListView over owned row data: GtkListBase only builds the
+/// rows scrolled into view, so a history with hundreds of entries costs the
+/// same as a screenful. Rows are produced by `build` on each bind; clicks
+/// live on the rows themselves.
+fn history_list<T: 'static>(
+    items: Vec<T>,
+    build: impl Fn(&T) -> gtk4::Widget + 'static,
+) -> gtk4::ListView {
+    let model = gtk4::gio::ListStore::new::<gtk4::glib::BoxedAnyObject>();
+    for item in items {
+        model.append(&gtk4::glib::BoxedAnyObject::new(item));
+    }
+    let factory = gtk4::SignalListItemFactory::new();
+    factory.connect_bind(move |_, factory_item| {
+        let Some(list_item) = factory_item.downcast_ref::<gtk4::ListItem>() else {
+            return;
+        };
+        let Some(item) = list_item.item() else {
+            return;
+        };
+        let Some(boxed) = item.downcast_ref::<gtk4::glib::BoxedAnyObject>() else {
+            return;
+        };
+        let data = boxed.borrow::<T>();
+        list_item.set_child(Some(&build(&data)));
+    });
+    gtk4::ListView::new(Some(gtk4::NoSelection::new(Some(model))), Some(factory))
+}
+
 /// Whether a picked widget is a spell icon, or sits inside one; the
 /// meter-level motion controller uses this to tell a hover that is still
 /// live from a pointer that has moved on to a non-icon part of a row.
@@ -1799,5 +1936,69 @@ mod tests {
             .collect();
 
         assert_eq!(keys, ["Chain Lightning", "Lightning Bolt", "First Seen"]);
+    }
+
+    fn occurrence(metric: MeterMetric, times: &[u64]) -> ProjectedEntry {
+        let mut entry = spell("Moonfire", metric, times.len() as u64);
+        entry.times = times.to_vec();
+        entry
+    }
+
+    /// Scrubbing within a fight keeps the occurrence list identical: the
+    /// virtualized history must keep its key (and so its scroll position)
+    /// across half-second ticks, and change it when a new cast accumulates.
+    #[test]
+    fn occurrence_key_is_stable_between_ticks() {
+        let key = |times: &[u64]| {
+            occurrence_key(
+                MeterMetric::Casts,
+                "Player-1",
+                &occurrence(MeterMetric::Casts, times),
+            )
+        };
+        let frozen = key(&[1_000, 2_000, 3_000]);
+        assert_eq!(key(&[1_000, 2_000, 3_000]), frozen);
+        assert_ne!(key(&[1_000, 2_000, 3_000, 4_000]), frozen);
+        assert_ne!(
+            occurrence_key(
+                MeterMetric::Interrupts,
+                "Player-1",
+                &occurrence(MeterMetric::Casts, &[1_000])
+            ),
+            occurrence_key(
+                MeterMetric::Dispels,
+                "Player-1",
+                &occurrence(MeterMetric::Casts, &[1_000])
+            )
+        );
+    }
+
+    fn death(at_ms: u64, guid: &str) -> MeterDeath {
+        MeterDeath {
+            guid: guid.to_owned(),
+            name: "Boss".to_owned(),
+            at_ms,
+            max_hp: 1,
+            events: Vec::new(),
+        }
+    }
+
+    /// A half-second tick without new deaths must keep the death history
+    /// list; a new death or a different actor filter must not.
+    #[test]
+    fn death_list_key_is_stable_between_ticks() {
+        let first = [death(1_000, "Player-1"), death(2_000, "Player-1")];
+        let refs: Vec<&MeterDeath> = first.iter().collect();
+        let frozen = death_list_key("Player-1", &refs);
+        assert_eq!(death_list_key("Player-1", &refs), frozen);
+        assert_ne!(death_list_key("Player-2", &refs), frozen);
+
+        let grown = [
+            death(1_000, "Player-1"),
+            death(2_000, "Player-1"),
+            death(3_000, "Player-1"),
+        ];
+        let grown_refs: Vec<&MeterDeath> = grown.iter().collect();
+        assert_ne!(death_list_key("Player-1", &grown_refs), frozen);
     }
 }
