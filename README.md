@@ -118,7 +118,8 @@ on the GPU, exactly as it did before.
 
 ## Coming from the AppImage
 
-Press "Check for updates" in the old app, or run the install command above. The
+Run the install command above. The old app's "Check for updates" button no
+longer offers this migration, so the command has to be run manually. The
 AppImage, its launcher and its menu entry are removed, your settings are
 imported once, and your recordings, tags and protected videos stay exactly
 where they are. You will be asked to pick the recording and Logs folders again,

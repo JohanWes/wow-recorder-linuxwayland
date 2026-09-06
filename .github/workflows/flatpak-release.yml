@@ -152,13 +152,8 @@ jobs:
             found { print }
           ' CHANGELOG.md > notes.md
           test -s notes.md
-          # Never mark this release Latest. The shipped 7.7.1 AppImage updater
-          # reads the latest tag, strips a leading "v", and would compare 1.0.0
-          # as older than 7.7.1 -- silencing its update button for good. The
-          # linux-7.7.2-<short-sha> migration release owns that slot instead.
           gh release create "$GITHUB_REF_NAME" \
             --title "Warcraft Recorder $version" \
             --notes-file notes.md \
-            --latest=false \
             candidate/warcraft-recorder.flatpak \
             candidate/warcraft-recorder.flatpak.sha256

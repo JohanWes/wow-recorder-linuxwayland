@@ -87,29 +87,18 @@ intentional. The final AppImage migration imports
 `~/.config/WarcraftRecorder/config-v3.json` once and leaves that file, the
 recording directory, replay directory, and legacy sidecars untouched.
 
-## Migrating the final AppImage users
+## AppImage migration (retired)
 
-The shipped AppImage (7.7.1) checks `releases/latest` on this repository,
-compares the tag's version against its own, and pipes
-`main/install.sh` into bash. That binary cannot be changed any more, so the
-migration is three publications that have to be in place together:
+The 7.7.1 AppImage's automatic update path is no longer fed. It checks
+`releases/latest` on this repository, compares the tag's version against its
+own, and pipes `main/install.sh` into bash. The `linux-7.7.2-<short-sha>`
+migration release that used to hold the **Latest** slot was removed on
+2026-09-06, so `releases/latest` is the newest published `v*` release, which
+the old updater parses as *older* than 7.7.1 and its update button stays
+silent. Do not recreate a migration release to wake that path up.
 
-1. `install.sh` on the **main** branch is the migration helper. The updater
-   always fetches the branch tip, never a release asset.
-2. The signed repository is published at the permanent URL, so
-   `index.flatpakrepo` resolves.
-3. A GitHub release is marked **Latest** whose tag parses as a version above
-   `7.7.1`. The updater strips a leading `linux-`/`v` and a trailing commit
-   hash, so the tag must look like `linux-7.7.2-<short-sha>`. A tag such as
-   `v1.0.0` reads as *older* than 7.7.1 and the update button stays silent,
-   and `linux-7.7.2-migration` parses as `7.7.2-migration` → `7.7.0`. That
-   release carries no assets; it exists to trigger the migration and to hold
-   the announcement.
-
-Publish `v1.0.0` first (that tag drives the signed build), then create the
-`linux-7.7.2-<short-sha>` release from the same main commit and let it be the
-latest one. The native application never checks GitHub, so nothing regresses
-by keeping a 7.x tag as the repository's latest release.
+A straggler migrates by running the install command from the README, which
+still detects an AppImage install on disk and performs the full migration.
 
 `install.sh` is also the installer the README hands to new users, so the
 AppImage steps run only when an AppImage install is actually present. In that
