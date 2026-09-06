@@ -4,6 +4,13 @@ Commit subjects per release, written by `scripts/generate-release-notes.sh` and
 compiled into the binary: the "What's new" dialog reads the section matching the
 running version. Only `## <version>` headings and `- ` lines are parsed.
 
+## 1.0.9
+- Claim the single instance before touching storage
+- Release the spell borrow before clearing it
+- Skip hidden meter refreshes and virtualize the histories
+- Defer seeks until Clapper reports the item ready
+- Fold completions into the library index instead of rescanning
+
 ## 1.0.8
 - Correct the documented application sizes
 - Replace the GSR child when a capture produces no video file

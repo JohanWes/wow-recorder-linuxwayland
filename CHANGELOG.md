@@ -7,6 +7,25 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## 1.0.9 - 2026-09-06
+
+### Fixed
+- A seek issued while Clapper is still prerolling is deferred until the item
+  is ready, instead of dropping it and wedging every later seek for that
+  video.
+- Scrubbing back past the first cast of a selected meter spell no longer
+  panics the process.
+- A second launcher invocation claims the single-instance lock before any
+  storage work, so it no longer moves the first instance's active recording
+  into Recovery.
+
+### Changed
+- Finishing a recording, deleting, and evicting now update the library index
+  in place instead of rescanning the whole library, which blocked the
+  coordinator and allocated heavily on large libraries.
+- A hidden combat meter no longer rebuilds its widgets on every tick, and the
+  occurrence and death histories are virtualized, keeping large meters cheap.
+
 ## 1.0.8 - 2026-09-03
 
 ### Fixed
