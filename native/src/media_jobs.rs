@@ -2,8 +2,8 @@
 
 //! Serialized media and storage jobs.
 //!
-//! One worker thread consumes `MediaJob`s in order: legacy timeline
-//! enrichment, finalizing a finished capture, or cutting a clip. FFmpeg is
+//! One worker thread consumes `MediaJob`s in order: finalizing a finished
+//! capture, or cutting a clip. FFmpeg is
 //! spawned directly and polled through its `-progress` file plus an exclusive
 //! stderr log. Shutdown arrives on a capacity-one control channel: automatic
 //! finalization gets a bounded grace period, user clips are cancelled at once,
@@ -23,7 +23,6 @@ use crate::domain::{
     ActivityDetails, Category, LibraryEntry, MediaFacts, MeterData, RecordingId, TimelineItem,
     TimelineShape, WorkKind, WorkProgress,
 };
-use crate::parser::ParseTimeContext;
 use crate::process;
 use crate::recorder::CaptureArtifacts;
 use crate::storage::{CombinedMedia, Storage, now_unix_ms, sanitize_name, unique_stem};
@@ -60,10 +59,6 @@ impl Default for MediaConfig {
 }
 
 pub enum MediaJob {
-    EnrichLegacyBloodlust {
-        retail_log_dirs: Vec<PathBuf>,
-        context: ParseTimeContext,
-    },
     FinalizeRecording {
         draft: Box<RecordingDraft>,
         artifacts: CaptureArtifacts,
@@ -79,9 +74,6 @@ pub enum MediaJob {
 impl MediaJob {
     pub fn kind(&self) -> WorkKind {
         match self {
-            Self::EnrichLegacyBloodlust { .. } => {
-                unreachable!("maintenance jobs do not enter the media work queues")
-            }
             Self::FinalizeRecording { .. } => WorkKind::Finalize,
             Self::CreateClip { .. } => WorkKind::Clip,
         }
@@ -89,8 +81,6 @@ impl MediaJob {
 }
 
 pub enum MediaControl {
-    /// Stop startup maintenance so finalization can use the sole worker.
-    CancelMaintenance,
     Shutdown {
         pending_finalizations: Vec<MediaJob>,
     },
@@ -98,10 +88,6 @@ pub enum MediaControl {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MediaEvent {
-    TimelineEnriched {
-        enriched: usize,
-        failures: Vec<String>,
-    },
     Progress(WorkProgress),
     Completed {
         kind: WorkKind,
@@ -171,7 +157,6 @@ impl MediaWorker {
             Ok(MediaControl::Shutdown {
                 pending_finalizations,
             }) => self.begin_shutdown(pending_finalizations),
-            Ok(MediaControl::CancelMaintenance) => {}
             Err(TryRecvError::Disconnected) => {
                 self.begin_shutdown(Vec::new());
             }
@@ -191,52 +176,8 @@ impl MediaWorker {
     }
 
     fn run_job(&mut self, job: MediaJob) {
-        let job = match job {
-            MediaJob::EnrichLegacyBloodlust {
-                retail_log_dirs,
-                context,
-            } => {
-                let control = &self.control;
-                let mut shutdown_finalizations = None;
-                let mut cancellation_observed = false;
-                let report =
-                    self.storage
-                        .enrich_legacy_bloodlust(&retail_log_dirs, context, || {
-                            if cancellation_observed {
-                                return true;
-                            }
-                            cancellation_observed = match control.try_recv() {
-                                Ok(MediaControl::CancelMaintenance) => true,
-                                Ok(MediaControl::Shutdown {
-                                    pending_finalizations,
-                                }) => {
-                                    shutdown_finalizations = Some(pending_finalizations);
-                                    true
-                                }
-                                Err(TryRecvError::Disconnected) => {
-                                    shutdown_finalizations = Some(Vec::new());
-                                    true
-                                }
-                                Err(TryRecvError::Empty) => false,
-                            };
-                            cancellation_observed
-                        });
-                if let Some(pending) = shutdown_finalizations {
-                    self.begin_shutdown(pending);
-                }
-                self.emit(MediaEvent::TimelineEnriched {
-                    enriched: report.enriched,
-                    failures: report.failures,
-                });
-                return;
-            }
-            job => job,
-        };
         let kind = job.kind();
         let outcome = match job {
-            MediaJob::EnrichLegacyBloodlust { .. } => {
-                unreachable!("maintenance job returned from the early match")
-            }
             MediaJob::FinalizeRecording {
                 draft,
                 artifacts,
@@ -605,7 +546,6 @@ impl MediaWorker {
                             _ => Instant::now(),
                         });
                     }
-                    Ok(MediaControl::CancelMaintenance) => {}
                     Err(RecvTimeoutError::Disconnected) => {
                         self.begin_shutdown(Vec::new());
                         interrupt_at = Some(match kind {
@@ -647,7 +587,7 @@ impl MediaWorker {
                 Ok(None) => {}
                 Err(error) => {
                     return FfmpegOutcome::Failed {
-                        message: format!("wait for FFmpeg: {error}"),
+                        message: format!("spawning FFmpeg: {error}"),
                     };
                 }
             }
@@ -1260,55 +1200,6 @@ mod tests {
                 has_content: true,
             },
         }
-    }
-
-    #[test]
-    fn shutdown_cancels_maintenance_and_preserves_carried_finalization() {
-        let harness = Harness::new("maintenance-shutdown");
-        let logs = harness.root.join("logs");
-        fs::create_dir_all(&logs).unwrap();
-        fs::write(harness.library().join("legacy.mp4"), b"media").unwrap();
-        fs::write(
-            harness.library().join("legacy.json"),
-            r#"{"category":"Mythic+","duration":120,"start":1784396963000}"#,
-        )
-        .unwrap();
-        fs::write(logs.join("WoWCombatLog.txt"), "irrelevant\n".repeat(2048)).unwrap();
-
-        let (_jobs, jobs_rx) = std::sync::mpsc::channel();
-        let (control, control_rx) = sync_channel(1);
-        let (events_tx, events) = std::sync::mpsc::channel();
-        let storage = Storage::new(harness.library(), harness.root.join("capture"));
-        let mut worker = MediaWorker::new(
-            MediaConfig {
-                ffmpeg: fake_ffmpeg(),
-                utc_offset_minutes: 120,
-                poll_interval: Duration::from_millis(20),
-                finalize_grace: Duration::from_secs(5),
-                sigint_grace: Duration::from_millis(400),
-            },
-            storage,
-            jobs_rx,
-            control_rx,
-            events_tx,
-        );
-        control
-            .send(MediaControl::Shutdown {
-                pending_finalizations: vec![finalize_job(&harness, true)],
-            })
-            .unwrap();
-
-        worker.run_job(MediaJob::EnrichLegacyBloodlust {
-            retail_log_dirs: vec![logs],
-            context: ParseTimeContext::new(2026, 120),
-        });
-
-        assert!(worker.shutdown_at.is_some());
-        assert_eq!(worker.shutdown_finalizations.len(), 1);
-        assert!(matches!(
-            events.try_recv(),
-            Ok(MediaEvent::TimelineEnriched { enriched: 0, .. })
-        ));
     }
 
     #[test]

@@ -12,6 +12,9 @@ project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 ### Removed
 - The AppImage migration path and the one-time Electron config import with its
   post-migration notice are gone. Every user is on the Flatpak now.
+- The one-time startup backfill that rewrote old Electron sidecars with
+  Bloodlust timelines parsed from historical combat logs is gone. Sidecars
+  that were already enriched keep their timeline.
 
 ## 1.0.9 - 2026-09-06
 

@@ -313,7 +313,6 @@ pub struct Coordinator {
     media_control: SyncSender<MediaControl>,
     media_events: Receiver<MediaEvent>,
     media_join: Option<JoinHandle<()>>,
-    maintenance_busy: bool,
     finalize_queue: VecDeque<MediaJob>,
     user_queue: VecDeque<MediaJob>,
     media_busy: Option<WorkKind>,
@@ -383,7 +382,6 @@ impl Coordinator {
             media_control,
             media_events,
             media_join: Some(media_join),
-            maintenance_busy: false,
             finalize_queue: VecDeque::new(),
             user_queue: VecDeque::new(),
             media_busy: None,
@@ -440,30 +438,8 @@ impl Coordinator {
             self.arm();
         }
         self.dirty = true;
-        // Make the armed recorder available before the optional one-time
-        // historical-log pass reads large source files.
+        // Make the armed recorder visible before the event loop takes over.
         self.publish();
-
-        let retail_logs: Vec<PathBuf> = enabled_log_sources(&self.config)
-            .into_iter()
-            .filter(|(field, flavor, _)| *field == "retail" && *flavor == GameFlavor::Retail)
-            .map(|(_, _, source)| source)
-            .collect();
-        let context = ParseTimeContext::new(self.setup.year, self.setup.media.utc_offset_minutes);
-        if !retail_logs.is_empty() {
-            match self.media_jobs.try_send(MediaJob::EnrichLegacyBloodlust {
-                retail_log_dirs: retail_logs,
-                context,
-            }) {
-                Ok(()) => self.maintenance_busy = true,
-                Err(TrySendError::Full(_)) => {
-                    tracing::warn!("media worker was busy before legacy timeline enrichment")
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    tracing::warn!("media worker unavailable for legacy timeline enrichment")
-                }
-            }
-        }
     }
 
     /// One iteration of the coordinator loop. Returns `false` once stopped.
@@ -1137,9 +1113,6 @@ impl Coordinator {
             artifacts,
             facts: self.media_facts(),
         });
-        if self.maintenance_busy {
-            let _ = self.media_control.try_send(MediaControl::CancelMaintenance);
-        }
     }
 
     fn media_facts(&self) -> MediaFacts {
@@ -1157,9 +1130,8 @@ impl Coordinator {
     /// Finalization is always chosen before queued user work, and only one job
     /// is in flight at a time. A capture that has been asked to stop counts as
     /// queued finalization: its artifacts are moments away, and letting a clip
-    /// jump the queue in that window would reorder the library.
     fn dispatch_media(&mut self) {
-        if self.media_busy.is_some() || self.maintenance_busy {
+        if self.media_busy.is_some() {
             return;
         }
         let finalization_pending = matches!(self.ending, Some(EndingCapture::Finalize(_)));
@@ -1199,16 +1171,6 @@ impl Coordinator {
         while let Ok(event) = self.media_events.try_recv() {
             self.dirty = true;
             match event {
-                MediaEvent::TimelineEnriched { enriched, failures } => {
-                    self.maintenance_busy = false;
-                    if enriched != 0 {
-                        tracing::info!(sidecars = enriched, "enriched legacy Bloodlust timelines");
-                        self.rescan();
-                    }
-                    for failure in failures {
-                        tracing::warn!(%failure, "legacy Bloodlust enrichment failed");
-                    }
-                }
                 MediaEvent::Progress(progress) => self.work = Some(progress),
                 MediaEvent::Completed { entry, .. } => {
                     self.media_busy = None;
@@ -1261,9 +1223,6 @@ impl Coordinator {
             start_ms: range.start_ms,
             end_ms: range.end_ms,
         });
-        if self.maintenance_busy {
-            let _ = self.media_control.try_send(MediaControl::CancelMaintenance);
-        }
     }
 
     // --- Library mutations ---
@@ -1725,8 +1684,8 @@ impl Coordinator {
         // Finalization gets the media worker's grace period; user jobs cancel.
         self.user_queue.clear();
         // Transfer every not-yet-submitted finalization in the shutdown
-        // message. This cannot race with the capacity-one job channel when
-        // enrichment or another media job has not been received yet.
+        // message. This cannot race with the capacity-one job channel: a job
+        // sent from `dispatch_media` is still in flight, not in the queue.
         let pending_finalizations = self.finalize_queue.drain(..).collect();
         let _ = self.media_control.send(MediaControl::Shutdown {
             pending_finalizations,

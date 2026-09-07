@@ -24,6 +24,13 @@
       "encounterId": 2926
     }
   ],
+  "bloodlustTimeline": [
+    {
+      "timestampMs": 1772330120000,
+      "spellId": 390386,
+      "spellName": "Fury of the Aspects"
+    }
+  ],
   "deaths": [
     {
       "name": "Testone",
