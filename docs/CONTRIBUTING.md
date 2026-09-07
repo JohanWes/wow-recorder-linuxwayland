@@ -23,8 +23,8 @@ runtime, database, generic IPC layer, thumbnail cache, or compatibility
 wrapper. JSON sidecars and the filesystem remain the library source of truth.
 
 The native test fixtures and goldens live under `tests/native/`. The legacy
-sidecar/config fixtures are retained because they prove the one-way import and
-compatible tag/protection patch behavior.
+sidecar fixtures are retained because they prove the compatible tag/protection
+patch behavior.
 
 ## Packaging
 

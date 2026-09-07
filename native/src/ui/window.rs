@@ -22,8 +22,7 @@ use warcraft_recorder::storage::now_unix_ms;
 
 use super::library::{Library, Selection};
 use super::operational_actions::{
-    ManualBar, present_migration_notice, present_release_notes, present_test_dialog,
-    present_update_dialog, release_notes,
+    ManualBar, present_release_notes, present_test_dialog, present_update_dialog, release_notes,
 };
 use super::player::Player;
 use super::settings::Settings;
@@ -178,8 +177,6 @@ pub struct Shell {
     tray_available: Rc<Cell<bool>>,
     hold_guard: Rc<RefCell<Option<gtk4::gio::ApplicationHoldGuard>>>,
     sink: ActionSink,
-    /// One migration notice per process, even if the acknowledgement is lost.
-    migration_notice_shown: Cell<bool>,
     /// One release-notes dialog per process, on the same terms.
     release_notes_shown: Cell<bool>,
 }
@@ -449,7 +446,6 @@ impl Shell {
             tray_available,
             hold_guard: Rc::new(RefCell::new(None)),
             sink,
-            migration_notice_shown: Cell::new(false),
             release_notes_shown: Cell::new(false),
         };
         shell.connect_close_request();
@@ -535,13 +531,8 @@ impl Shell {
         }
 
         // Last, so a notice lands over a window that already shows the real
-        // state behind it. Never both at once: a migrating install gets the
-        // migration notice now and the release notes on its next start.
-        if snapshot.config.migration_notice_pending {
-            if !self.migration_notice_shown.replace(true) {
-                present_migration_notice(self.window.upcast_ref(), Rc::clone(&self.sink));
-            }
-        } else if snapshot.config.last_seen_version != warcraft_recorder::VERSION
+        // state behind it.
+        if snapshot.config.last_seen_version != warcraft_recorder::VERSION
             && !self.release_notes_shown.replace(true)
         {
             let notes = release_notes(warcraft_recorder::VERSION);

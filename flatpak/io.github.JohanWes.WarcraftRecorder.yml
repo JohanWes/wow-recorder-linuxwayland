@@ -19,8 +19,6 @@ finish-args:
   - --device=dri
   # ksni registers only with the desktop's StatusNotifierWatcher.
   - --talk-name=org.kde.StatusNotifierWatcher
-  # One-way import of Electron's known config; writes are forbidden.
-  - --filesystem=xdg-config/WarcraftRecorder:ro
 
 cleanup:
   - /include

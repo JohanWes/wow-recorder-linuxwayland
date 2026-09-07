@@ -225,7 +225,7 @@ pub fn present_test_dialog(parent: &gtk4::Widget, sink: ActionSink, ready: bool)
 }
 
 /// The published install script: adds the signed Flatpak remote and installs
-/// or updates the app. The same script drives the AppImage→Flatpak migration.
+/// or updates the app.
 const UPDATE_SCRIPT_URL: &str =
     "https://raw.githubusercontent.com/JohanWes/wow-recorder-linuxwayland/main/install.sh";
 
@@ -350,52 +350,6 @@ pub fn present_reselect_dialog(parent: &gtk4::Widget, sink: ActionSink) {
     dialog.set_close_response("cancel");
     dialog.connect_response(Some("reselect"), move |_, _| {
         sink(ShellAction::Command(Command::ReselectCaptureTarget));
-    });
-    dialog.present(Some(parent));
-}
-
-/// Shown once after the one-way legacy import. The two folders the sandbox
-/// cannot reach until the user picks them are the whole point of the dialog,
-/// so they are called out in the error color rather than buried in prose.
-pub fn present_migration_notice(parent: &gtk4::Widget, sink: ActionSink) {
-    let dialog = adw::AlertDialog::new(
-        Some("Warcraft Recorder is now a native app"),
-        Some(
-            "This version was rebuilt from scratch in Rust: it starts faster, uses far less \
-             memory, and no longer carries a browser engine around.\n\n\
-             Your recordings, tags and protected videos are untouched, and your old settings \
-             were imported. The app now runs sandboxed, so it only reaches folders you pick \
-             yourself:",
-        ),
-    );
-    // The alert body is centered, so the callouts are too.
-    let actions = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-    for action in [
-        "Choose your recording folder again in Settings",
-        "Choose your World of Warcraft logs folder again in Settings",
-    ] {
-        let label = gtk4::Label::new(Some(action));
-        label.set_wrap(true);
-        label.set_justify(gtk4::Justification::Center);
-        label.add_css_class("error");
-        label.add_css_class("heading");
-        actions.append(&label);
-    }
-    let closing = gtk4::Label::new(Some("Your library comes back as soon as they are set."));
-    closing.set_wrap(true);
-    closing.set_justify(gtk4::Justification::Center);
-    closing.set_margin_top(6);
-    actions.append(&closing);
-    dialog.set_extra_child(Some(&actions));
-    dialog.add_responses(&[("ok", "Later"), ("settings", "Open Settings")]);
-    dialog.set_response_appearance("settings", adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("settings"));
-    dialog.set_close_response("ok");
-    dialog.connect_response(None, move |_, response| {
-        sink(ShellAction::Command(Command::DismissMigrationNotice));
-        if response == "settings" {
-            sink(ShellAction::OpenSettings);
-        }
     });
     dialog.present(Some(parent));
 }

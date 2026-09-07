@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Native configuration persistence and legacy import.
+//! Native configuration persistence.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::OpenOptionsExt;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 
 use crate::domain::{
     Category, Codec, DeathMarkerVisibility, MarkerVisibility, RaidDifficulty, ReplayStorage,
@@ -25,8 +24,6 @@ use crate::domain::{
 pub const CONFIG_VERSION: u32 = 1;
 pub const APP_ID: &str = "io.github.JohanWes.WarcraftRecorder";
 pub const CONFIG_FILENAME: &str = "config.json";
-pub const LEGACY_CONFIG_DIR: &str = "WarcraftRecorder";
-pub const LEGACY_CONFIG_FILENAME: &str = "config-v3.json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -280,12 +277,6 @@ pub struct Config {
     pub interface: InterfaceSettings,
     pub validate_log_paths: bool,
     pub first_time_setup_complete: bool,
-    /// Set by the one-way legacy import and cleared once the user has seen
-    /// the migration notice. It outlives the importing launch on purpose: a
-    /// user who closes the window immediately still gets told which folders
-    /// the sandbox needs re-picked.
-    #[serde(default)]
-    pub migration_notice_pending: bool,
     /// The version whose release notes were last acknowledged. Empty until
     /// the user closes the "What's new" dialog, so an install that predates
     /// the dialog still gets one for the version it just updated to.
@@ -305,7 +296,6 @@ impl Default for Config {
             interface: InterfaceSettings::default(),
             validate_log_paths: true,
             first_time_setup_complete: false,
-            migration_notice_pending: false,
             // A clean install has no earlier version to report on.
             last_seen_version: crate::VERSION.to_owned(),
         }
@@ -645,10 +635,6 @@ pub fn config_path_from_environment() -> Result<PathBuf, ConfigError> {
     config_path_from_values(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME"))
 }
 
-pub fn legacy_config_path_from_environment() -> Result<PathBuf, ConfigError> {
-    legacy_config_path_from_values(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME"))
-}
-
 fn config_path_from_values(
     xdg_config_home: Option<OsString>,
     home: Option<OsString>,
@@ -656,15 +642,6 @@ fn config_path_from_values(
     Ok(config_root(xdg_config_home, home)?
         .join(APP_ID)
         .join(CONFIG_FILENAME))
-}
-
-fn legacy_config_path_from_values(
-    xdg_config_home: Option<OsString>,
-    home: Option<OsString>,
-) -> Result<PathBuf, ConfigError> {
-    Ok(config_root(xdg_config_home, home)?
-        .join(LEGACY_CONFIG_DIR)
-        .join(LEGACY_CONFIG_FILENAME))
 }
 
 fn config_root(
@@ -682,343 +659,6 @@ fn config_root(
 
 fn nonempty_os(value: Option<OsString>) -> Option<OsString> {
     value.filter(|value| !value.is_empty())
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ImportWarning {
-    pub key: String,
-    pub message: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConfigOrigin {
-    Native,
-    LegacyImported,
-    Default,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LoadedConfig {
-    pub config: Config,
-    pub origin: ConfigOrigin,
-    pub import_warnings: Vec<ImportWarning>,
-}
-
-pub fn load_or_import(native_path: &Path, legacy_path: &Path) -> Result<LoadedConfig, ConfigError> {
-    match Config::load(native_path) {
-        Ok(config) => {
-            return Ok(LoadedConfig {
-                config,
-                origin: ConfigOrigin::Native,
-                import_warnings: Vec::new(),
-            });
-        }
-        Err(ConfigError::NotFound(_)) => {}
-        Err(error) => return Err(error),
-    }
-
-    let legacy_bytes = match fs::read(legacy_path) {
-        Ok(bytes) => bytes,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            return Ok(LoadedConfig {
-                config: Config::default(),
-                origin: ConfigOrigin::Default,
-                import_warnings: Vec::new(),
-            });
-        }
-        Err(source) => {
-            return Err(ConfigError::Io {
-                operation: "read legacy config",
-                path: legacy_path.to_owned(),
-                source,
-            });
-        }
-    };
-
-    let value: Value =
-        serde_json::from_slice(&legacy_bytes).map_err(|source| ConfigError::InvalidJson {
-            path: legacy_path.to_owned(),
-            source,
-        })?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| ConfigError::LegacyRootNotObject {
-            path: legacy_path.to_owned(),
-        })?;
-    let imported = import_legacy(object);
-    write_atomic(&imported.config, native_path)?;
-    Ok(LoadedConfig {
-        config: imported.config,
-        origin: ConfigOrigin::LegacyImported,
-        import_warnings: imported.warnings,
-    })
-}
-
-struct LegacyImport {
-    config: Config,
-    warnings: Vec<ImportWarning>,
-}
-
-fn import_legacy(values: &Map<String, Value>) -> LegacyImport {
-    let mut reader = LegacyReader::new(values);
-
-    let max_storage = reader.integer("maxStorage", 50, Some(0), None);
-    let selected_category =
-        category_from_index(reader.integer("selectedCategory", 1, Some(0), Some(9)));
-    let death_markers = match reader.integer("deathMarkers", 1, Some(0), Some(2)) {
-        0 => DeathMarkerVisibility::None,
-        1 => DeathMarkerVisibility::Own,
-        2 => DeathMarkerVisibility::All,
-        _ => unreachable!("legacy integer helper enforces death marker range"),
-    };
-    let output_audio = if values.contains_key("linuxGsrAudioOutput") {
-        reader.string("linuxGsrAudioOutput", "default_output")
-    } else {
-        reader.string("linuxGsrAudio", "default_output")
-    };
-    let input_audio = reader.string("linuxGsrAudioInput", "");
-
-    let mut config = Config {
-        version: CONFIG_VERSION,
-        flavors: FlavorSettings {
-            retail: FlavorConfig {
-                enabled: reader.boolean("recordRetail", false),
-                log_dir: AuthorizedPath::imported(reader.string("retailLogPath", "")),
-            },
-            retail_ptr: FlavorConfig {
-                enabled: reader.boolean("recordRetailPtr", false),
-                log_dir: AuthorizedPath::imported(reader.string("retailPtrLogPath", "")),
-            },
-            classic: FlavorConfig {
-                enabled: reader.boolean("recordClassic", false),
-                log_dir: AuthorizedPath::imported(reader.string("classicLogPath", "")),
-            },
-            classic_ptr: FlavorConfig {
-                enabled: reader.boolean("recordClassicPtr", false),
-                log_dir: AuthorizedPath::imported(reader.string("classicPtrLogPath", "")),
-            },
-            era: FlavorConfig {
-                enabled: reader.boolean("recordEra", false),
-                log_dir: AuthorizedPath::imported(reader.string("eraLogPath", "")),
-            },
-        },
-        activities: ActivitySettings {
-            record_raids: reader.boolean("recordRaids", true),
-            record_dungeons: reader.boolean("recordDungeons", true),
-            record_two_v_two: reader.boolean("recordTwoVTwo", true),
-            record_three_v_three: reader.boolean("recordThreeVThree", true),
-            record_five_v_five: reader.boolean("recordFiveVFive", true),
-            record_skirmish: reader.boolean("recordSkirmish", true),
-            record_solo_shuffle: reader.boolean("recordSoloShuffle", true),
-            record_battlegrounds: reader.boolean("recordBattlegrounds", true),
-            record_challenge_modes: reader.boolean("recordChallengeModes", true),
-            min_keystone_level: reader.integer("minKeystoneLevel", 2, Some(0), None) as u32,
-            min_raid_difficulty: reader.raid_difficulty("minRaidDifficulty"),
-            min_raid_duration_seconds: reader.integer(
-                "minEncounterDuration",
-                15,
-                Some(i32::MIN.into()),
-                Some(10_000),
-            ) as i32,
-            current_raid_only: reader.boolean("recordCurrentRaidEncountersOnly", false),
-            raid_overrun_seconds: reader.integer("raidOverrun", 15, Some(0), Some(60)) as u32,
-            dungeon_overrun_seconds: reader.integer("dungeonOverrun", 5, Some(0), Some(60)) as u32,
-        },
-        storage: StorageSettings {
-            recording_dir: AuthorizedPath::imported(reader.string("storagePath", "")),
-            separate_buffer_dir: reader.boolean("separateBufferPath", false),
-            buffer_dir: AuthorizedPath::imported(reader.string("bufferStoragePath", "")),
-            limit: if max_storage == 0 {
-                StorageLimit::Unlimited
-            } else {
-                StorageLimit::Gib(
-                    NonZeroU64::new(max_storage as u64)
-                        .expect("positive legacy storage limit is nonzero"),
-                )
-            },
-        },
-        capture: CaptureSettings {
-            fps: reader.integer("obsFPS", 60, Some(15), Some(60)) as u32,
-            codec: reader.codec("linuxGsrCodec"),
-            bitrate_kbps: reader.integer("linuxGsrBitrateKbps", 20_000, Some(1_000), Some(200_000))
-                as u32,
-            replay_buffer_seconds: reader.integer("linuxGsrBufferSeconds", 180, Some(30), Some(600))
-                as u32,
-            extra_lead_in_seconds: reader.integer("linuxGsrLeadInSeconds", 0, Some(0), Some(30))
-                as u32,
-            replay_storage: reader.replay_storage("linuxGsrReplayStorage"),
-            capture_cursor: reader.boolean("captureCursor", false),
-            audio_output: output_audio,
-            audio_input: (!input_audio.is_empty()).then_some(input_audio),
-            capture_target_token: None,
-        },
-        manual: ManualSettings {
-            enabled: reader.boolean("manualRecord", false),
-            sound: reader.boolean("manualRecordSoundAlert", true),
-        },
-        interface: InterfaceSettings {
-            hide_empty_categories: reader.boolean("hideEmptyCategories", false),
-            death_markers,
-            encounter_markers: visibility(reader.boolean("encounterMarkers", true)),
-            round_markers: visibility(reader.boolean("roundMarkers", true)),
-            selected_category,
-            minimize_to_tray: reader.boolean("minimizeToTray", true),
-            close_to_tray: reader.boolean("minimizeOnQuit", true),
-            start_minimized: reader.boolean("startMinimized", false),
-            // Nothing to carry over; an import is still a clean start.
-            layout: LayoutSettings::default(),
-        },
-        validate_log_paths: reader.boolean("validateLogPaths", true),
-        first_time_setup_complete: !reader.boolean("firstTimeSetup", true),
-        // Only an import raises this: a clean install has nothing to explain.
-        migration_notice_pending: true,
-        // Left unset: the migration notice owns this launch, and the release
-        // notes then introduce the native version on the next one.
-        last_seen_version: String::new(),
-    };
-
-    if !config.validate().is_empty() {
-        config.first_time_setup_complete = false;
-    }
-
-    LegacyImport {
-        config,
-        warnings: reader.warnings,
-    }
-}
-
-fn visibility(value: bool) -> MarkerVisibility {
-    if value {
-        MarkerVisibility::Visible
-    } else {
-        MarkerVisibility::Hidden
-    }
-}
-
-fn category_from_index(index: i64) -> Category {
-    match index {
-        0 => Category::TwoVTwo,
-        1 => Category::ThreeVThree,
-        2 => Category::FiveVFive,
-        3 => Category::Skirmish,
-        4 => Category::SoloShuffle,
-        5 => Category::MythicPlus,
-        6 => Category::Raids,
-        7 => Category::Battlegrounds,
-        8 => Category::Manual,
-        9 => Category::Clip,
-        _ => unreachable!("legacy selected-category index is range checked"),
-    }
-}
-
-struct LegacyReader<'a> {
-    values: &'a Map<String, Value>,
-    warned: BTreeSet<String>,
-    warnings: Vec<ImportWarning>,
-}
-
-impl<'a> LegacyReader<'a> {
-    fn new(values: &'a Map<String, Value>) -> Self {
-        Self {
-            values,
-            warned: BTreeSet::new(),
-            warnings: Vec::new(),
-        }
-    }
-
-    fn boolean(&mut self, key: &str, default: bool) -> bool {
-        match self.values.get(key) {
-            None => default,
-            Some(Value::Bool(value)) => *value,
-            Some(_) => {
-                self.warn(key, "Expected a boolean; used the legacy default.");
-                default
-            }
-        }
-    }
-
-    fn string(&mut self, key: &str, default: &str) -> String {
-        match self.values.get(key) {
-            None => default.to_owned(),
-            Some(Value::String(value)) => value.clone(),
-            Some(_) => {
-                self.warn(key, "Expected a string; used the legacy default.");
-                default.to_owned()
-            }
-        }
-    }
-
-    fn integer(
-        &mut self,
-        key: &str,
-        default: i64,
-        minimum: Option<i64>,
-        maximum: Option<i64>,
-    ) -> i64 {
-        let Some(value) = self.values.get(key) else {
-            return default;
-        };
-        let Some(value) = value.as_i64() else {
-            self.warn(key, "Expected an integer; used the legacy default.");
-            return default;
-        };
-        if minimum.is_some_and(|minimum| value < minimum)
-            || maximum.is_some_and(|maximum| value > maximum)
-        {
-            self.warn(
-                key,
-                "Value was outside its supported range; used the legacy default.",
-            );
-            default
-        } else {
-            value
-        }
-    }
-
-    fn codec(&mut self, key: &str) -> Codec {
-        match self.string(key, "h264").to_ascii_lowercase().as_str() {
-            "h264" => Codec::H264,
-            "hevc" => Codec::Hevc,
-            "av1" => Codec::Av1,
-            _ => {
-                self.warn(key, "Unsupported codec; used h264.");
-                Codec::H264
-            }
-        }
-    }
-
-    fn replay_storage(&mut self, key: &str) -> ReplayStorage {
-        match self.string(key, "ram").to_ascii_lowercase().as_str() {
-            "ram" => ReplayStorage::Ram,
-            "disk" => ReplayStorage::Disk,
-            _ => {
-                self.warn(key, "Unsupported replay storage; used ram.");
-                ReplayStorage::Ram
-            }
-        }
-    }
-
-    fn raid_difficulty(&mut self, key: &str) -> RaidDifficulty {
-        match self.string(key, "LFR").to_ascii_lowercase().as_str() {
-            "lfr" => RaidDifficulty::Lfr,
-            "normal" => RaidDifficulty::Normal,
-            "heroic" => RaidDifficulty::Heroic,
-            "mythic" => RaidDifficulty::Mythic,
-            _ => {
-                self.warn(key, "Unsupported raid difficulty; used LFR.");
-                RaidDifficulty::Lfr
-            }
-        }
-    }
-
-    fn warn(&mut self, key: &str, message: &str) {
-        if self.warned.insert(key.to_owned()) {
-            self.warnings.push(ImportWarning {
-                key: key.to_owned(),
-                message: message.to_owned(),
-            });
-        }
-    }
 }
 
 fn map_read_error(path: &Path, source: io::Error) -> ConfigError {
@@ -1039,9 +679,6 @@ pub enum ConfigError {
     InvalidJson {
         path: PathBuf,
         source: serde_json::Error,
-    },
-    LegacyRootNotObject {
-        path: PathBuf,
     },
     Validation(Vec<ValidationProblem>),
     Io {
@@ -1070,13 +707,6 @@ impl fmt::Display for ConfigError {
             Self::NotFound(path) => write!(formatter, "config not found: {}", path.display()),
             Self::InvalidJson { path, .. } => {
                 write!(formatter, "invalid JSON in {}", path.display())
-            }
-            Self::LegacyRootNotObject { path } => {
-                write!(
-                    formatter,
-                    "legacy config is not an object: {}",
-                    path.display()
-                )
             }
             Self::Validation(problems) => {
                 write!(
@@ -1282,153 +912,6 @@ mod tests {
     }
 
     #[test]
-    fn full_legacy_config_migrates_to_golden_without_touching_source() {
-        let directory = temporary_directory("legacy-import");
-        let native_path = directory.join("native/config.json");
-        let legacy_path = directory.join("legacy/config-v3.json");
-        fs::create_dir_all(legacy_path.parent().expect("legacy parent"))
-            .expect("create legacy parent");
-        let legacy = include_bytes!("../../tests/native/fixtures/legacy/config-full.json");
-        fs::write(&legacy_path, legacy).expect("write legacy fixture");
-
-        let loaded = load_or_import(&native_path, &legacy_path).expect("import legacy config");
-        assert_eq!(loaded.origin, ConfigOrigin::LegacyImported);
-        assert!(loaded.import_warnings.is_empty());
-        assert_eq!(
-            fs::read(&legacy_path).expect("read legacy after import"),
-            legacy
-        );
-        assert_eq!(
-            serde_json::to_string_pretty(&loaded.config).expect("serialize imported config"),
-            include_str!("../../tests/native/fixtures/legacy/config-full.expected.json").trim_end()
-        );
-        assert_eq!(
-            loaded.config.storage.recording_dir.authorization,
-            PathAuthorization::ImportedInactive
-        );
-        assert!(loaded.config.validate().iter().any(|problem| {
-            problem.field == "storage.recording_dir" && problem.message.contains("authorize access")
-        }));
-
-        fs::write(&legacy_path, b"not json anymore").expect("change legacy marker file");
-        assert_eq!(
-            load_or_import(&native_path, &legacy_path)
-                .expect("native config is one-way marker")
-                .origin,
-            ConfigOrigin::Native
-        );
-
-        fs::remove_dir_all(directory).expect("remove test directory");
-    }
-
-    #[test]
-    fn equal_imported_hash_paths_reload_as_inactive_setup_values() {
-        let directory = temporary_directory("legacy-equal-hash-paths");
-        let native_path = directory.join("native/config.json");
-        let legacy_path = directory.join("legacy/config-v3.json");
-        fs::create_dir_all(legacy_path.parent().expect("legacy parent"))
-            .expect("create legacy parent");
-        fs::write(
-            &legacy_path,
-            br##"{
-                "storagePath":"/portal/#shared",
-                "separateBufferPath":true,
-                "bufferStoragePath":"/portal/#shared",
-                "firstTimeSetup":false
-            }"##,
-        )
-        .expect("write equal-path legacy config");
-
-        let imported = load_or_import(&native_path, &legacy_path).expect("import equal paths");
-        assert_eq!(imported.origin, ConfigOrigin::LegacyImported);
-        assert_eq!(
-            imported.config.storage.recording_dir,
-            AuthorizedPath::imported("/portal/#shared")
-        );
-        assert_eq!(
-            imported.config.storage.buffer_dir,
-            AuthorizedPath::imported("/portal/#shared")
-        );
-        assert!(!imported.config.first_time_setup_complete);
-        assert!(imported.config.validate().iter().any(|problem| {
-            problem.field == "storage.recording_dir" && problem.message.contains("authorize")
-        }));
-
-        assert_eq!(
-            Config::load(&native_path).expect("reload imported native marker"),
-            imported.config
-        );
-
-        fs::remove_dir_all(directory).expect("remove test directory");
-    }
-
-    #[test]
-    fn zero_legacy_storage_limit_stays_unlimited_after_native_round_trip() {
-        let value: Value = serde_json::from_str(include_str!(
-            "../../tests/native/fixtures/legacy/config-zero-storage.json"
-        ))
-        .expect("parse zero storage fixture");
-        let imported = import_legacy(value.as_object().expect("fixture object"));
-        assert_eq!(imported.config.storage.limit, StorageLimit::Unlimited);
-        let encoded = serde_json::to_string(&imported.config).expect("serialize native config");
-        let decoded: Config = serde_json::from_str(&encoded).expect("deserialize native config");
-        assert_eq!(decoded.storage.limit, StorageLimit::Unlimited);
-
-        let negative: Value =
-            serde_json::from_str(r#"{"maxStorage":-1}"#).expect("parse negative storage value");
-        let rejected = import_legacy(negative.as_object().expect("negative storage object"));
-        assert_eq!(
-            rejected.config.storage.limit,
-            StorageLimit::Gib(NonZeroU64::new(50).expect("50 is nonzero"))
-        );
-        assert_eq!(rejected.warnings[0].key, "maxStorage");
-    }
-
-    #[test]
-    fn legacy_keystone_level_bounds_are_mapped() {
-        for level in [0, 1] {
-            let value: Value = serde_json::from_value(serde_json::json!({
-                "minKeystoneLevel": level
-            }))
-            .expect("build valid keystone level");
-            let imported = import_legacy(value.as_object().expect("legacy object"));
-
-            assert_eq!(imported.config.activities.min_keystone_level, level);
-            assert!(imported.warnings.is_empty());
-            assert!(
-                !imported
-                    .config
-                    .validate()
-                    .iter()
-                    .any(|problem| problem.field == "activities.min_keystone_level")
-            );
-
-            let encoded = serde_json::to_string(&imported.config).expect("serialize native config");
-            let decoded: Config =
-                serde_json::from_str(&encoded).expect("deserialize native config");
-            assert_eq!(
-                decoded.activities.min_keystone_level,
-                imported.config.activities.min_keystone_level
-            );
-        }
-
-        let value: Value = serde_json::from_value(serde_json::json!({
-            "minKeystoneLevel": -1
-        }))
-        .expect("build negative keystone level");
-        let imported = import_legacy(value.as_object().expect("legacy object"));
-        assert_eq!(imported.config.activities.min_keystone_level, 2);
-        assert_eq!(
-            imported.warnings,
-            [ImportWarning {
-                key: "minKeystoneLevel".to_owned(),
-                message: "Value was outside its supported range; used the legacy default."
-                    .to_owned(),
-            }]
-        );
-    }
-
-    #[test]
     fn invalid_native_json_and_failed_save_preserve_existing_file() {
         let directory = temporary_directory("config-failure");
         let invalid_path = directory.join("invalid.json");
@@ -1485,62 +968,16 @@ mod tests {
             PathBuf::from("/xdg").join(APP_ID).join(CONFIG_FILENAME)
         );
         assert_eq!(
-            legacy_config_path_from_values(Some(OsString::new()), Some(OsString::from("/home/a")))
+            config_path_from_values(Some(OsString::new()), Some(OsString::from("/home/a")))
                 .expect("home config path"),
-            PathBuf::from("/home/a/.config/WarcraftRecorder/config-v3.json")
+            PathBuf::from("/home/a/.config")
+                .join(APP_ID)
+                .join(CONFIG_FILENAME)
         );
         assert!(matches!(
             config_path_from_values(None, None),
             Err(ConfigError::UnresolvedHome)
         ));
-    }
-
-    #[test]
-    fn wrong_legacy_values_fall_back_once_per_key() {
-        let value: Value = serde_json::from_str(
-            r#"{
-                "obsFPS": 240,
-                "minEncounterDuration": -5,
-                "linuxGsrCodec": "vp9",
-                "encounterMarkers": 1,
-                "linuxGsrAudioOutput": false,
-                "linuxGsrAudio": "must-not-be-used"
-            }"#,
-        )
-        .expect("parse invalid legacy values");
-        let imported = import_legacy(value.as_object().expect("legacy object"));
-        assert_eq!(imported.config.capture.fps, 60);
-        assert_eq!(imported.config.activities.min_raid_duration_seconds, -5);
-        assert_eq!(imported.config.capture.codec, Codec::H264);
-        assert_eq!(
-            imported.config.interface.encounter_markers,
-            MarkerVisibility::Visible
-        );
-        assert_eq!(imported.config.capture.audio_output, "default_output");
-        let keys: Vec<_> = imported
-            .warnings
-            .iter()
-            .map(|warning| warning.key.as_str())
-            .collect();
-        assert_eq!(
-            keys,
-            [
-                "linuxGsrAudioOutput",
-                "obsFPS",
-                "linuxGsrCodec",
-                "encounterMarkers"
-            ]
-        );
-
-        let fallback_value: Value =
-            serde_json::from_str(r#"{"linuxGsrAudio":"legacy-output.monitor"}"#)
-                .expect("parse legacy audio fallback");
-        let fallback = import_legacy(fallback_value.as_object().expect("fallback object"));
-        assert_eq!(
-            fallback.config.capture.audio_output,
-            "legacy-output.monitor"
-        );
-        assert!(fallback.warnings.is_empty());
     }
 
     fn disable_automatic_activities(config: &mut Config) {

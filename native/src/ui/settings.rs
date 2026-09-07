@@ -1302,7 +1302,7 @@ fn combo_row(
 
 /// A required folder that is unset, or one whose authorization did not
 /// survive the move into the sandbox, is the only thing standing between a
-/// fresh or freshly migrated install and a working recorder. Rows the user
+/// fresh install and a working recorder. Rows the user
 /// does not have to fill in stay quiet: a greyed-out dependant such as the
 /// replay-buffer folder while it shares the recording folder, and the log
 /// folder of a flavour that is switched off.
@@ -1465,7 +1465,7 @@ mod tests {
         config.storage.buffer_dir = AuthorizedPath::authorized("/buffer");
         assert!(!path_needs_attention("storage.buffer_dir", &config));
 
-        // Unset, and imported-but-unauthorized after a migration, both ask.
+        // Unset, and imported-but-unauthorized, both ask.
         config.storage.recording_dir = AuthorizedPath::unset();
         assert!(path_needs_attention("storage.recording_dir", &config));
         config.flavors.retail.log_dir = AuthorizedPath::imported("/wow/_retail_/Logs");

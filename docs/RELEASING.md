@@ -30,9 +30,9 @@ uses the pinned GNOME 50 SDK/runtime, runs `flatpak-builder-lint` for manifest,
 AppStream, and repository, and exports a signed static OSTree repository plus
 one `.flatpak` bundle. The documented linter exceptions in
 `flatpak/lint-exceptions.json` are intentional: the canonical reverse-DNS ID,
-the Wayland-only product scope, and the read-only legacy config grant required
-for one-way migration. Rebuilding from the same commit should produce the same
-application payload; OSTree/bundle container metadata may vary by build time.
+and the Wayland-only product scope. Rebuilding from the same commit should
+produce the same application payload; OSTree/bundle container metadata may
+vary by build time.
 The AppStream screenshot is served from the committed `main` tree, while the
 candidate repository also carries its mirrored `screenshots/x86_64` ref.
 
@@ -75,46 +75,11 @@ flatpak update --user --commit=<previous-commit> \
   io.github.JohanWes.WarcraftRecorder
 ```
 
-Uninstalling the app does not delete recordings or the untouched legacy
-configuration:
+Uninstalling the app does not delete recordings:
 
 ```sh
 flatpak uninstall --user io.github.JohanWes.WarcraftRecorder
 ```
 
 Use `--delete-data` only when deleting the native app's private data is
-intentional. The final AppImage migration imports
-`~/.config/WarcraftRecorder/config-v3.json` once and leaves that file, the
-recording directory, replay directory, and legacy sidecars untouched.
-
-## AppImage migration (retired)
-
-The 7.7.1 AppImage's automatic update path is no longer fed. It checks
-`releases/latest` on this repository, compares the tag's version against its
-own, and pipes `main/install.sh` into bash. The `linux-7.7.2-<short-sha>`
-migration release that used to hold the **Latest** slot was removed on
-2026-09-06, so `releases/latest` is the newest published `v*` release, which
-the old updater parses as *older* than 7.7.1 and its update button stays
-silent. Do not recreate a migration release to wake that path up.
-
-A straggler migrates by running the install command from the README, which
-still detects an AppImage install on disk and performs the full migration.
-
-`install.sh` is also the installer the README hands to new users, so the
-AppImage steps run only when an AppImage install is actually present. In that
-case it installs the Flatpak, deletes the AppImage, replaces
-`~/.local/bin/warcraftrecorder` with a shim that runs the Flatpak, deletes the
-AppImage menu entry and icon, repoints any "run at start-up" entry, launches
-the native app, and closes the running AppImage. Without `flatpak` on the host
-it changes nothing, prints the distribution commands that install it, and
-exits nonzero, which the updater shows as an error.
-
-That last step sweeps by executable rather than signalling one process: on a
-successful update the 7.7.1 updater relaunches itself *after* this script
-returns, so a single signal loses the race and leaves two Warcraft Recorders
-running. The sweep covers the deleted binary, the parked copy an earlier
-revision of the script left behind, and the mounted AppImage payload.
-
-A rollback is downloading the AppImage from the `linux-7.7.1-43e3ebf` release,
-which still carries it and its checksum. It reads the untouched
-`config-v3.json`, recordings, and sidecars.
+intentional.

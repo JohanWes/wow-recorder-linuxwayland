@@ -7,6 +7,12 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## Unreleased
+
+### Removed
+- The AppImage migration path and the one-time Electron config import with its
+  post-migration notice are gone. Every user is on the Flatpak now.
+
 ## 1.0.9 - 2026-09-06
 
 ### Fixed

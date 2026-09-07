@@ -116,15 +116,6 @@ dependencies, with no browser engine, no database and no background services.
 Recording itself costs almost nothing either way: `gpu-screen-recorder` encodes
 on the GPU, exactly as it did before.
 
-## Coming from the AppImage
-
-Run the install command above. The old app's "Check for updates" button no
-longer offers this migration, so the command has to be run manually. The
-AppImage, its launcher and its menu entry are removed, your settings are
-imported once, and your recordings, tags and protected videos stay exactly
-where they are. You will be asked to pick the recording and Logs folders again,
-because the sandboxed app cannot see them until you do.
-
 ## Development
 
 One Cargo package under `native/`. From the repository root:

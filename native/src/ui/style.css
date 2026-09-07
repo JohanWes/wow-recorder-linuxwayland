@@ -249,7 +249,7 @@ window.wr-light .wr-class-warrior { color: #7d5f36; }
 }
 
 /* The recording folder and the combat-log folder are the two settings a fresh
-   or freshly migrated install cannot work without, and a sandboxed app cannot
+   install cannot work without, and a sandboxed app cannot
    guess either. Pulse them until they are picked: the row is otherwise
    indistinguishable from the optional ones around it. */
 @keyframes wr-attention-pulse {

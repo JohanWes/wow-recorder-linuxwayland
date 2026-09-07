@@ -176,7 +176,6 @@ impl Harness {
 fn setup(root: &Path) -> Setup {
     Setup {
         config_path: root.join("config.json"),
-        legacy_config_path: root.join("missing-legacy.json"),
         data_dir: root.join("recorder"),
         gsr_binary: fixture_bin("fake-gsr.sh"),
         media: MediaConfig {
@@ -663,53 +662,48 @@ fn commands_are_served_while_a_capture_is_ending() {
 }
 
 #[test]
-fn dismissing_the_notice_and_the_release_notes_ends_them_for_good() {
+fn dismissing_the_release_notes_ends_them_for_good() {
     let harness = Harness::new("dismissals");
     let config_path = harness.root.join("config.json");
     let mut config = Config::load(&config_path).expect("load the harness config");
-    config.migration_notice_pending = true;
     // What an install updated from an earlier version looks like: the field
     // is missing from its config file, so it deserializes empty.
     config.last_seen_version = String::new();
-    config.save(&config_path).expect("seed both pending states");
-    // What the first launch after a legacy import looks like to the shell.
+    config
+        .save(&config_path)
+        .expect("seed the pending release notes");
     let mut harness = harness.restart();
-    assert!(harness.latest.config.migration_notice_pending);
     assert!(harness.latest.config.last_seen_version.is_empty());
 
-    harness.send(Command::DismissMigrationNotice);
     harness.send(Command::DismissReleaseNotes);
-    harness.pump(|snapshot| {
-        !snapshot.config.migration_notice_pending
-            && snapshot.config.last_seen_version == warcraft_recorder::VERSION
-    });
+    harness.pump(|snapshot| snapshot.config.last_seen_version == warcraft_recorder::VERSION);
     let saved = Config::load(&config_path).expect("reload the saved config");
-    assert!(
-        !saved.migration_notice_pending && saved.last_seen_version == warcraft_recorder::VERSION,
-        "the dismissals must outlive the process"
+    assert_eq!(
+        saved.last_seen_version,
+        warcraft_recorder::VERSION,
+        "the dismissal must outlive the process"
     );
 
-    // The notice offers the button that opens Settings, and dialogs opened
-    // before the notes were closed carry a draft with the old values.
-    // Applying it must not replay either dialog, or they reappear on every
-    // later start.
+    // Dialogs opened before the notes were closed carry a draft with the old
+    // values. Applying it must not replay the notes, or they reappear on
+    // every later start.
     let mut stale = harness.latest.config.clone();
-    stale.migration_notice_pending = true;
     stale.last_seen_version = String::new();
     stale.capture.fps = 30;
     harness.send(Command::SaveConfig {
         draft: Box::new(stale),
     });
     harness.pump(|snapshot| snapshot.config.capture.fps == 30);
-    assert!(
-        !harness.latest.config.migration_notice_pending
-            && harness.latest.config.last_seen_version == warcraft_recorder::VERSION,
-        "a settings save must not resurrect either dismissal"
+    assert_eq!(
+        harness.latest.config.last_seen_version,
+        warcraft_recorder::VERSION,
+        "a settings save must not resurrect the dismissal"
     );
     let saved = Config::load(&config_path).expect("reload after the settings save");
-    assert!(
-        !saved.migration_notice_pending,
-        "the resurrected notice must not reach disk either"
+    assert_eq!(
+        saved.last_seen_version,
+        warcraft_recorder::VERSION,
+        "the resurrected notes must not reach disk either"
     );
 }
 

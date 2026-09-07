@@ -574,7 +574,7 @@ impl Storage {
 
     /// Rewrite only the sidecar, atomically. A legacy sidecar keeps its original
     /// schema and unknown fields: only the `protected`/`tag` keys are patched so
-    /// the final AppImage can still read it.
+    /// the legacy Electron app can still read it.
     pub fn update(&self, entry: &LibraryEntry, change: &EntryUpdate) -> io::Result<LibraryEntry> {
         self.check_owned(&entry.sidecar_path)
             .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
@@ -2680,7 +2680,7 @@ mod tests {
                 .expect("json");
         assert_eq!(patched["tag"], Value::String(" nice one ".to_owned()));
         assert_eq!(patched["protected"], Value::Bool(true));
-        // Unknown and legacy-only fields survive untouched for the final AppImage.
+        // Unknown and legacy-only fields survive untouched.
         assert_eq!(patched["teamMMR"], Value::from(1850));
         assert_eq!(
             patched["uniqueHash"],

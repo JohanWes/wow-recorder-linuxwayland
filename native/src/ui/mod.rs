@@ -92,7 +92,7 @@ pub enum ShellAction {
     TestRecording,
     OpenLogs,
     About,
-    /// Runs the published install script to migrate/update to the Flatpak.
+    /// Runs the published install script to update to the latest Flatpak.
     CheckForUpdates,
     Quit,
 }

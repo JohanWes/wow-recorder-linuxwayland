@@ -24,9 +24,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::activity::{ActivityAction, ActivityEngine, RecordingDraft};
-use crate::config::{
-    Config, ConfigError, LayoutSettings, LoadedConfig, ValidationProblem, load_or_import,
-};
+use crate::config::{Config, ConfigError, LayoutSettings, ValidationProblem};
 use crate::domain::{
     ActivityDetails, Category, CorrelatedActivity, DeathMarkerVisibility, GameFlavor, LibraryEntry,
     MarkerVisibility, MediaFacts, MeterData, Outcome, Problem, RecorderStatus, RecordingId,
@@ -109,8 +107,6 @@ pub enum Command {
     SaveLayout {
         layout: LayoutSettings,
     },
-    /// The user acknowledged the post-migration notice; never show it again.
-    DismissMigrationNotice,
     /// The user closed the "What's new" dialog for the running version.
     DismissReleaseNotes,
     Shutdown,
@@ -202,7 +198,6 @@ impl Drop for CoordinatorHandle {
 #[derive(Clone, Debug)]
 pub struct Setup {
     pub config_path: PathBuf,
-    pub legacy_config_path: PathBuf,
     /// App-private directory for the recorder's token/hook/events files.
     pub data_dir: PathBuf,
     pub gsr_binary: PathBuf,
@@ -221,7 +216,6 @@ impl Setup {
         let (year, utc_offset_minutes) = local_clock();
         Ok(Self {
             config_path: crate::config::config_path_from_environment()?,
-            legacy_config_path: crate::config::legacy_config_path_from_environment()?,
             data_dir: crate::config::config_path_from_environment()?
                 .parent()
                 .unwrap_or(Path::new("."))
@@ -347,25 +341,9 @@ impl Coordinator {
         snapshot_tx: SyncSender<Arc<AppSnapshot>>,
         wake: Box<dyn Fn() + Send>,
     ) -> Self {
-        let loaded = load_or_import(&setup.config_path, &setup.legacy_config_path);
-        let (config, mut problems) = match loaded {
-            Ok(LoadedConfig {
-                config,
-                import_warnings,
-                ..
-            }) => (
-                config,
-                import_warnings
-                    .into_iter()
-                    .map(|warning| {
-                        make_problem(
-                            "Some legacy settings could not be imported.",
-                            Some(format!("{}: {}", warning.key, warning.message)),
-                            Some(RecoveryAction::OpenSettings),
-                        )
-                    })
-                    .collect(),
-            ),
+        let (config, mut problems) = match Config::load(&setup.config_path) {
+            Ok(config) => (config, Vec::new()),
+            Err(ConfigError::NotFound(_)) => (Config::default(), Vec::new()),
             Err(error) => (
                 Config::default(),
                 vec![make_problem(
@@ -575,13 +553,6 @@ impl Coordinator {
                 if self.config.interface.layout != layout {
                     let mut draft = self.config.clone();
                     draft.interface.layout = layout;
-                    self.patch_config(draft);
-                }
-            }
-            Command::DismissMigrationNotice => {
-                if self.config.migration_notice_pending {
-                    let mut draft = self.config.clone();
-                    draft.migration_notice_pending = false;
                     self.patch_config(draft);
                 }
             }
@@ -1469,12 +1440,10 @@ impl Coordinator {
             );
             return;
         }
-        // Settings never owns the dismissal flags. Its draft was cloned from
-        // a snapshot taken while a notice was still up -- the migration notice
-        // itself offers the button that opens Settings -- so honouring the
-        // draft here resurrects a notice the user already dismissed, on every
-        // save.
-        draft.migration_notice_pending = self.config.migration_notice_pending;
+        // Settings never owns the release-notes acknowledgement. Its draft was
+        // cloned from a snapshot taken while the "What's new" dialog was still
+        // up -- its buttons open Settings -- so honouring the draft here
+        // replays the notes on every save.
         draft.last_seen_version = self.config.last_seen_version.clone();
         let problems = draft.validate();
         if !problems.is_empty() {
