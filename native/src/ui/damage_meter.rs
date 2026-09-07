@@ -70,6 +70,7 @@ const SPELL_ICON_RESOURCE: &str = "/io/github/JohanWes/WarcraftRecorder/spells/"
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum View {
     Metric(MeterMetric),
+    Buffs,
     Deaths,
 }
 
@@ -81,6 +82,7 @@ fn view_label(view: View) -> &'static str {
         View::Metric(MeterMetric::Interrupts) => "Interrupts",
         View::Metric(MeterMetric::Dispels) => "Dispels",
         View::Metric(MeterMetric::Casts) => "Casts",
+        View::Metric(MeterMetric::Buffs) | View::Buffs => "Buffs",
         View::Deaths => "Deaths",
     }
 }
@@ -93,6 +95,7 @@ fn view_key(view: View) -> &'static str {
         View::Metric(MeterMetric::Interrupts) => "interrupts",
         View::Metric(MeterMetric::Dispels) => "dispels",
         View::Metric(MeterMetric::Casts) => "casts",
+        View::Metric(MeterMetric::Buffs) | View::Buffs => "buffs",
         View::Deaths => "deaths",
     }
 }
@@ -105,6 +108,7 @@ fn view_from_key(key: &str) -> Option<View> {
         "interrupts" => View::Metric(MeterMetric::Interrupts),
         "dispels" => View::Metric(MeterMetric::Dispels),
         "casts" => View::Metric(MeterMetric::Casts),
+        "buffs" => View::Buffs,
         "deaths" => View::Deaths,
         _ => return None,
     })
@@ -118,6 +122,7 @@ fn view_empty_message(view: View) -> String {
         View::Metric(MeterMetric::Interrupts) => "interrupts",
         View::Metric(MeterMetric::Dispels) => "dispels",
         View::Metric(MeterMetric::Casts) => "casts",
+        View::Metric(MeterMetric::Buffs) | View::Buffs => "buffs",
         View::Deaths => "deaths",
     };
     format!("No {noun} in this fight.")
@@ -221,6 +226,14 @@ fn format_compact(amount: u64) -> String {
         1 => format!("{value:.1}{suffix}"),
         _ => format!("{value:.2}{suffix}"),
     }
+}
+
+/// Uptime text: sub-minute spans read as seconds, longer ones as m:ss.
+fn format_uptime(ms: u64) -> String {
+    if ms < 60_000 {
+        return format!("{:.1}s", ms as f64 / 1_000.0);
+    }
+    format_mm_ss(ms)
 }
 
 /// The selected entry's meter facts plus the combatant GUID → spec id join
@@ -904,6 +917,7 @@ impl Inner {
             View::Metric(MeterMetric::Interrupts),
             View::Metric(MeterMetric::Dispels),
             View::Metric(MeterMetric::Casts),
+            View::Buffs,
             View::Deaths,
         ] {
             let item = gtk4::gio::MenuItem::new(Some(view_label(view)), None);
@@ -1008,6 +1022,21 @@ impl Inner {
         let breakdown = self.breakdown.borrow().clone();
         if view == View::Deaths {
             self.rebuild_deaths(&fight, breakdown.as_deref());
+            return;
+        }
+        if view == View::Buffs {
+            if let Some(guid) = &breakdown
+                && let Some(actor) = fight.actors.iter().find(|actor| &actor.guid == guid)
+            {
+                self.rebuild_buffs(actor, &fight);
+                return;
+            }
+            // A segment switch may have left the breakdown without its actor.
+            if breakdown.is_some() {
+                self.breakdown.replace(None);
+                self.spell.replace(None);
+            }
+            self.rebuild_buff_ranking(&fight);
             return;
         }
         let View::Metric(metric) = view else {
@@ -1204,6 +1233,108 @@ impl Inner {
             content.upcast()
         });
         self.set_list_content(&key, &list);
+    }
+
+    /// Buff ranking: players by total BUFF uptime; the right label is the
+    /// accumulated uptime with the application count.
+    fn rebuild_buff_ranking(self: &Rc<Self>, fight: &MeterProjection) {
+        let mut ranked: Vec<(&ProjectedActor, u64, u32)> = fight
+            .actors
+            .iter()
+            .filter_map(|actor| {
+                let (uptime, apps) = actor
+                    .spells
+                    .iter()
+                    .filter(|entry| entry.metric == MeterMetric::Buffs)
+                    .fold((0_u64, 0_u32), |(uptime, apps), entry| {
+                        (uptime + entry.amount, apps + entry.hits)
+                    });
+                (uptime > 0 || apps > 0).then_some((actor, uptime, apps))
+            })
+            .collect();
+        if ranked.is_empty() {
+            self.show_empty(&view_empty_message(View::Buffs));
+            return;
+        }
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
+        let top = ranked.first().map_or(1, |(_, uptime, _)| *uptime).max(1);
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        for (rank, (actor, uptime, apps)) in ranked.iter().enumerate() {
+            let overlay = self.fill_line(
+                Some(&format!("r:{}", actor.guid)),
+                self.class_for(&actor.guid),
+                &format!("{}. {}", rank + 1, actor.name),
+                &format!("{} ({apps})", format_uptime(*uptime)),
+                *uptime as f64 / top as f64,
+            );
+            let guid = actor.guid.clone();
+            content.append(&self.row_button(&overlay, move |this| {
+                this.breakdown.replace(Some(guid.clone()));
+            }));
+        }
+        self.set_content(&content);
+    }
+
+    /// The player's buffs: name on the left, applications and their share of
+    /// the fight's timed window on the right. Activating a buff lists when it
+    /// was applied; the folded "Other" row has no single list to show.
+    fn rebuild_buffs(self: &Rc<Self>, actor: &ProjectedActor, fight: &MeterProjection) {
+        // Bound to a `let` first, mirroring `rebuild_breakdown`: a buff that
+        // left the projection below must clear `spell`.
+        let spell_key = self.spell.borrow().clone();
+        if let Some(key) = spell_key {
+            if let Some(entry) = actor
+                .spells
+                .iter()
+                .find(|entry| entry.metric == MeterMetric::Buffs && entry.key == key)
+            {
+                self.rebuild_spell_breakdown(actor, entry, MeterMetric::Buffs);
+                return;
+            }
+            self.spell.replace(None);
+        }
+        let mut buffs: Vec<&ProjectedEntry> = actor
+            .spells
+            .iter()
+            .filter(|entry| entry.metric == MeterMetric::Buffs)
+            .collect();
+        if buffs.is_empty() {
+            self.show_empty(&view_empty_message(View::Buffs));
+            return;
+        }
+        buffs.sort_by(|a, b| b.amount.cmp(&a.amount).then_with(|| a.key.cmp(&b.key)));
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        for entry in buffs {
+            // The share is relative to the fight's timed window; a buff that
+            // outlived it reads as capped rather than over 100%.
+            let share = if fight.elapsed_ms == 0 {
+                0.0
+            } else {
+                entry.amount as f64 / fight.elapsed_ms as f64
+            };
+            let right = if fight.elapsed_ms == 0 {
+                entry.hits.to_string()
+            } else {
+                format!("{} · {:.0}%", entry.hits, share.min(1.0) * 100.0)
+            };
+            let row = self.fill_line(
+                Some(&format!("b:{}", entry.key)),
+                self.class_for(&actor.guid),
+                &entry.key,
+                &right,
+                share,
+            );
+            row.add_css_class("wr-meter-row");
+            if entry.key == OTHER_KEY {
+                content.append(&row);
+            } else {
+                let key = entry.key.clone();
+                content.append(&self.row_button(&row, move |this| {
+                    this.spell.replace(Some(key.clone()));
+                }));
+            }
+        }
+        self.set_content(&content);
     }
 
     /// The actor drilldown in the same scroller: the Spells and Targets lists

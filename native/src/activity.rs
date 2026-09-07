@@ -25,8 +25,10 @@ use crate::domain::{
     ActivityDetails, BLOODLUST_DURATION_MS, Category, CombatantSummary, GameFlavor, MeterData,
     Outcome, PlayerSummary, RaidDifficulty, RecordingId, RoundSummary, TimelineItem, TimelineKind,
 };
-use crate::meter::MeterAccumulator;
-use crate::parser::{CombatEvent, ParsedEvent, PlayerObservationKind, is_bloodlust_spell};
+use crate::meter::{BuffEvent, MeterAccumulator};
+use crate::parser::{
+    AuraType, CombatEvent, ParsedEvent, PlayerObservationKind, is_bloodlust_spell,
+};
 
 const RAID_DEFAULT_OVERRUN_MS: u64 = 3_000;
 const PVP_DEFAULT_OVERRUN_MS: u64 = 3_000;
@@ -484,6 +486,7 @@ fn handle_event(
         } => handle_combatant_info(state, rules, guid, *team_id, *spec_id),
         CombatEvent::PlayerObserved {
             kind,
+            aura_type,
             spell_id,
             guid,
             name,
@@ -504,6 +507,7 @@ fn handle_event(
             target_guid,
             target_name,
             *target_flags,
+            *aura_type,
             spell_name,
             owner_guid.as_deref(),
             at_ms,
@@ -1730,6 +1734,7 @@ fn handle_player_observed(
     target_guid: &str,
     target_name: &str,
     target_flags: u64,
+    aura_type: Option<AuraType>,
     spell_name: &str,
     owner_guid: Option<&str>,
     at_ms: i64,
@@ -1740,6 +1745,24 @@ fn handle_player_observed(
     };
     if let Some(owner) = owner_guid {
         active.meter.record_owner(guid, owner, None);
+    }
+    // BUFF uptime lives with the buffed unit, not the caster: shared buffs
+    // and external cooldowns must land on the player who is powered by them.
+    let buff = match kind {
+        PlayerObservationKind::AuraApplied => Some(BuffEvent::Applied),
+        PlayerObservationKind::AuraRefreshed => Some(BuffEvent::Refreshed),
+        PlayerObservationKind::AuraRemoved => Some(BuffEvent::Removed),
+        PlayerObservationKind::CastSucceeded => None,
+    };
+    if let (Some(event), Some(AuraType::Buff)) = (buff, aura_type) {
+        active.meter.buff(
+            event,
+            target_guid,
+            target_name,
+            target_flags,
+            spell_name,
+            at_ms,
+        );
     }
     if kind == PlayerObservationKind::CastSucceeded {
         active.meter.cast(guid, name, flags, spell_name, at_ms);
@@ -1763,95 +1786,103 @@ fn handle_player_observed(
             push_timeline(active, item, actions);
         }
     }
-    match rules {
-        Rules::Retail => {
-            if kind == PlayerObservationKind::CastSucceeded
-                && let ActiveKind::Raid(raid) = &mut active.kind
-            {
-                update_boss_status(raid, false, name, spell_name);
+    // Removals and refreshes only bookkeep the meter; they identified no new
+    // player that the applied/cast events before them had not.
+    if matches!(
+        kind,
+        PlayerObservationKind::CastSucceeded | PlayerObservationKind::AuraApplied
+    ) {
+        match rules {
+            Rules::Retail => {
+                if kind == PlayerObservationKind::CastSucceeded
+                    && let ActiveKind::Raid(raid) = &mut active.kind
+                {
+                    update_boss_status(raid, false, name, spell_name);
+                }
+                let allow_new =
+                    matches!(active.kind, ActiveKind::Battleground { .. }) || is_unit_self(flags);
+                let mut player_guid = current_player_guid(active).cloned();
+                let index = process_combatant(
+                    combatant_target(active),
+                    &mut player_guid,
+                    guid,
+                    name,
+                    flags,
+                    allow_new,
+                );
+                set_player_guid(active, player_guid);
+                if kind == PlayerObservationKind::CastSucceeded
+                    && matches!(active.kind, ActiveKind::Battleground { .. })
+                    && let Some(combatant) =
+                        index.and_then(|i| combatant_target(active).entries.get_mut(i))
+                    && combatant.spec_id.is_none()
+                    && let Some(spec) = retail_unique_spec(spell_name)
+                {
+                    combatant.spec_id = Some(spec);
+                }
             }
-            let allow_new =
-                matches!(active.kind, ActiveKind::Battleground { .. }) || is_unit_self(flags);
-            let mut player_guid = current_player_guid(active).cloned();
-            let index = process_combatant(
-                combatant_target(active),
-                &mut player_guid,
-                guid,
-                name,
-                flags,
-                allow_new,
-            );
-            set_player_guid(active, player_guid);
-            if kind == PlayerObservationKind::CastSucceeded
-                && matches!(active.kind, ActiveKind::Battleground { .. })
-                && let Some(combatant) =
-                    index.and_then(|i| combatant_target(active).entries.get_mut(i))
-                && combatant.spec_id.is_none()
-                && let Some(spec) = retail_unique_spec(spell_name)
-            {
-                combatant.spec_id = Some(spec);
-            }
-        }
-        Rules::Classic => {
-            let already_know = combatant_target(active).contains(guid);
-            let Some(index) = process_classic_combatant(
-                active,
-                guid,
-                name,
-                flags,
-                target_guid,
-                target_name,
-                target_flags,
-            ) else {
-                return;
-            };
-            // First enemy spotted in an arena: the gates just opened, so the
-            // activity start moves to this event.
-            if matches!(active.kind, ActiveKind::Arena(_)) && !already_know {
-                let target = combatant_target(active);
-                let is_enemy = target
-                    .entries
-                    .get(index)
-                    .is_some_and(|combatant| combatant.team_id == Some(0));
-                if is_enemy {
-                    let enemies = target
-                        .iter()
-                        .filter(|combatant| combatant.team_id == Some(0))
-                        .count();
-                    if enemies == 1 {
-                        active.started_at_ms = at_ms;
+            Rules::Classic => {
+                let already_know = combatant_target(active).contains(guid);
+                let Some(index) = process_classic_combatant(
+                    active,
+                    guid,
+                    name,
+                    flags,
+                    target_guid,
+                    target_name,
+                    target_flags,
+                ) else {
+                    return;
+                };
+                // First enemy spotted in an arena: the gates just opened, so the
+                // activity start moves to this event.
+                if matches!(active.kind, ActiveKind::Arena(_)) && !already_know {
+                    let target = combatant_target(active);
+                    let is_enemy = target
+                        .entries
+                        .get(index)
+                        .is_some_and(|combatant| combatant.team_id == Some(0));
+                    if is_enemy {
+                        let enemies = target
+                            .iter()
+                            .filter(|combatant| combatant.team_id == Some(0))
+                            .count();
+                        if enemies == 1 {
+                            active.started_at_ms = at_ms;
+                        }
+                    }
+                }
+                let combatant = &mut combatant_target(active).entries[index];
+                if combatant.spec_id.is_none() {
+                    let spec = if kind == PlayerObservationKind::CastSucceeded {
+                        classic_unique_spec(spell_name)
+                    } else {
+                        classic_unique_aura(spell_name)
+                    };
+                    if spec.is_some() {
+                        combatant.spec_id = spec;
                     }
                 }
             }
-            let combatant = &mut combatant_target(active).entries[index];
-            if combatant.spec_id.is_none() {
-                let spec = match kind {
-                    PlayerObservationKind::AuraApplied => classic_unique_aura(spell_name),
-                    PlayerObservationKind::CastSucceeded => classic_unique_spec(spell_name),
-                };
-                if spec.is_some() {
-                    combatant.spec_id = spec;
+            Rules::Era => {
+                let mut player_guid = current_player_guid(active).cloned();
+                let index = process_combatant(
+                    combatant_target(active),
+                    &mut player_guid,
+                    guid,
+                    name,
+                    flags,
+                    false,
+                );
+                set_player_guid(active, player_guid);
+                if kind == PlayerObservationKind::CastSucceeded
+                    && let Some(combatant) =
+                        index.and_then(|i| combatant_target(active).entries.get_mut(i))
+                    && combatant.spec_id.is_none()
+                    && let Some(spec) = classic_unique_spec(spell_name)
+                {
+                    combatant.spec_id = Some(spec);
                 }
-            }
-        }
-        Rules::Era => {
-            let mut player_guid = current_player_guid(active).cloned();
-            let index = process_combatant(
-                combatant_target(active),
-                &mut player_guid,
-                guid,
-                name,
-                flags,
-                false,
-            );
-            set_player_guid(active, player_guid);
-            if kind == PlayerObservationKind::CastSucceeded
-                && let Some(combatant) =
-                    index.and_then(|i| combatant_target(active).entries.get_mut(i))
-                && combatant.spec_id.is_none()
-                && let Some(spec) = classic_unique_spec(spell_name)
-            {
-                combatant.spec_id = Some(spec);
             }
         }
     }
@@ -3215,6 +3246,7 @@ mod tests {
     ) -> CombatEvent {
         CombatEvent::PlayerObserved {
             kind: PlayerObservationKind::CastSucceeded,
+            aura_type: None,
             spell_id: 0,
             guid: guid.to_string(),
             name: name.to_string(),

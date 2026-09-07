@@ -32,22 +32,33 @@ const DEATH_LOG_EVENTS: usize = 20;
 /// the game's own book-keeping rather than a human pressing a button.
 const HIDDEN_CAST_FLOOR: u32 = 20;
 const OTHER_KEY: &str = "Other";
-const METRICS: [MeterMetric; 6] = [
+const METRICS: [MeterMetric; 7] = [
     MeterMetric::Damage,
     MeterMetric::DamageTaken,
     MeterMetric::Healing,
     MeterMetric::Interrupts,
     MeterMetric::Dispels,
     MeterMetric::Casts,
+    MeterMetric::Buffs,
 ];
 
-/// Metrics whose `amount` counts events rather than measuring one, so the UI
-/// shows occurrence times instead of per-hit statistics.
+/// Metrics shown as occurrence times rather than per-hit statistics. Buffs'
+/// `amount` measures uptime in milliseconds, but `hits` counts applications,
+/// which is what the occurrence list lists.
 pub fn is_count_metric(metric: MeterMetric) -> bool {
     matches!(
         metric,
-        MeterMetric::Interrupts | MeterMetric::Dispels | MeterMetric::Casts
+        MeterMetric::Interrupts | MeterMetric::Dispels | MeterMetric::Casts | MeterMetric::Buffs
     )
+}
+
+/// Aura lifecycle for buff-uptime tracking. `SPELL_AURA_BROKEN` is not
+/// tracked, so a broken buff's span closes at the fight end instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BuffEvent {
+    Applied,
+    Refreshed,
+    Removed,
 }
 
 pub(crate) struct MeterAccumulator {
@@ -92,6 +103,8 @@ struct RawFight {
     actors: Vec<RawActor>,
     actor_index: HashMap<String, usize>,
     recent: HashMap<(String, String, MeterMetric), RecentRecord>,
+    /// `(buffed guid, buff name)` → application time of the span still open.
+    open_buffs: HashMap<(String, String), i64>,
     deaths: Vec<RawDeath>,
 }
 
@@ -141,6 +154,7 @@ impl RawFight {
             actors: Vec::new(),
             actor_index: HashMap::new(),
             recent: HashMap::new(),
+            open_buffs: HashMap::new(),
             deaths: Vec::new(),
         }
     }
@@ -211,6 +225,15 @@ impl RawEntry {
         let sample = self.samples.entry(bucket_end_ms).or_default();
         sample.amount += amount;
         sample.overheal += overheal;
+    }
+
+    /// Buff-uptime credit: a measured span, not an event, so no hits or
+    /// per-hit extremes — the occurrence list counts applications.
+    fn add_uptime(&mut self, amount: u64, bucket_end_ms: i64) {
+        self.total.amount += amount;
+        if amount > 0 {
+            self.samples.entry(bucket_end_ms).or_default().amount += amount;
+        }
     }
 
     fn subtract_transfer(&mut self, amount: u64, overheal: u64, bucket_end_ms: i64) {
@@ -666,6 +689,9 @@ impl MeterAccumulator {
     }
 
     fn begin_fight(&mut self, at_ms: i64, label: Option<String>, ambient: bool) {
+        // Spans close first: their credit bucket can round past `at_ms`, and
+        // a fight must not end before the sample its uptime lands in.
+        self.close_open_buffs(at_ms);
         let fight = self
             .fights
             .last_mut()
@@ -745,6 +771,7 @@ impl MeterAccumulator {
         fallback_label: &str,
         names: &HashMap<String, String>,
     ) -> MeterData {
+        self.close_open_buffs(ended_at_ms);
         let fight = self
             .fights
             .last_mut()
@@ -757,6 +784,122 @@ impl MeterAccumulator {
                 .map(|fight| fight.finish(started_at_ms, fallback_label, &self.owners, names))
                 .collect(),
         }
+    }
+
+    /// The 500 ms playback bucket an event at `at_ms` lands in.
+    fn bucket_end(&self, at_ms: i64) -> i64 {
+        let interval_ms = SAMPLE_INTERVAL_MS as i64;
+        let elapsed_ms = at_ms.saturating_sub(self.started_at_ms).max(1);
+        self.started_at_ms + elapsed_ms.saturating_add(interval_ms - 1) / interval_ms * interval_ms
+    }
+
+    /// Credit every still-open buff span to the fight it was applied in. A
+    /// buff outliving its fight stops there; the log re-logs nothing at the
+    /// boundary, so carrying it over would need state the next fight has no
+    /// row for.
+    fn close_open_buffs(&mut self, at_ms: i64) {
+        let bucket_end_ms = self.bucket_end(at_ms);
+        let fight = self
+            .fights
+            .last_mut()
+            .expect("the open fight is always present");
+        if !fight.open_buffs.is_empty() {
+            fight.last_bucket_end_ms = fight.last_bucket_end_ms.max(bucket_end_ms);
+        }
+        for ((guid, spell), opened) in std::mem::take(&mut fight.open_buffs) {
+            fight
+                .actor(&guid, "")
+                .spells
+                .entry((MeterMetric::Buffs, spell))
+                .or_default()
+                .add_uptime(at_ms.saturating_sub(opened).max(0) as u64, bucket_end_ms);
+        }
+    }
+
+    /// BUFF-uptime bookkeeping for a friendly player. Applications count as
+    /// occurrences (the UI lists when each landed); each removal credits its
+    /// span's milliseconds. A refresh re-logs the application without
+    /// restarting the span, matching how the aura persists.
+    pub(crate) fn buff(
+        &mut self,
+        event: BuffEvent,
+        dest_guid: &str,
+        dest_name: &str,
+        dest_flags: u64,
+        spell_name: &str,
+        at_ms: i64,
+    ) {
+        if !is_unit_player(dest_flags) || !is_unit_friendly(dest_flags) {
+            return;
+        }
+        if dest_guid.is_empty() || dest_guid.chars().all(|character| character == '0') {
+            return;
+        }
+        match event {
+            BuffEvent::Removed => self.close_buff(dest_guid, spell_name, at_ms),
+            BuffEvent::Applied | BuffEvent::Refreshed => {
+                // A re-application without a removal means the log dropped
+                // one; closing first keeps the measured span exact. A
+                // refresh without an open span (applied before the activity
+                // or before the last boundary) starts measuring from the
+                // first evidence this fight has.
+                let open = if event == BuffEvent::Applied {
+                    self.close_buff(dest_guid, spell_name, at_ms);
+                    true
+                } else {
+                    let fight = self
+                        .fights
+                        .last()
+                        .expect("the open fight is always present");
+                    !fight
+                        .open_buffs
+                        .contains_key(&(dest_guid.to_owned(), spell_name.to_owned()))
+                };
+                self.record(
+                    dest_guid,
+                    dest_name,
+                    MeterMetric::Buffs,
+                    spell_name,
+                    "",
+                    0,
+                    0,
+                    0,
+                    at_ms,
+                );
+                if open {
+                    let fight = self
+                        .fights
+                        .last_mut()
+                        .expect("the open fight is always present");
+                    fight
+                        .open_buffs
+                        .insert((dest_guid.to_owned(), spell_name.to_owned()), at_ms);
+                }
+            }
+        }
+    }
+
+    /// Credit an open buff's `[opened, at_ms)` span and forget it. Removals
+    /// without an open span (applied before the activity) are ignored.
+    fn close_buff(&mut self, dest_guid: &str, spell_name: &str, at_ms: i64) {
+        let bucket_end_ms = self.bucket_end(at_ms);
+        let fight = self
+            .fights
+            .last_mut()
+            .expect("the open fight is always present");
+        fight.last_bucket_end_ms = fight.last_bucket_end_ms.max(bucket_end_ms);
+        let Some(opened) = fight
+            .open_buffs
+            .remove(&(dest_guid.to_owned(), spell_name.to_owned()))
+        else {
+            return;
+        };
+        fight
+            .actor(dest_guid, "")
+            .spells
+            .entry((MeterMetric::Buffs, spell_name.to_owned()))
+            .or_default()
+            .add_uptime(at_ms.saturating_sub(opened).max(0) as u64, bucket_end_ms);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -772,15 +915,19 @@ impl MeterAccumulator {
         overheal: u64,
         at_ms: i64,
     ) {
-        let interval_ms = SAMPLE_INTERVAL_MS as i64;
-        let elapsed_ms = at_ms.saturating_sub(self.started_at_ms).max(1);
-        let bucket_end_ms = self.started_at_ms
-            + elapsed_ms.saturating_add(interval_ms - 1) / interval_ms * interval_ms;
+        let bucket_end_ms = self.bucket_end(at_ms);
         let fight = self
             .fights
             .last_mut()
             .expect("the open fight is always present");
-        if !self.segmented && !matches!(metric, MeterMetric::DamageTaken | MeterMetric::Casts) {
+        // Casts and buffs land outside combat too, so they must not widen
+        // the fight's DPS window the way a damaging event does.
+        if !self.segmented
+            && !matches!(
+                metric,
+                MeterMetric::DamageTaken | MeterMetric::Casts | MeterMetric::Buffs
+            )
+        {
             fight.first_event_ms =
                 Some(fight.first_event_ms.map_or(at_ms, |first| first.min(at_ms)));
             fight.last_event_ms = Some(fight.last_event_ms.map_or(at_ms, |last| last.max(at_ms)));
@@ -793,7 +940,9 @@ impl MeterAccumulator {
             .or_default()
             .add(amount, overheal, bucket_end_ms);
         // A cast's target says nothing worth a row: most are self or nothing.
-        if metric == MeterMetric::Casts {
+        // Buff rows are keyed on the buffed unit; the aura source would only
+        // split shared buffs across casters.
+        if matches!(metric, MeterMetric::Casts | MeterMetric::Buffs) {
             return;
         }
         actor
@@ -1758,6 +1907,150 @@ mod tests {
             .collect();
         assert!(!keys.contains(&"Firebolt"));
         assert!(!keys.contains(&"Soul Fragment"));
+    }
+
+    /// Uptime is measured in the spans between applications and removals;
+    /// refreshes add occurrences without restarting the span, and the
+    /// projection lists application times like every count metric.
+    #[test]
+    fn buffs_measure_uptime_and_count_applications() {
+        let mut meter = MeterAccumulator::new(0, None);
+        meter.buff(
+            BuffEvent::Applied,
+            "Player-0-A",
+            "A",
+            FRIENDLY_PLAYER,
+            "Bloodlust",
+            1_000,
+        );
+        meter.buff(
+            BuffEvent::Refreshed,
+            "Player-0-A",
+            "A",
+            FRIENDLY_PLAYER,
+            "Bloodlust",
+            2_000,
+        );
+        meter.buff(
+            BuffEvent::Removed,
+            "Player-0-A",
+            "A",
+            FRIENDLY_PLAYER,
+            "Bloodlust",
+            4_000,
+        );
+        meter.buff(
+            BuffEvent::Applied,
+            "Player-0-A",
+            "A",
+            FRIENDLY_PLAYER,
+            "Bloodlust",
+            5_000,
+        );
+        let data = meter.drain(10_000, 0, "Fight", &HashMap::new());
+        let buffs = |fights: &[MeterFight], position_ms: u64| {
+            project_overall(fights, position_ms)
+                .actors
+                .iter()
+                .flat_map(|actor| &actor.spells)
+                .find(|entry| entry.metric == MeterMetric::Buffs)
+                .map(|entry| (entry.amount, entry.hits, entry.times.clone()))
+                .expect("buff row survives the projection")
+        };
+        // Mid-fight: the closed 3 s span, two applications.
+        assert_eq!(buffs(&data.fights, 4_500), (3_000, 2, vec![1_000, 2_000]));
+        // At the end: both spans, three applications.
+        assert_eq!(
+            buffs(&data.fights, 10_000),
+            (8_000, 3, vec![1_000, 2_000, 5_000])
+        );
+    }
+
+    #[test]
+    fn buff_uptime_closes_at_fight_boundaries_and_skips_enemies() {
+        let mut meter = MeterAccumulator::trash(0);
+        meter.buff(
+            BuffEvent::Applied,
+            "Creature-0-BOSS",
+            "Boss",
+            MOB,
+            "Enrage",
+            1_000,
+        );
+        meter.buff(
+            BuffEvent::Applied,
+            "Player-0-A",
+            "A",
+            FRIENDLY_PLAYER,
+            "Bloodlust",
+            1_000,
+        );
+        // A re-application without a removal closes the stale span first.
+        meter.buff(
+            BuffEvent::Applied,
+            "Player-0-A",
+            "A",
+            FRIENDLY_PLAYER,
+            "Bloodlust",
+            2_000,
+        );
+        // An unaligned boundary: the closing credit's bucket (5_000) rounds
+        // past the cut, and the fight must still end late enough to reach it.
+        meter.cut(4_700, "Boss".to_owned());
+        // A removal without an intervening application belongs to no span.
+        meter.buff(
+            BuffEvent::Removed,
+            "Player-0-A",
+            "A",
+            FRIENDLY_PLAYER,
+            "Bloodlust",
+            4_800,
+        );
+        // A refresh after the boundary re-opens the span this fight.
+        meter.buff(
+            BuffEvent::Refreshed,
+            "Player-0-A",
+            "A",
+            FRIENDLY_PLAYER,
+            "Bloodlust",
+            6_000,
+        );
+        meter.buff(
+            BuffEvent::Removed,
+            "Player-0-A",
+            "A",
+            FRIENDLY_PLAYER,
+            "Bloodlust",
+            8_000,
+        );
+        let data = meter.drain(10_000, 0, "Trash", &HashMap::new());
+        let first = data.fights[0].actors[0]
+            .spells
+            .iter()
+            .find(|entry| entry.metric == MeterMetric::Buffs)
+            .expect("buff row");
+        assert_eq!(first.amount, 1_000 + 2_700);
+        assert_eq!(first.hits, 2);
+        // Overall at the credit's bucket: the boundary span is visible; the
+        // refreshed span lands in its own later bucket.
+        let projection = project_overall(&data.fights, 5_000);
+        let projected = projection
+            .actors
+            .iter()
+            .flat_map(|actor| &actor.spells)
+            .find(|entry| entry.metric == MeterMetric::Buffs)
+            .expect("boundary credit is visible at the playhead");
+        assert_eq!(projected.amount, 3_700);
+        assert_eq!(projected.times, vec![1_000, 2_000]);
+        let second = data.fights[1].actors[0]
+            .spells
+            .iter()
+            .find(|entry| entry.metric == MeterMetric::Buffs)
+            .expect("refreshed buff row");
+        assert_eq!(second.amount, 2_000);
+        assert_eq!(second.hits, 1);
+        // The enemy aura was never tracked.
+        assert_eq!(data.fights[0].actors.len(), 1);
     }
 
     #[test]

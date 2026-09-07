@@ -2044,6 +2044,7 @@ fn test_events(
         retail(
             CombatEvent::PlayerObserved {
                 kind: PlayerObservationKind::AuraApplied,
+                aura_type: None,
                 spell_id: 0,
                 guid: GUID.to_owned(),
                 name: NAME.to_owned(),

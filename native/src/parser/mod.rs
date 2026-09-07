@@ -60,6 +60,7 @@ pub enum CombatEvent {
     },
     PlayerObserved {
         kind: PlayerObservationKind,
+        aura_type: Option<AuraType>,
         spell_id: u32,
         guid: String,
         name: String,
@@ -159,7 +160,16 @@ pub enum CombatEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerObservationKind {
     AuraApplied,
+    AuraRefreshed,
+    AuraRemoved,
     CastSucceeded,
+}
+
+/// The `auraType` suffix parameter of aura events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuraType {
+    Buff,
+    Debuff,
 }
 
 pub fn is_bloodlust_spell(spell_id: u32) -> bool {
@@ -283,7 +293,14 @@ pub fn parse_line(
             flags: hexadecimal(&fields, 7)?,
             unconscious: optional_number::<u8>(&fields, 9)?.is_some_and(|value| value != 0),
         },
-        "SPELL_AURA_APPLIED" | "SPELL_CAST_SUCCESS" => {
+        "SPELL_AURA_APPLIED" | "SPELL_AURA_REFRESH" | "SPELL_AURA_REMOVED"
+        | "SPELL_CAST_SUCCESS" => {
+            let kind = match event_name {
+                "SPELL_AURA_APPLIED" => PlayerObservationKind::AuraApplied,
+                "SPELL_AURA_REFRESH" => PlayerObservationKind::AuraRefreshed,
+                "SPELL_AURA_REMOVED" => PlayerObservationKind::AuraRemoved,
+                _ => PlayerObservationKind::CastSucceeded,
+            };
             let guid = text(&fields, 1)?.to_owned();
             let owner_guid = fields
                 .get(12)
@@ -291,11 +308,12 @@ pub fn parse_line(
                 .and_then(|_| fields.get(13))
                 .and_then(|owner| guid_or_none(owner).map(str::to_owned));
             CombatEvent::PlayerObserved {
-                kind: if event_name == "SPELL_AURA_APPLIED" {
-                    PlayerObservationKind::AuraApplied
-                } else {
-                    PlayerObservationKind::CastSucceeded
-                },
+                kind,
+                // Aura events carry `auraType` right after the spell block;
+                // casts do not, and field 12 there is the advanced block.
+                aura_type: (kind != PlayerObservationKind::CastSucceeded)
+                    .then(|| aura_type(&fields))
+                    .flatten(),
                 spell_id: number(&fields, 9)?,
                 guid,
                 name: text(&fields, 2)?.to_owned(),
@@ -644,6 +662,16 @@ pub(crate) fn combat_log_version(line: &str) -> Option<u32> {
         .ok()
 }
 
+/// The `auraType` suffix field of aura events, at the fixed index after the
+/// spell block.
+fn aura_type(fields: &[String]) -> Option<AuraType> {
+    match fields.get(12).map(String::as_str) {
+        Some("BUFF") => Some(AuraType::Buff),
+        Some("DEBUFF") => Some(AuraType::Debuff),
+        _ => None,
+    }
+}
+
 fn is_retained(name: &str) -> bool {
     matches!(
         name,
@@ -657,6 +685,8 @@ fn is_retained(name: &str) -> bool {
             | "COMBATANT_INFO"
             | "UNIT_DIED"
             | "SPELL_AURA_APPLIED"
+            | "SPELL_AURA_REFRESH"
+            | "SPELL_AURA_REMOVED"
             | "SPELL_CAST_START"
             | "SPELL_CAST_SUCCESS"
             | "SWING_DAMAGE"
@@ -884,7 +914,7 @@ mod tests {
             "4/9 19:27:19.200  ARENA_MATCH_END,1,8,1600,1700",
             "4/9 19:27:20.200  UNIT_DIED,0,nil,0x0,0x0,Player-0-AAAA,\"Player One\",0x511,0x0,0",
             "4/9 19:27:21.200  COMBATANT_INFO,Player-0-AAAA,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1234,256,[]",
-            "4/9 19:27:22.200  SPELL_AURA_APPLIED,Player-0-AAAA,\"Player One\",0x511,0x0,Player-0-BBBB,\"Player Two\",0x512,0x0,123,\"Aura, Tested\",0x1",
+            "4/9 19:27:22.200  SPELL_AURA_APPLIED,Player-0-AAAA,\"Player One\",0x511,0x0,Player-0-BBBB,\"Player Two\",0x512,0x0,123,\"Aura, Tested\",0x1,BUFF",
             "4/9 19:27:23.200  SPELL_DAMAGE,Player-0-AAAA,\"Player One\",0x511,0x0,Creature-0-BOSS,\"Training Boss\",0x10a48,0x0,123,\"Smite\",0x2,Creature-0-BOSS,0000000000000000,105,152,0,0,189,2084,0,0,0,0,0,0,0,0,0,46,0,2,0,0,0,1,0,0,0,0.000,1,1",
             "4/9 19:27:24.200  SPELL_CAST_START,Creature-0-BOSS,\"Training Boss\",0x10a48,0x0,0,nil,0x0,0x0,456,\"Rebirth\",0x1",
         ];
@@ -950,6 +980,7 @@ mod tests {
             },
             CombatEvent::PlayerObserved {
                 kind: PlayerObservationKind::AuraApplied,
+                aura_type: Some(AuraType::Buff),
                 spell_id: 123,
                 guid: "Player-0-AAAA".into(),
                 name: "Player One".into(),
@@ -1044,6 +1075,7 @@ mod tests {
             },
             CombatEvent::PlayerObserved {
                 kind: PlayerObservationKind::CastSucceeded,
+                aura_type: None,
                 spell_id: 123,
                 guid: "Player-0-CLASSIC".into(),
                 name: "Fighter-One".into(),
@@ -1111,6 +1143,7 @@ mod tests {
             },
             CombatEvent::PlayerObserved {
                 kind: PlayerObservationKind::CastSucceeded,
+                aura_type: None,
                 spell_id: 321,
                 guid: "Player-0-ERA".into(),
                 name: "Raider-One".into(),

@@ -303,6 +303,9 @@ pub enum MeterMetric {
     Dispels,
     /// Successful casts: `amount` counts events, like the other count metrics.
     Casts,
+    /// BUFF auras on friendly players: `amount` is accumulated uptime in
+    /// milliseconds, `hits` the number of applications.
+    Buffs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
