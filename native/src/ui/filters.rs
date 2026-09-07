@@ -307,38 +307,13 @@ static AFFIX_NAMES: &[(u32, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use warcraft_recorder::domain::{
-        Category, Codec, CombatantSummary, MediaFacts, MeterData, PlayerSummary, RecordingId,
-    };
+    use warcraft_recorder::domain::{Category, CombatantSummary, PlayerSummary};
 
     fn base(category: Category, details: ActivityDetails, outcome: Outcome) -> LibraryEntry {
-        LibraryEntry {
-            id: RecordingId::new(),
-            media_path: PathBuf::from("/rec/v.mkv"),
-            sidecar_path: PathBuf::from("/rec/v.json"),
-            category,
-            flavor: GameFlavor::Retail,
-            title: "T".to_owned(),
-            start_unix_ms: 1_000,
-            duration_ms: 60_000,
-            outcome,
-            protected: false,
-            tag: None,
-            activity_hash: None,
-            player: None,
-            combatants: Vec::new(),
-            details,
-            timeline: Vec::new(),
-            media: MediaFacts {
-                fps: None,
-                width: None,
-                height: None,
-                codec: Some(Codec::H264),
-                has_content: true,
-            },
-            meter: MeterData::default(),
-        }
+        let mut entry = crate::ui::window::tests::entry(category, "T", 1_000);
+        entry.details = details;
+        entry.outcome = outcome;
+        entry
     }
 
     fn labels(chips: &[Chip]) -> Vec<&str> {

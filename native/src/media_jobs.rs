@@ -918,7 +918,7 @@ mod tests {
         Codec, GameFlavor, MeterActor, MeterData, MeterEntry, MeterFight, MeterMetric, Outcome,
         TimelineKind,
     };
-    use crate::storage::SIDECAR_SCHEMA_VERSION;
+    use crate::storage::{SIDECAR_SCHEMA_VERSION, test_root};
 
     fn fake_ffmpeg() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/native/bin/fake-ffmpeg.sh")
@@ -938,7 +938,7 @@ mod tests {
         }
 
         fn with_finalize_grace(name: &str, finalize_grace: Duration) -> Self {
-            let root = std::env::temp_dir().join(format!("wr-media-{name}-{}", Uuid::new_v4()));
+            let root = test_root(&format!("media-{name}"));
             let storage = Storage::new(root.join("recordings with space"), root.join("capture"));
             storage.prepare().expect("prepare");
             fs::create_dir_all(root.join("capture/replay")).expect("replay dir");

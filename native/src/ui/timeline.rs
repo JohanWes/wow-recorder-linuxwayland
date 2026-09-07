@@ -631,44 +631,19 @@ fn rounded_bar(cr: &gtk4::cairo::Context, x: f64, y: f64, width: f64, height: f6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use warcraft_recorder::domain::{
-        ActivityDetails, Codec, GameFlavor, MediaFacts, MeterData, PlayerSummary, RecordingId,
-    };
+    use warcraft_recorder::domain::PlayerSummary;
 
     fn entry_with(category: Category, timeline: Vec<TimelineItem>) -> LibraryEntry {
-        LibraryEntry {
-            id: RecordingId::new(),
-            media_path: PathBuf::from("/rec/v.mkv"),
-            sidecar_path: PathBuf::from("/rec/v.json"),
-            category,
-            flavor: GameFlavor::Retail,
-            title: "T".to_owned(),
-            start_unix_ms: 0,
-            duration_ms: 120_000,
-            outcome: Outcome::Win,
-            protected: false,
-            tag: None,
-            activity_hash: None,
-            player: Some(PlayerSummary {
-                name: "Alice-Realm".to_owned(),
-                realm: None,
-                guid: None,
-                class_id: None,
-                spec_id: None,
-            }),
-            combatants: Vec::new(),
-            details: ActivityDetails::Manual,
-            timeline,
-            media: MediaFacts {
-                fps: None,
-                width: None,
-                height: None,
-                codec: Some(Codec::H264),
-                has_content: true,
-            },
-            meter: MeterData::default(),
-        }
+        let mut entry = crate::ui::window::tests::entry(category, "T", 0);
+        entry.timeline = timeline;
+        entry.player = Some(PlayerSummary {
+            name: "Alice-Realm".to_owned(),
+            realm: None,
+            guid: None,
+            class_id: None,
+            spec_id: None,
+        });
+        entry
     }
 
     fn death(name: &str, at: u64) -> TimelineItem {

@@ -503,9 +503,7 @@ mod tests {
     use super::*;
     use crate::parser::CombatEvent;
     use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
     const CONTEXT: ParseTimeContext = ParseTimeContext::new(2026, 0);
     const EVENT: &str =
         "4/9 19:27:13.200  ENCOUNTER_START,9999,\"Training Construct\",16,20,777,1\n";
@@ -514,11 +512,7 @@ mod tests {
     const LEGACY_DAMAGE: &str = "5/24 20:26:10.911  SPELL_DAMAGE,Player-1322-07763A7B,\"Xiaohuli\",0x511,0x0,Creature-0-3013-0-11406-74284-0000266503,\"Cutpurse\",0x10a48,0x0,585,\"Smite\",0x2,Creature-0-3013-0-11406-74284-0000266503,0000000000000000,105,152,0,0,189,2084,0,0,0,0,0,0,0,0,0,46,0,2,0,0,0,1,0,0,0,0.000,1,1\n";
 
     fn test_directory() -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "warcraft-recorder-logwatch-{}-{}",
-            std::process::id(),
-            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-        ));
+        let path = crate::storage::test_root("logwatch");
         fs::create_dir(&path).unwrap();
         path
     }

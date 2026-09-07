@@ -3176,21 +3176,42 @@ mod tests {
     const FRIENDLY_FLAGS: u64 = 0x512;
     const ENEMY_FLAGS: u64 = 0x548;
 
-    fn handle(
-        engine: &mut ActivityEngine,
+    /// Test fixture bundling the engine with the flavor and settings every
+    /// event needs, so each feed is a single call instead of a five-argument
+    /// `handle` sprawl.
+    struct Engine {
+        engine: ActivityEngine,
+        config: ActivitySettings,
         flavor: GameFlavor,
-        at_ms: i64,
-        event: CombatEvent,
-        config: &ActivitySettings,
-    ) -> Vec<ActivityAction> {
-        engine.handle(
-            ParsedEvent {
+    }
+
+    impl Engine {
+        fn new(flavor: GameFlavor) -> Self {
+            Self {
+                engine: ActivityEngine::new(),
+                config: ActivitySettings::default(),
                 flavor,
-                occurred_at_ms: at_ms,
-                event,
-            },
-            config,
-        )
+            }
+        }
+
+        fn feed(&mut self, at_ms: i64, event: CombatEvent) -> Vec<ActivityAction> {
+            self.engine.handle(
+                ParsedEvent {
+                    flavor: self.flavor.clone(),
+                    occurred_at_ms: at_ms,
+                    event,
+                },
+                &self.config,
+            )
+        }
+
+        fn take_finished(&mut self, id: &RecordingId) -> Option<RecordingDraft> {
+            self.engine.take_finished(id)
+        }
+
+        fn force_end(&mut self, flavor: GameFlavor, occurred_at_ms: i64) -> Vec<ActivityAction> {
+            self.engine.force_end(flavor, occurred_at_ms)
+        }
     }
 
     fn encounter_start(encounter_id: u32, name: &str, difficulty_id: u32) -> CombatEvent {
@@ -3277,12 +3298,9 @@ mod tests {
 
     #[test]
     fn bloodlust_cast_adds_one_40_second_span_to_the_active_recording() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
+        let mut engine = Engine::new(GameFlavor::Retail);
         let start = 100_000;
-        let begin = handle(
-            &mut engine,
-            GameFlavor::Retail,
+        let begin = engine.feed(
             start,
             CombatEvent::ChallengeStarted {
                 name: "The Stonevault".to_owned(),
@@ -3291,19 +3309,15 @@ mod tests {
                 level: 10,
                 affixes: vec![],
             },
-            &config,
         );
         let ActivityAction::Begin { draft, .. } = &begin[0] else {
             panic!("expected recording start");
         };
         let id = draft.id.clone();
 
-        let actions = handle(
-            &mut engine,
-            GameFlavor::Retail,
+        let actions = engine.feed(
             start + 12_345,
             bloodlust_cast("Player-1-A", "Evoker-Realm", FRIENDLY_FLAGS),
-            &config,
         );
         assert_eq!(
             actions,
@@ -3320,29 +3334,18 @@ mod tests {
                 .unwrap(),
             }]
         );
-        let duplicate = handle(
-            &mut engine,
-            GameFlavor::Retail,
+        let duplicate = engine.feed(
             start + 12_345,
             bloodlust_cast("Player-1-A", "Evoker-Realm", FRIENDLY_FLAGS),
-            &config,
         );
         assert!(duplicate.is_empty());
     }
 
     #[test]
     fn retail_raid_kill_produces_golden_metadata() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        let retail = GameFlavor::Retail;
+        let mut engine = Engine::new(GameFlavor::Retail);
 
-        let actions = handle(
-            &mut engine,
-            retail.clone(),
-            100_000,
-            encounter_start(2587, "Eranog", 16),
-            &config,
-        );
+        let actions = engine.feed(100_000, encounter_start(2587, "Eranog", 16));
         assert_eq!(begins(&actions), 1);
         let ActivityAction::Begin {
             draft,
@@ -3358,27 +3361,12 @@ mod tests {
         assert!(draft.timeline.is_empty());
         let id = draft.id.clone();
 
-        handle(
-            &mut engine,
-            retail.clone(),
-            100_500,
-            combatant("Player-1-A", Some(0), Some(71)),
-            &config,
-        );
-        handle(
-            &mut engine,
-            retail.clone(),
+        engine.feed(100_500, combatant("Player-1-A", Some(0), Some(71)));
+        engine.feed(
             100_600,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-            &config,
         );
-        let death = handle(
-            &mut engine,
-            retail.clone(),
-            110_000,
-            died("Player-2-A", "Beta-Realm", FRIENDLY_FLAGS),
-            &config,
-        );
+        let death = engine.feed(110_000, died("Player-2-A", "Beta-Realm", FRIENDLY_FLAGS));
         assert_eq!(
             death,
             vec![ActivityAction::Update {
@@ -3393,13 +3381,7 @@ mod tests {
             }]
         );
 
-        let end = handle(
-            &mut engine,
-            retail,
-            130_000,
-            encounter_end(2587, 16, true),
-            &config,
-        );
+        let end = engine.feed(130_000, encounter_end(2587, 16, true));
         assert_eq!(
             end,
             vec![ActivityAction::Complete {
@@ -3453,43 +3435,20 @@ mod tests {
 
     #[test]
     fn short_raid_wipe_is_discarded() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        let retail = GameFlavor::Retail;
+        let mut engine = Engine::new(GameFlavor::Retail);
 
-        let actions = handle(
-            &mut engine,
-            retail.clone(),
-            0,
-            encounter_start(2587, "Eranog", 16),
-            &config,
-        );
+        let actions = engine.feed(0, encounter_start(2587, "Eranog", 16));
         let ActivityAction::Begin { draft, .. } = &actions[0] else {
             panic!("expected Begin");
         };
         let id = draft.id.clone();
-        handle(
-            &mut engine,
-            retail.clone(),
-            100,
-            combatant("Player-1-A", Some(0), Some(71)),
-            &config,
-        );
-        handle(
-            &mut engine,
-            retail.clone(),
+        engine.feed(100, combatant("Player-1-A", Some(0), Some(71)));
+        engine.feed(
             200,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-            &config,
         );
         // 5 s wipe + 3 s default overrun = 8 s < the 15 s minimum.
-        let end = handle(
-            &mut engine,
-            retail,
-            5_000,
-            encounter_end(2587, 16, false),
-            &config,
-        );
+        let end = engine.feed(5_000, encounter_end(2587, 16, false));
         assert_eq!(
             end,
             vec![ActivityAction::Discard {
@@ -3505,23 +3464,9 @@ mod tests {
 
     #[test]
     fn raid_without_identified_player_is_discarded() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        let retail = GameFlavor::Retail;
-        handle(
-            &mut engine,
-            retail.clone(),
-            0,
-            encounter_start(2587, "Eranog", 16),
-            &config,
-        );
-        let end = handle(
-            &mut engine,
-            retail,
-            60_000,
-            encounter_end(2587, 16, true),
-            &config,
-        );
+        let mut engine = Engine::new(GameFlavor::Retail);
+        engine.feed(0, encounter_start(2587, "Eranog", 16));
+        let end = engine.feed(60_000, encounter_end(2587, 16, true));
         assert!(matches!(
             end.as_slice(),
             [ActivityAction::Discard {
@@ -3533,52 +3478,23 @@ mod tests {
 
     #[test]
     fn raid_below_min_difficulty_is_ignored() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings {
-            min_raid_difficulty: RaidDifficulty::Heroic,
-            ..ActivitySettings::default()
-        };
-        let actions = handle(
-            &mut engine,
-            GameFlavor::Retail,
-            0,
-            encounter_start(2587, "Eranog", 17),
-            &config,
-        );
+        let mut engine = Engine::new(GameFlavor::Retail);
+        engine.config.min_raid_difficulty = RaidDifficulty::Heroic;
+        let actions = engine.feed(0, encounter_start(2587, "Eranog", 17));
         assert!(actions.is_empty());
     }
 
     #[test]
     fn disabled_category_never_begins() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings {
-            record_raids: false,
-            ..ActivitySettings::default()
-        };
-        let start = handle(
-            &mut engine,
-            GameFlavor::Retail,
-            0,
-            encounter_start(2587, "Eranog", 16),
-            &config,
-        );
-        let end = handle(
-            &mut engine,
-            GameFlavor::Retail,
-            60_000,
-            encounter_end(2587, 16, true),
-            &config,
-        );
+        let mut engine = Engine::new(GameFlavor::Retail);
+        engine.config.record_raids = false;
+        let start = engine.feed(0, encounter_start(2587, "Eranog", 16));
+        let end = engine.feed(60_000, encounter_end(2587, 16, true));
         assert!(start.is_empty() && end.is_empty());
     }
 
     #[test]
     fn midnight_season_two_content_is_recordable() {
-        let config = ActivitySettings {
-            current_raid_only: true,
-            ..ActivitySettings::default()
-        };
-
         for (zone_id, map_id) in [
             (2521, 399),
             (2813, 587),
@@ -3589,9 +3505,9 @@ mod tests {
             (1877, 250),
             (1762, 249),
         ] {
-            let actions = handle(
-                &mut ActivityEngine::new(),
-                GameFlavor::Retail,
+            let mut engine = Engine::new(GameFlavor::Retail);
+            engine.config.current_raid_only = true;
+            let actions = engine.feed(
                 0,
                 CombatEvent::ChallengeStarted {
                     name: "Midnight Season 2".to_string(),
@@ -3600,19 +3516,14 @@ mod tests {
                     level: 10,
                     affixes: Vec::new(),
                 },
-                &config,
             );
             assert_eq!(begins(&actions), 1, "map {map_id} was not recordable");
         }
 
         for encounter_id in [3470, 3445, 3455, 3497, 3420, 3421, 3429, 3492, 3379] {
-            let actions = handle(
-                &mut ActivityEngine::new(),
-                GameFlavor::Retail,
-                0,
-                encounter_start(encounter_id, "Midnight Season 2", 16),
-                &config,
-            );
+            let mut engine = Engine::new(GameFlavor::Retail);
+            engine.config.current_raid_only = true;
+            let actions = engine.feed(0, encounter_start(encounter_id, "Midnight Season 2", 16));
             assert_eq!(
                 begins(&actions),
                 1,
@@ -3630,13 +3541,9 @@ mod tests {
 
     #[test]
     fn mythic_plus_completion_builds_segments_and_upgrade() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        let retail = GameFlavor::Retail;
+        let mut engine = Engine::new(GameFlavor::Retail);
 
-        let actions = handle(
-            &mut engine,
-            retail.clone(),
+        let actions = engine.feed(
             0,
             CombatEvent::ChallengeStarted {
                 name: "Algeth'ar Academy".to_string(),
@@ -3645,7 +3552,6 @@ mod tests {
                 level: 10,
                 affixes: vec![9, 152],
             },
-            &config,
         );
         assert_eq!(begins(&actions), 1);
         let ActivityAction::Begin { draft, .. } = &actions[0] else {
@@ -3654,29 +3560,14 @@ mod tests {
         let id = draft.id.clone();
         assert_eq!(draft.category, Category::MythicPlus);
 
-        handle(
-            &mut engine,
-            retail.clone(),
-            1_000,
-            combatant("Player-1-A", Some(0), Some(71)),
-            &config,
-        );
-        handle(
-            &mut engine,
-            retail.clone(),
+        engine.feed(1_000, combatant("Player-1-A", Some(0), Some(71)));
+        engine.feed(
             1_100,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-            &config,
         );
 
         // Boss pull at 60 s closes the opening trash segment.
-        let boss = handle(
-            &mut engine,
-            retail.clone(),
-            60_000,
-            encounter_start(2562, "Vexamus", 8),
-            &config,
-        );
+        let boss = engine.feed(60_000, encounter_start(2562, "Vexamus", 8));
         assert_eq!(
             boss,
             vec![ActivityAction::Update {
@@ -3684,13 +3575,7 @@ mod tests {
                 item: TimelineItem::span(TimelineKind::Trash, 0, 60_000, None, None, None).unwrap(),
             }]
         );
-        let boss_end = handle(
-            &mut engine,
-            retail.clone(),
-            120_000,
-            encounter_end(2562, 8, true),
-            &config,
-        );
+        let boss_end = engine.feed(120_000, encounter_end(2562, 8, true));
         assert_eq!(
             boss_end,
             vec![ActivityAction::Update {
@@ -3708,16 +3593,13 @@ mod tests {
         );
 
         // End 125 s later: the trailing 5 s trash segment is dropped.
-        let end = handle(
-            &mut engine,
-            retail,
+        let end = engine.feed(
             125_000,
             CombatEvent::ChallengeEnded {
                 zone_id: 2526,
                 success: true,
                 duration_ms: 1_400_000,
             },
-            &config,
         );
         assert_eq!(
             end,
@@ -3751,12 +3633,8 @@ mod tests {
 
     #[test]
     fn mythic_plus_abandon_records_abandoned_outcome() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        let retail = GameFlavor::Retail;
-        handle(
-            &mut engine,
-            retail.clone(),
+        let mut engine = Engine::new(GameFlavor::Retail);
+        engine.feed(
             0,
             CombatEvent::ChallengeStarted {
                 name: "Algeth'ar Academy".to_string(),
@@ -3765,32 +3643,19 @@ mod tests {
                 level: 10,
                 affixes: vec![9],
             },
-            &config,
         );
-        handle(
-            &mut engine,
-            retail.clone(),
-            100,
-            combatant("Player-1-A", Some(0), Some(71)),
-            &config,
-        );
-        handle(
-            &mut engine,
-            retail.clone(),
+        engine.feed(100, combatant("Player-1-A", Some(0), Some(71)));
+        engine.feed(
             200,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-            &config,
         );
-        let end = handle(
-            &mut engine,
-            retail,
+        let end = engine.feed(
             600_000,
             CombatEvent::ChallengeEnded {
                 zone_id: 2526,
                 success: false,
                 duration_ms: 0,
             },
-            &config,
         );
         let [
             ActivityAction::Update { .. },
@@ -3817,12 +3682,8 @@ mod tests {
 
     #[test]
     fn raid_encounter_over_mythic_plus_hands_off() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        let retail = GameFlavor::Retail;
-        handle(
-            &mut engine,
-            retail.clone(),
+        let mut engine = Engine::new(GameFlavor::Retail);
+        engine.feed(
             0,
             CombatEvent::ChallengeStarted {
                 name: "Algeth'ar Academy".to_string(),
@@ -3831,29 +3692,13 @@ mod tests {
                 level: 10,
                 affixes: vec![9],
             },
-            &config,
         );
-        handle(
-            &mut engine,
-            retail.clone(),
-            100,
-            combatant("Player-1-A", Some(0), Some(71)),
-            &config,
-        );
-        handle(
-            &mut engine,
-            retail.clone(),
+        engine.feed(100, combatant("Player-1-A", Some(0), Some(71)));
+        engine.feed(
             200,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-            &config,
         );
-        let handoff = handle(
-            &mut engine,
-            retail,
-            60_000,
-            encounter_start(2587, "Eranog", 16),
-            &config,
-        );
+        let handoff = engine.feed(60_000, encounter_start(2587, "Eranog", 16));
         let [
             ActivityAction::Update { .. },
             ActivityAction::Abandon { id, reason, .. },
@@ -3873,48 +3718,31 @@ mod tests {
     #[test]
     fn retail_arena_win_and_loss() {
         for (winning_team, expected) in [(0u32, Outcome::Win), (1u32, Outcome::Loss)] {
-            let mut engine = ActivityEngine::new();
-            let config = ActivitySettings::default();
-            let retail = GameFlavor::Retail;
-            let actions = handle(
-                &mut engine,
-                retail.clone(),
+            let mut engine = Engine::new(GameFlavor::Retail);
+            let actions = engine.feed(
                 0,
                 CombatEvent::ArenaStarted {
                     zone_id: 1672,
                     match_type: "2v2".to_string(),
                 },
-                &config,
             );
             let ActivityAction::Begin { draft, .. } = &actions[0] else {
                 panic!("expected Begin");
             };
             let id = draft.id.clone();
             assert_eq!(draft.category, Category::TwoVTwo);
-            handle(
-                &mut engine,
-                retail.clone(),
-                100,
-                combatant("Player-1-A", Some(0), Some(71)),
-                &config,
-            );
-            handle(
-                &mut engine,
-                retail.clone(),
+            engine.feed(100, combatant("Player-1-A", Some(0), Some(71)));
+            engine.feed(
                 200,
                 cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-                &config,
             );
-            let end = handle(
-                &mut engine,
-                retail,
+            let end = engine.feed(
                 240_000,
                 CombatEvent::ArenaEnded {
                     winning_team_id: winning_team,
                     team_0_mmr: 1_500,
                     team_1_mmr: 1_500,
                 },
-                &config,
             );
             assert_eq!(
                 end,
@@ -3938,43 +3766,26 @@ mod tests {
 
     #[test]
     fn solo_shuffle_rounds_and_completion() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        let retail = GameFlavor::Retail;
+        let mut engine = Engine::new(GameFlavor::Retail);
         let start = CombatEvent::ArenaStarted {
             zone_id: 1672,
             match_type: "Rated Solo Shuffle".to_string(),
         };
 
-        let actions = handle(&mut engine, retail.clone(), 0, start.clone(), &config);
+        let actions = engine.feed(0, start.clone());
         assert_eq!(begins(&actions), 1);
         let ActivityAction::Begin { draft, .. } = &actions[0] else {
             panic!("expected Begin");
         };
         let id = draft.id.clone();
 
-        handle(
-            &mut engine,
-            retail.clone(),
-            100,
-            combatant("Player-1-A", Some(0), Some(71)),
-            &config,
-        );
-        handle(
-            &mut engine,
-            retail.clone(),
+        engine.feed(100, combatant("Player-1-A", Some(0), Some(71)));
+        engine.feed(
             200,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-            &config,
         );
         // Enemy death decides round one as a win: round span plus death point.
-        let decided = handle(
-            &mut engine,
-            retail.clone(),
-            30_000,
-            died("Player-9-B", "Foe-Realm", ENEMY_FLAGS),
-            &config,
-        );
+        let decided = engine.feed(30_000, died("Player-9-B", "Foe-Realm", ENEMY_FLAGS));
         assert_eq!(
             decided,
             vec![
@@ -4004,44 +3815,27 @@ mod tests {
         );
         // A second death in the same round is dropped entirely.
         assert!(
-            handle(
-                &mut engine,
-                retail.clone(),
-                31_000,
-                died("Player-8-B", "Ally-Realm", FRIENDLY_FLAGS),
-                &config,
-            )
-            .is_empty()
+            engine
+                .feed(31_000, died("Player-8-B", "Ally-Realm", FRIENDLY_FLAGS))
+                .is_empty()
         );
 
         // Round two: no duplicate Begin, fresh round roster.
-        let round_two = handle(&mut engine, retail.clone(), 60_000, start, &config);
+        let round_two = engine.feed(60_000, start);
         assert_eq!(begins(&round_two), 0);
-        handle(
-            &mut engine,
-            retail.clone(),
-            60_100,
-            combatant("Player-1-A", Some(1), Some(71)),
-            &config,
-        );
-        handle(
-            &mut engine,
-            retail.clone(),
+        engine.feed(60_100, combatant("Player-1-A", Some(1), Some(71)));
+        engine.feed(
             60_200,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-            &config,
         );
 
-        let end = handle(
-            &mut engine,
-            retail,
+        let end = engine.feed(
             90_000,
             CombatEvent::ArenaEnded {
                 winning_team_id: 0,
                 team_0_mmr: 1_500,
                 team_1_mmr: 1_500,
             },
-            &config,
         );
         // The undecided round two is emitted as a point, then the game
         // completes as a win.
@@ -4083,19 +3877,14 @@ mod tests {
 
     #[test]
     fn retail_battleground_estimates_result_from_deaths() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        let retail = GameFlavor::Retail;
-        let actions = handle(
-            &mut engine,
-            retail.clone(),
+        let mut engine = Engine::new(GameFlavor::Retail);
+        let actions = engine.feed(
             0,
             CombatEvent::ZoneChanged {
                 zone_id: 30,
                 name: "Alterac Valley".to_string(),
                 instance_id: 30,
             },
-            &config,
         );
         let ActivityAction::Begin { draft, .. } = &actions[0] else {
             panic!("expected Begin");
@@ -4103,36 +3892,24 @@ mod tests {
         let id = draft.id.clone();
         assert_eq!(draft.category, Category::Battlegrounds);
 
-        handle(
-            &mut engine,
-            retail.clone(),
+        engine.feed(
             100,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-            &config,
         );
         for (at_ms, guid, name, flags) in [
             (10_000, "Player-2-A", "Beta-Realm", FRIENDLY_FLAGS),
             (11_000, "Player-3-A", "Gamma-Realm", FRIENDLY_FLAGS),
             (12_000, "Player-9-B", "Foe-Realm", ENEMY_FLAGS),
         ] {
-            handle(
-                &mut engine,
-                retail.clone(),
-                at_ms,
-                died(guid, name, flags),
-                &config,
-            );
+            engine.feed(at_ms, died(guid, name, flags));
         }
-        let end = handle(
-            &mut engine,
-            retail,
+        let end = engine.feed(
             600_000,
             CombatEvent::ZoneChanged {
                 zone_id: 1,
                 name: "Durotar".to_string(),
                 instance_id: 1,
             },
-            &config,
         );
         assert_eq!(
             end,
@@ -4153,42 +3930,19 @@ mod tests {
 
     #[test]
     fn classic_raid_kill() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        let classic = GameFlavor::Classic;
-        let actions = handle(
-            &mut engine,
-            classic.clone(),
-            0,
-            encounter_start(1107, "Anub'Rekhan", 9),
-            &config,
-        );
+        let mut engine = Engine::new(GameFlavor::Classic);
+        let actions = engine.feed(0, encounter_start(1107, "Anub'Rekhan", 9));
         assert_eq!(begins(&actions), 1);
         let ActivityAction::Begin { draft, .. } = &actions[0] else {
             panic!("expected Begin");
         };
         let id = draft.id.clone();
-        handle(
-            &mut engine,
-            classic.clone(),
-            100,
-            combatant("Player-1-A", None, None),
-            &config,
-        );
-        handle(
-            &mut engine,
-            classic.clone(),
+        engine.feed(100, combatant("Player-1-A", None, None));
+        engine.feed(
             200,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-            &config,
         );
-        let end = handle(
-            &mut engine,
-            classic,
-            60_000,
-            encounter_end(1107, 9, true),
-            &config,
-        );
+        let end = engine.feed(60_000, encounter_end(1107, 9, true));
         assert!(matches!(
             end.as_slice(),
             [ActivityAction::Complete {
@@ -4207,19 +3961,14 @@ mod tests {
 
     #[test]
     fn classic_arena_death_driven_end() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        let classic = GameFlavor::Classic;
-        let actions = handle(
-            &mut engine,
-            classic.clone(),
+        let mut engine = Engine::new(GameFlavor::Classic);
+        let actions = engine.feed(
             0,
             CombatEvent::ZoneChanged {
                 zone_id: 559,
                 name: "Nagrand Arena".to_string(),
                 instance_id: 559,
             },
-            &config,
         );
         assert_eq!(begins(&actions), 1);
         let ActivityAction::Begin { draft, .. } = &actions[0] else {
@@ -4228,21 +3977,16 @@ mod tests {
         let id = draft.id.clone();
         assert_eq!(draft.category, Category::TwoVTwo);
 
-        handle(
-            &mut engine,
-            classic.clone(),
+        engine.feed(
             1_000,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-            &config,
         );
         // Enemies become known by interacting with the identified player.
         for (at_ms, guid, name) in [
             (5_000, "Player-9-B", "Foe-Realm"),
             (6_000, "Player-8-B", "Bane-Realm"),
         ] {
-            handle(
-                &mut engine,
-                classic.clone(),
+            engine.feed(
                 at_ms,
                 cast_at(
                     guid,
@@ -4253,23 +3997,10 @@ mod tests {
                     SELF_FLAGS,
                     "Mortal Strike",
                 ),
-                &config,
             );
         }
-        handle(
-            &mut engine,
-            classic.clone(),
-            30_000,
-            died("Player-9-B", "Foe-Realm", ENEMY_FLAGS),
-            &config,
-        );
-        let end = handle(
-            &mut engine,
-            classic,
-            40_000,
-            died("Player-8-B", "Bane-Realm", ENEMY_FLAGS),
-            &config,
-        );
+        engine.feed(30_000, died("Player-9-B", "Foe-Realm", ENEMY_FLAGS));
+        let end = engine.feed(40_000, died("Player-8-B", "Bane-Realm", ENEMY_FLAGS));
         // Second enemy death empties their team: death marker then Complete.
         let [
             ActivityAction::Update { .. },
@@ -4292,12 +4023,8 @@ mod tests {
 
     #[test]
     fn classic_challenge_mode_completes() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        let classic = GameFlavor::Classic;
-        let actions = handle(
-            &mut engine,
-            classic.clone(),
+        let mut engine = Engine::new(GameFlavor::Classic);
+        let actions = engine.feed(
             0,
             CombatEvent::ChallengeStarted {
                 name: "Mogu'shan Palace".to_string(),
@@ -4306,37 +4033,24 @@ mod tests {
                 level: 1,
                 affixes: Vec::new(),
             },
-            &config,
         );
         assert_eq!(begins(&actions), 1);
         let ActivityAction::Begin { draft, .. } = &actions[0] else {
             panic!("expected Begin");
         };
         let id = draft.id.clone();
-        handle(
-            &mut engine,
-            classic.clone(),
-            100,
-            combatant("Player-1-A", None, None),
-            &config,
-        );
-        handle(
-            &mut engine,
-            classic.clone(),
+        engine.feed(100, combatant("Player-1-A", None, None));
+        engine.feed(
             200,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-            &config,
         );
-        let end = handle(
-            &mut engine,
-            classic,
+        let end = engine.feed(
             900_000,
             CombatEvent::ChallengeEnded {
                 zone_id: 994,
                 success: false,
                 duration_ms: 900_000,
             },
-            &config,
         );
         assert!(matches!(
             end.as_slice(),
@@ -4361,43 +4075,20 @@ mod tests {
 
     #[test]
     fn era_raid_records_classic_flavor() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        let era = GameFlavor::Era;
-        let actions = handle(
-            &mut engine,
-            era.clone(),
-            0,
-            encounter_start(1107, "Anub'Rekhan", 9),
-            &config,
-        );
+        let mut engine = Engine::new(GameFlavor::Era);
+        let actions = engine.feed(0, encounter_start(1107, "Anub'Rekhan", 9));
         assert_eq!(begins(&actions), 1);
         let ActivityAction::Begin { draft, .. } = &actions[0] else {
             panic!("expected Begin");
         };
         let id = draft.id.clone();
         assert_eq!(draft.flavor, GameFlavor::Classic);
-        handle(
-            &mut engine,
-            era.clone(),
-            100,
-            combatant("Player-1-A", None, None),
-            &config,
-        );
-        handle(
-            &mut engine,
-            era.clone(),
+        engine.feed(100, combatant("Player-1-A", None, None));
+        engine.feed(
             200,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-            &config,
         );
-        let end = handle(
-            &mut engine,
-            era,
-            60_000,
-            encounter_end(1107, 9, true),
-            &config,
-        );
+        let end = engine.feed(60_000, encounter_end(1107, 9, true));
         assert!(matches!(
             end.as_slice(),
             [ActivityAction::Complete {
@@ -4413,35 +4104,21 @@ mod tests {
 
     #[test]
     fn interleaved_flavors_stay_independent() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        handle(
-            &mut engine,
-            GameFlavor::Retail,
-            0,
-            encounter_start(2587, "Eranog", 16),
-            &config,
-        );
+        let mut engine = Engine::new(GameFlavor::Retail);
+        engine.feed(0, encounter_start(2587, "Eranog", 16));
         // A classic battleground begins its own activity.
-        let classic = handle(
-            &mut engine,
-            GameFlavor::Classic,
+        engine.flavor = GameFlavor::Classic;
+        let classic = engine.feed(
             1_000,
             CombatEvent::ZoneChanged {
                 zone_id: 30,
                 name: "Alterac Valley".to_string(),
                 instance_id: 30,
             },
-            &config,
         );
         assert_eq!(begins(&classic), 1);
-        let unknown = handle(
-            &mut engine,
-            GameFlavor::Unknown("ptr_x".to_string()),
-            2_000,
-            encounter_end(2587, 16, true),
-            &config,
-        );
+        engine.flavor = GameFlavor::Unknown("ptr_x".to_string());
+        let unknown = engine.feed(2_000, encounter_end(2587, 16, true));
         assert!(unknown.is_empty());
         // The retail raid is still in flight and only retail can end it.
         assert!(engine.force_end(GameFlavor::Era, 3_000).is_empty());
@@ -4457,34 +4134,17 @@ mod tests {
 
     #[test]
     fn force_end_emits_final_action_once() {
-        let mut engine = ActivityEngine::new();
-        let config = ActivitySettings::default();
-        let retail = GameFlavor::Retail;
+        let mut engine = Engine::new(GameFlavor::Retail);
         assert!(engine.force_end(GameFlavor::Retail, 0).is_empty());
-        let actions = handle(
-            &mut engine,
-            retail.clone(),
-            0,
-            encounter_start(2587, "Eranog", 16),
-            &config,
-        );
+        let actions = engine.feed(0, encounter_start(2587, "Eranog", 16));
         let ActivityAction::Begin { draft, .. } = &actions[0] else {
             panic!("expected Begin");
         };
         let id = draft.id.clone();
-        handle(
-            &mut engine,
-            retail.clone(),
-            100,
-            combatant("Player-1-A", Some(0), Some(71)),
-            &config,
-        );
-        handle(
-            &mut engine,
-            retail,
+        engine.feed(100, combatant("Player-1-A", Some(0), Some(71)));
+        engine.feed(
             200,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
-            &config,
         );
         let ended = engine.force_end(GameFlavor::Retail, 120_000);
         assert_eq!(

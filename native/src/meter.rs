@@ -1477,51 +1477,146 @@ mod tests {
     const ALLY: u64 = PLAYER | 0x2;
     const MOB: u64 = 0x10a48;
     const FRIENDLY_PLAYER: u64 = PLAYER | 0x400;
+
+    // Fixed-actor damage helpers. For hostile destinations the GUID is never
+    // consulted, so the name doubles as the GUID.
+
+    /// Player-0-A damaging `dest` with no target marker.
+    fn hit(
+        meter: &mut MeterAccumulator,
+        dest: &str,
+        dest_flags: u64,
+        spell: &str,
+        amount: u64,
+        at_ms: i64,
+    ) {
+        meter.damage(
+            "Player-0-A",
+            "A",
+            PLAYER,
+            dest,
+            dest,
+            dest_flags,
+            0,
+            spell,
+            amount,
+            at_ms,
+        );
+    }
+
+    /// The unowned pet staying its own row.
+    fn pet_hit(meter: &mut MeterAccumulator, dest: &str, spell: &str, amount: u64, at_ms: i64) {
+        meter.damage(
+            "Pet-0-1", "Imp", PLAYER, dest, dest, 0, 0, spell, amount, at_ms,
+        );
+    }
+
+    /// The host damaging trash or boss targets.
+    fn host_hit(meter: &mut MeterAccumulator, dest: &str, spell: &str, amount: u64, at_ms: i64) {
+        meter.damage(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            dest,
+            dest,
+            MOB,
+            0,
+            spell,
+            amount,
+            at_ms,
+        );
+    }
+
+    /// A group ally damaging trash or boss targets.
+    fn ally_hit(meter: &mut MeterAccumulator, dest: &str, spell: &str, amount: u64, at_ms: i64) {
+        meter.damage(
+            "Player-0-ALLY",
+            "Ally",
+            ALLY,
+            dest,
+            dest,
+            MOB,
+            0,
+            spell,
+            amount,
+            at_ms,
+        );
+    }
+
+    /// A hostile mob hitting a friendly player: the death-log input, whose
+    /// victim GUID (keyed by the death log) differs from the display name.
+    fn mob_hit(
+        meter: &mut MeterAccumulator,
+        victim_guid: &str,
+        victim_name: &str,
+        spell: &str,
+        amount: u64,
+        at_ms: i64,
+    ) {
+        meter.damage(
+            "Creature-0-MOB",
+            "Mob",
+            MOB,
+            victim_guid,
+            victim_name,
+            FRIENDLY_PLAYER,
+            0,
+            spell,
+            amount,
+            at_ms,
+        );
+    }
+
+    /// The host healing a group member with "Heal", all effective.
+    fn heal_host(meter: &mut MeterAccumulator, dest: &str, amount: u64, at_ms: i64) {
+        meter.heal(
+            "Player-0-HOST",
+            "Host",
+            SELF,
+            dest,
+            dest,
+            0,
+            0,
+            "Heal",
+            amount,
+            0,
+            at_ms,
+        );
+    }
+
+    /// Player-0-A carrying an aura themselves.
+    fn buff(meter: &mut MeterAccumulator, event: BuffEvent, spell: &str, at_ms: i64) {
+        meter.buff(event, "Player-0-A", "A", FRIENDLY_PLAYER, spell, at_ms);
+    }
+
+    /// The support wiring under test: Player-0-B boosting Player-0-A's
+    /// damage on the boss.
+    fn support(meter: &mut MeterAccumulator, spell: &str, amount: u64, at_ms: i64) {
+        meter.support(
+            MeterMetric::Damage,
+            "Player-0-B",
+            "Player-0-A",
+            "Boss",
+            0,
+            spell,
+            amount,
+            0,
+            at_ms,
+        );
+    }
+
     /// Per-hit extremes and the per-spell target split, both limited to the
     /// playhead like every other projected figure.
     #[test]
     fn spell_detail_carries_extremes_and_targets() {
         let mut meter = MeterAccumulator::new(0, None);
-        meter.damage(
-            "Player-0-A",
-            "A",
-            PLAYER,
-            "Boss-1",
-            "Boss",
-            0,
-            0,
-            "Bolt",
-            100,
-            1_000,
-        );
-        meter.damage(
-            "Player-0-A",
-            "A",
-            PLAYER,
-            "Add-1",
-            "Add",
-            0,
-            0,
-            "Bolt",
-            40,
-            1_000,
-        );
-        meter.damage(
-            "Player-0-A",
-            "A",
-            PLAYER,
-            "Boss-1",
-            "Boss",
-            0,
-            0,
-            "Bolt",
-            300,
-            4_000,
-        );
+        hit(&mut meter, "Boss", 0, "Bolt", 100, 1_000);
+        hit(&mut meter, "Add", 0, "Bolt", 40, 1_000);
+        hit(&mut meter, "Boss", 0, "Bolt", 300, 4_000);
         let data = meter.drain(5_000, 0, "Fight", &HashMap::new());
         let fight = &data.fights[0];
 
-        let early = project_current(&fight_slice(fight), 2_000).expect("fight at 2s");
+        let early = project_current(std::slice::from_ref(fight), 2_000).expect("fight at 2s");
         let bolt = &early.actors[0].spells[0];
         assert_eq!(
             (bolt.amount, bolt.hits, bolt.min, bolt.max),
@@ -1535,7 +1630,7 @@ mod tests {
         targets.sort();
         assert_eq!(targets, [("Add", 40), ("Boss", 100)]);
 
-        let late = project_current(&fight_slice(fight), 5_000).expect("fight at 5s");
+        let late = project_current(std::slice::from_ref(fight), 5_000).expect("fight at 5s");
         let bolt = &late.actors[0].spells[0];
         assert_eq!((bolt.amount, bolt.min, bolt.max), (440, 40, 300));
         assert_eq!(
@@ -1547,16 +1642,10 @@ mod tests {
         );
     }
 
-    fn fight_slice(fight: &MeterFight) -> Vec<MeterFight> {
-        vec![fight.clone()]
-    }
-
     #[test]
     fn pet_damage_before_summon_merges_into_owner() {
         let mut meter = MeterAccumulator::new(0, None);
-        meter.damage(
-            "Pet-0-1", "Imp", PLAYER, "Boss", "Boss", 0, 0, "Firebolt", 100, 5_000,
-        );
+        pet_hit(&mut meter, "Boss", "Firebolt", 100, 5_000);
         meter.record_owner("Pet-0-1", "Player-0-A", None);
         let mut names = HashMap::new();
         names.insert("Player-0-A".to_owned(), "Warlock".to_owned());
@@ -1585,18 +1674,7 @@ mod tests {
             50,
             1_000,
         );
-        meter.damage(
-            "Player-0-A",
-            "A",
-            PLAYER,
-            "Boss",
-            "Boss",
-            0,
-            0,
-            "Hit",
-            80,
-            2_000,
-        );
+        hit(&mut meter, "Boss", 0, "Hit", 80, 2_000);
         let data = meter.drain(3_000, 0, "Fight", &HashMap::new());
         let fight = &data.fights[0];
         assert_eq!(fight.actors.len(), 1);
@@ -1642,39 +1720,9 @@ mod tests {
             100,
             1_200,
         );
-        meter.support(
-            MeterMetric::Damage,
-            "Player-0-B",
-            "Player-0-A",
-            "Boss",
-            0,
-            "Ebon Might",
-            30,
-            0,
-            1_200,
-        );
-        meter.support(
-            MeterMetric::Damage,
-            "Player-0-B",
-            "Player-0-A",
-            "Boss",
-            0,
-            "Prescience",
-            10,
-            0,
-            1_200,
-        );
-        meter.support(
-            MeterMetric::Damage,
-            "Player-0-B",
-            "Player-0-A",
-            "Boss",
-            0,
-            "Stale support",
-            10,
-            0,
-            2_201,
-        );
+        support(&mut meter, "Ebon Might", 30, 1_200);
+        support(&mut meter, "Prescience", 10, 1_200);
+        support(&mut meter, "Stale support", 10, 2_201);
         let mut names = HashMap::new();
         names.insert("Player-0-B".to_owned(), "Supporter".to_owned());
         let data = meter.drain(3_000, 0, "Fight", &names);
@@ -1738,18 +1786,7 @@ mod tests {
             10,
             1_000,
         );
-        meter.damage(
-            "Player-0-A",
-            "A",
-            PLAYER,
-            "Boss",
-            "Boss",
-            0,
-            0,
-            "Hit",
-            20,
-            2_000,
-        );
+        hit(&mut meter, "Boss", 0, "Hit", 20, 2_000);
         meter.damage(
             "Player-0-A",
             "A",
@@ -1780,30 +1817,10 @@ mod tests {
         for index in 0..20i64 {
             let amount = (index + 1) as u64;
             total += amount;
-            meter.damage(
-                "Player-0-A",
-                "A",
-                PLAYER,
-                "Boss",
-                "Boss",
-                0,
-                0,
-                &format!("Spell {index}"),
-                amount,
-                1_000 + index,
-            );
-            meter.damage(
-                "Pet-0-1",
-                "Imp",
-                PLAYER,
-                "Boss",
-                "Boss",
-                0,
-                0,
-                &format!("Pet Spell {index}"),
-                amount,
-                1_000 + index,
-            );
+            let spell = format!("Spell {index}");
+            hit(&mut meter, "Boss", 0, &spell, amount, 1_000 + index);
+            let spell = format!("Pet Spell {index}");
+            pet_hit(&mut meter, "Boss", &spell, amount, 1_000 + index);
         }
         meter.record_owner("Pet-0-1", "Player-0-A", None);
         let data = meter.drain(5_000, 0, "Fight", &HashMap::new());
@@ -1853,30 +1870,8 @@ mod tests {
         );
         // A pet's own casts are the game acting, never a button press.
         meter.cast("Pet-0-1", "Imp", PLAYER, "Firebolt", 5_000);
-        meter.damage(
-            "Player-0-A",
-            "A",
-            PLAYER,
-            "Boss",
-            "Boss",
-            MOB,
-            0,
-            "Frostbolt",
-            50_000,
-            10_000,
-        );
-        meter.damage(
-            "Player-0-A",
-            "A",
-            PLAYER,
-            "Boss",
-            "Boss",
-            MOB,
-            0,
-            "Frostbolt",
-            50_000,
-            15_000,
-        );
+        hit(&mut meter, "Boss", MOB, "Frostbolt", 50_000, 10_000);
+        hit(&mut meter, "Boss", MOB, "Frostbolt", 50_000, 15_000);
         meter.cast("Player-0-A", "A", FRIENDLY_PLAYER, "Frostbolt", 20_000);
         // Book-keeping casts the game fires for itself, well above any rate a
         // player presses a button at.
@@ -1915,38 +1910,10 @@ mod tests {
     #[test]
     fn buffs_measure_uptime_and_count_applications() {
         let mut meter = MeterAccumulator::new(0, None);
-        meter.buff(
-            BuffEvent::Applied,
-            "Player-0-A",
-            "A",
-            FRIENDLY_PLAYER,
-            "Bloodlust",
-            1_000,
-        );
-        meter.buff(
-            BuffEvent::Refreshed,
-            "Player-0-A",
-            "A",
-            FRIENDLY_PLAYER,
-            "Bloodlust",
-            2_000,
-        );
-        meter.buff(
-            BuffEvent::Removed,
-            "Player-0-A",
-            "A",
-            FRIENDLY_PLAYER,
-            "Bloodlust",
-            4_000,
-        );
-        meter.buff(
-            BuffEvent::Applied,
-            "Player-0-A",
-            "A",
-            FRIENDLY_PLAYER,
-            "Bloodlust",
-            5_000,
-        );
+        buff(&mut meter, BuffEvent::Applied, "Bloodlust", 1_000);
+        buff(&mut meter, BuffEvent::Refreshed, "Bloodlust", 2_000);
+        buff(&mut meter, BuffEvent::Removed, "Bloodlust", 4_000);
+        buff(&mut meter, BuffEvent::Applied, "Bloodlust", 5_000);
         let data = meter.drain(10_000, 0, "Fight", &HashMap::new());
         let buffs = |fights: &[MeterFight], position_ms: u64| {
             project_overall(fights, position_ms)
@@ -1977,52 +1944,17 @@ mod tests {
             "Enrage",
             1_000,
         );
-        meter.buff(
-            BuffEvent::Applied,
-            "Player-0-A",
-            "A",
-            FRIENDLY_PLAYER,
-            "Bloodlust",
-            1_000,
-        );
+        buff(&mut meter, BuffEvent::Applied, "Bloodlust", 1_000);
         // A re-application without a removal closes the stale span first.
-        meter.buff(
-            BuffEvent::Applied,
-            "Player-0-A",
-            "A",
-            FRIENDLY_PLAYER,
-            "Bloodlust",
-            2_000,
-        );
+        buff(&mut meter, BuffEvent::Applied, "Bloodlust", 2_000);
         // An unaligned boundary: the closing credit's bucket (5_000) rounds
         // past the cut, and the fight must still end late enough to reach it.
         meter.cut(4_700, "Boss".to_owned());
         // A removal without an intervening application belongs to no span.
-        meter.buff(
-            BuffEvent::Removed,
-            "Player-0-A",
-            "A",
-            FRIENDLY_PLAYER,
-            "Bloodlust",
-            4_800,
-        );
+        buff(&mut meter, BuffEvent::Removed, "Bloodlust", 4_800);
         // A refresh after the boundary re-opens the span this fight.
-        meter.buff(
-            BuffEvent::Refreshed,
-            "Player-0-A",
-            "A",
-            FRIENDLY_PLAYER,
-            "Bloodlust",
-            6_000,
-        );
-        meter.buff(
-            BuffEvent::Removed,
-            "Player-0-A",
-            "A",
-            FRIENDLY_PLAYER,
-            "Bloodlust",
-            8_000,
-        );
+        buff(&mut meter, BuffEvent::Refreshed, "Bloodlust", 6_000);
+        buff(&mut meter, BuffEvent::Removed, "Bloodlust", 8_000);
         let data = meter.drain(10_000, 0, "Trash", &HashMap::new());
         let first = data.fights[0].actors[0]
             .spells
@@ -2068,30 +2000,8 @@ mod tests {
             245_000,
             1_000,
         );
-        meter.damage(
-            "Player-0-HOST",
-            "Host",
-            SELF,
-            "Trash",
-            "Trash",
-            MOB,
-            0,
-            "Strike",
-            100_000,
-            31_000,
-        );
-        meter.damage(
-            "Player-0-HOST",
-            "Host",
-            SELF,
-            "Trash",
-            "Trash",
-            MOB,
-            0,
-            "Strike",
-            100_000,
-            35_000,
-        );
+        host_hit(&mut meter, "Trash", "Strike", 100_000, 31_000);
+        host_hit(&mut meter, "Trash", "Strike", 100_000, 35_000);
 
         let data = meter.drain(40_000, 0, "Dungeon", &HashMap::new());
         assert_eq!(data.fights.len(), 2);
@@ -2117,42 +2027,9 @@ mod tests {
     #[test]
     fn a_pull_gap_freezes_current_and_keeps_later_ally_damage_overall() {
         let mut meter = MeterAccumulator::trash(0);
-        meter.damage(
-            "Player-0-HOST",
-            "Host",
-            SELF,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "Hit",
-            10,
-            1_000,
-        );
-        meter.damage(
-            "Player-0-HOST",
-            "Host",
-            SELF,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "Hit",
-            20,
-            3_000,
-        );
-        meter.damage(
-            "Player-0-ALLY",
-            "Ally",
-            ALLY,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "Hit",
-            30,
-            30_000,
-        );
+        host_hit(&mut meter, "Mob", "Hit", 10, 1_000);
+        host_hit(&mut meter, "Mob", "Hit", 20, 3_000);
+        ally_hit(&mut meter, "Mob", "Hit", 30, 30_000);
 
         let data = meter.drain(40_000, 0, "Dungeon", &HashMap::new());
         assert_eq!(data.fights.len(), 3);
@@ -2177,18 +2054,7 @@ mod tests {
     #[test]
     fn damage_taken_by_the_host_starts_current() {
         let mut meter = MeterAccumulator::trash(0);
-        meter.damage(
-            "Player-0-ALLY",
-            "Ally",
-            ALLY,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "Hit",
-            10,
-            1_000,
-        );
+        ally_hit(&mut meter, "Mob", "Hit", 10, 1_000);
         meter.damage(
             "Creature-0-MOB",
             "Mob",
@@ -2201,18 +2067,7 @@ mod tests {
             50,
             4_000,
         );
-        meter.damage(
-            "Player-0-ALLY",
-            "Ally",
-            ALLY,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "Hit",
-            20,
-            5_000,
-        );
+        ally_hit(&mut meter, "Mob", "Hit", 20, 5_000);
 
         let data = meter.drain(10_000, 0, "Dungeon", &HashMap::new());
         assert_eq!(data.fights.len(), 2);
@@ -2227,43 +2082,10 @@ mod tests {
     fn death_events_from_earlier_pulls_do_not_bleed_in() {
         let mut meter = MeterAccumulator::trash(0);
         // An ally takes damage during a first pull that ends without a death.
-        meter.damage(
-            "Creature-0-MOB",
-            "Mob",
-            MOB,
-            "Player-0-ALLY",
-            "Ally",
-            FRIENDLY_PLAYER,
-            0,
-            "Stale Hit",
-            10,
-            1_000,
-        );
+        mob_hit(&mut meter, "Player-0-ALLY", "Ally", "Stale Hit", 10, 1_000);
         // The host opens a new pull beyond the gap; the ally dies to one hit.
-        meter.damage(
-            "Player-0-HOST",
-            "Host",
-            SELF,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "Hit",
-            20,
-            30_000,
-        );
-        meter.damage(
-            "Creature-0-MOB",
-            "Mob",
-            MOB,
-            "Player-0-ALLY",
-            "Ally",
-            FRIENDLY_PLAYER,
-            0,
-            "Kill",
-            500,
-            31_000,
-        );
+        host_hit(&mut meter, "Mob", "Hit", 20, 30_000);
+        mob_hit(&mut meter, "Player-0-ALLY", "Ally", "Kill", 500, 31_000);
         meter.death("Player-0-ALLY", "Ally", 31_100);
 
         let data = meter.drain(40_000, 0, "Dungeon", &HashMap::new());
@@ -2280,57 +2102,20 @@ mod tests {
         for (at, hp) in [(1_000, 300_000), (2_000, 220_000)] {
             // Spell hits carry the victim's HP after the hit.
             meter.note_hp("Player-0-ALLY", hp, 500_000, at);
-            meter.damage(
-                "Creature-0-MOB",
-                "Mob",
-                MOB,
-                "Player-0-ALLY",
-                "Ally",
-                FRIENDLY_PLAYER,
-                0,
-                "Early Hit",
-                10,
-                at,
-            );
+            mob_hit(&mut meter, "Player-0-ALLY", "Ally", "Early Hit", 10, at);
         }
         // The host joins the same pull, splitting the fight into Current.
-        meter.damage(
-            "Player-0-HOST",
-            "Host",
-            SELF,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "Strike",
-            20,
-            3_000,
-        );
+        host_hit(&mut meter, "Mob", "Strike", 20, 3_000);
         // A swing reports the swinger's HP, not the victim's, so the killing
         // blow's remainder is derived from the amount.
-        meter.damage(
-            "Creature-0-MOB",
-            "Mob",
-            MOB,
-            "Player-0-ALLY",
-            "Ally",
-            FRIENDLY_PLAYER,
-            0,
-            "Kill",
-            500,
-            3_400,
-        );
+        mob_hit(&mut meter, "Player-0-ALLY", "Ally", "Kill", 500, 3_400);
         // The killing blow's own line reports the post-hit HP, so overkill
         // must be measured against the HP standing before it.
         meter.note_hp("Player-0-ALLY", 0, 500_000, 3_450);
-        meter.damage(
-            "Creature-0-MOB",
-            "Mob",
-            MOB,
+        mob_hit(
+            &mut meter,
             "Player-0-ALLY",
             "Ally",
-            FRIENDLY_PLAYER,
-            0,
             "Killing Blow",
             300_000,
             3_450,
@@ -2353,93 +2138,13 @@ mod tests {
     #[test]
     fn healer_joined_pull_still_splits_after_damage_silence() {
         let mut meter = MeterAccumulator::trash(0);
-        meter.damage(
-            "Player-0-ALLY",
-            "Ally",
-            ALLY,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "Hit",
-            10,
-            100_000,
-        );
-        meter.damage(
-            "Player-0-ALLY",
-            "Ally",
-            ALLY,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "Hit",
-            10,
-            110_000,
-        );
-        meter.heal(
-            "Player-0-HOST",
-            "Host",
-            SELF,
-            "Ally",
-            "Ally",
-            0,
-            0,
-            "Heal",
-            100,
-            0,
-            112_000,
-        );
-        meter.heal(
-            "Player-0-HOST",
-            "Host",
-            SELF,
-            "Ally",
-            "Ally",
-            0,
-            0,
-            "Heal",
-            100,
-            0,
-            129_000,
-        );
-        meter.damage(
-            "Player-0-ALLY",
-            "Ally",
-            ALLY,
-            "Mob 2",
-            "Mob 2",
-            MOB,
-            0,
-            "Hit",
-            10,
-            130_000,
-        );
-        meter.damage(
-            "Player-0-HOST",
-            "Host",
-            SELF,
-            "Mob 2",
-            "Mob 2",
-            MOB,
-            0,
-            "Hit",
-            10,
-            131_000,
-        );
-        meter.heal(
-            "Player-0-HOST",
-            "Host",
-            SELF,
-            "Host",
-            "Host",
-            0,
-            0,
-            "Heal",
-            50,
-            0,
-            132_000,
-        );
+        ally_hit(&mut meter, "Mob", "Hit", 10, 100_000);
+        ally_hit(&mut meter, "Mob", "Hit", 10, 110_000);
+        heal_host(&mut meter, "Ally", 100, 112_000);
+        heal_host(&mut meter, "Ally", 100, 129_000);
+        ally_hit(&mut meter, "Mob 2", "Hit", 10, 130_000);
+        host_hit(&mut meter, "Mob 2", "Hit", 10, 131_000);
+        heal_host(&mut meter, "Host", 50, 132_000);
 
         let data = meter.drain(140_000, 0, "Dungeon", &HashMap::new());
         let current = project_current(&data.fights, 140_000).unwrap();
@@ -2459,56 +2164,12 @@ mod tests {
     #[test]
     fn host_death_keeps_the_group_fight_current() {
         let mut meter = MeterAccumulator::trash(0);
-        meter.damage(
-            "Player-0-HOST",
-            "Host",
-            SELF,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "Hit",
-            10,
-            1_000,
-        );
-        meter.damage(
-            "Player-0-ALLY",
-            "Ally",
-            ALLY,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "Hit",
-            20,
-            3_000,
-        );
+        host_hit(&mut meter, "Mob", "Hit", 10, 1_000);
+        ally_hit(&mut meter, "Mob", "Hit", 20, 3_000);
         meter.host_died();
         // Lingering host effects and surviving allies stay in the same fight.
-        meter.damage(
-            "Player-0-HOST",
-            "Host",
-            SELF,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "DoT",
-            5,
-            5_000,
-        );
-        meter.damage(
-            "Player-0-ALLY",
-            "Ally",
-            ALLY,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "Hit",
-            30,
-            7_000,
-        );
+        host_hit(&mut meter, "Mob", "DoT", 5, 5_000);
+        ally_hit(&mut meter, "Mob", "Hit", 30, 7_000);
 
         let data = meter.drain(10_000, 0, "Dungeon", &HashMap::new());
         assert_eq!(data.fights.len(), 2);
@@ -2530,43 +2191,10 @@ mod tests {
     #[test]
     fn boss_cuts_override_host_state_then_return_to_ambient_trash() {
         let mut meter = MeterAccumulator::trash(0);
-        meter.damage(
-            "Player-0-ALLY",
-            "Ally",
-            ALLY,
-            "Mob",
-            "Mob",
-            MOB,
-            0,
-            "Hit",
-            10,
-            1_000,
-        );
+        ally_hit(&mut meter, "Mob", "Hit", 10, 1_000);
         meter.cut(10_000, "Boss".to_owned());
-        meter.damage(
-            "Player-0-ALLY",
-            "Ally",
-            ALLY,
-            "Boss",
-            "Boss",
-            MOB,
-            0,
-            "Hit",
-            20,
-            11_000,
-        );
-        meter.damage(
-            "Player-0-ALLY",
-            "Ally",
-            ALLY,
-            "Boss",
-            "Boss",
-            MOB,
-            0,
-            "Hit",
-            30,
-            30_000,
-        );
+        ally_hit(&mut meter, "Boss", "Hit", 20, 11_000);
+        ally_hit(&mut meter, "Boss", "Hit", 30, 30_000);
         meter.cut_to_trash(40_000);
 
         let data = meter.drain(50_000, 0, "Dungeon", &HashMap::new());
@@ -2581,30 +2209,8 @@ mod tests {
     #[test]
     fn projections_advance_on_half_second_samples() {
         let mut meter = MeterAccumulator::new(0, None);
-        meter.damage(
-            "Player-0-A",
-            "A",
-            PLAYER,
-            "Boss",
-            "Boss",
-            MOB,
-            0,
-            "Hit",
-            10,
-            100,
-        );
-        meter.damage(
-            "Player-0-A",
-            "A",
-            PLAYER,
-            "Boss",
-            "Boss",
-            MOB,
-            0,
-            "Hit",
-            20,
-            600,
-        );
+        hit(&mut meter, "Boss", MOB, "Hit", 10, 100);
+        hit(&mut meter, "Boss", MOB, "Hit", 20, 600);
         let data = meter.drain(1_500, 0, "Fight", &HashMap::new());
 
         assert!(
@@ -2630,43 +2236,10 @@ mod tests {
     #[test]
     fn cut_splits_fights_at_segment_boundaries() {
         let mut meter = MeterAccumulator::new(0, Some("Trash".to_owned()));
-        meter.damage(
-            "Player-0-A",
-            "A",
-            PLAYER,
-            "Boss",
-            "Boss",
-            0,
-            0,
-            "Hit",
-            10,
-            1_000,
-        );
-        meter.damage(
-            "Player-0-A",
-            "A",
-            PLAYER,
-            "Boss",
-            "Boss",
-            0,
-            0,
-            "Hit",
-            5,
-            1_500,
-        );
+        hit(&mut meter, "Boss", 0, "Hit", 10, 1_000);
+        hit(&mut meter, "Boss", 0, "Hit", 5, 1_500);
         meter.cut(2_000, "Boss One".to_owned());
-        meter.damage(
-            "Player-0-A",
-            "A",
-            PLAYER,
-            "Boss",
-            "Boss",
-            0,
-            0,
-            "Hit",
-            20,
-            3_000,
-        );
+        hit(&mut meter, "Boss", 0, "Hit", 20, 3_000);
         let data = meter.drain(4_000, 0, "Fight", &HashMap::new());
         assert_eq!(data.fights.len(), 2);
         assert_eq!(data.fights[0].label, "Trash");
@@ -2713,9 +2286,7 @@ mod tests {
             1_000,
         );
         // Player-controlled pet without an ownership record stays its own row.
-        meter.damage(
-            "Pet-0-1", "Imp", PLAYER, "Boss", "Boss", 0, 0, "Firebolt", 100, 2_000,
-        );
+        pet_hit(&mut meter, "Boss", "Firebolt", 100, 2_000);
         let data = meter.drain(3_000, 0, "Fight", &HashMap::new());
         let actors = &data.fights[0].actors;
         assert_eq!(actors.len(), 1);
@@ -2726,18 +2297,7 @@ mod tests {
     #[test]
     fn damage_taken_uses_destination_without_changing_active_time() {
         let mut meter = MeterAccumulator::new(0, None);
-        meter.damage(
-            "Creature-0-MOB",
-            "Mob",
-            MOB,
-            "Player-0-TANK",
-            "Tank",
-            FRIENDLY_PLAYER,
-            0,
-            "Claw",
-            30,
-            500,
-        );
+        mob_hit(&mut meter, "Player-0-TANK", "Tank", "Claw", 30, 500);
         meter.damage(
             "Player-0-A",
             "A",
@@ -2762,18 +2322,7 @@ mod tests {
             20,
             3_000,
         );
-        meter.damage(
-            "Creature-0-MOB",
-            "Mob",
-            MOB,
-            "Player-0-TANK",
-            "Tank",
-            FRIENDLY_PLAYER,
-            0,
-            "Claw",
-            40,
-            4_000,
-        );
+        mob_hit(&mut meter, "Player-0-TANK", "Tank", "Claw", 40, 4_000);
         let data = meter.drain(4_500, 0, "Fight", &HashMap::new());
         let fight = &data.fights[0];
         assert_eq!(fight.active_ms, 2_000);
@@ -2799,14 +2348,10 @@ mod tests {
             if index == 6 {
                 meter.cut(5_500, "Boss".to_owned());
             }
-            meter.damage(
-                "Creature-0-MOB",
-                "Mob",
-                MOB,
+            mob_hit(
+                &mut meter,
                 "Player-0-TANK",
                 "Tank",
-                FRIENDLY_PLAYER,
-                0,
                 "Claw",
                 index,
                 index as i64 * 1_000,

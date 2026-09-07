@@ -56,20 +56,11 @@ struct Harness {
 
 impl Harness {
     fn new(name: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("wr-slice-{name}-{}", uuid::Uuid::new_v4()));
-        let library = root.join("recordings with space");
-        let capture_root = root.join("buffer");
-        let log_dir = root.join("wow/_retail_/Logs");
-        for directory in [&library, &capture_root, &log_dir] {
-            fs::create_dir_all(directory).unwrap();
-        }
-        let log_file = log_dir.join("WoWCombatLog.txt");
-        fs::write(&log_file, b"").unwrap();
-        write_config(&root, &library, &capture_root, &log_dir);
+        let (root, library, capture_root, log_file) = spawn_tree(name);
         Self::attach(root, library, capture_root, log_file)
     }
 
-    /// Build a coordinator over an existing tree, as a restart would.
+    /// Build a coordinator over an existing directory tree.
     fn attach(root: PathBuf, library: PathBuf, capture_root: PathBuf, log_file: PathBuf) -> Self {
         let (commands, commands_rx) = mpsc::sync_channel(64);
         let (snapshot_tx, snapshots) = mpsc::sync_channel(1);
@@ -117,6 +108,18 @@ impl Harness {
                 self.latest.problems
             );
         }
+    }
+
+    /// Tear the coordinator down and rebuild over the same tree.
+    fn restart(self) -> Self {
+        let (root, library, capture_root, log_file) = (
+            self.root.clone(),
+            self.library.clone(),
+            self.capture_root.clone(),
+            self.log_file.clone(),
+        );
+        drop(self);
+        Self::attach(root, library, capture_root, log_file)
     }
 
     fn send(&self, command: Command) {
@@ -202,6 +205,22 @@ fn setup(root: &Path) -> Setup {
     }
 }
 
+/// A fresh temp tree: empty directories, an empty combat log, and a config
+/// pointing at them.
+fn spawn_tree(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let root = std::env::temp_dir().join(format!("wr-slice-{name}-{}", uuid::Uuid::new_v4()));
+    let library = root.join("recordings with space");
+    let capture_root = root.join("buffer");
+    let log_dir = root.join("wow/_retail_/Logs");
+    for directory in [&library, &capture_root, &log_dir] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    let log_file = log_dir.join("WoWCombatLog.txt");
+    fs::write(&log_file, b"").unwrap();
+    write_config(&root, &library, &capture_root, &log_dir);
+    (root, library, capture_root, log_file)
+}
+
 fn fixture_bin(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../tests/native/bin")
@@ -256,7 +275,6 @@ fn empty_snapshot() -> AppSnapshot {
         work: None,
         queued_jobs: 0,
         storage_used_bytes: 0,
-        storage_limit: StorageLimit::Unlimited,
         protected_over_limit: false,
     }
 }
@@ -493,19 +511,12 @@ fn automatic_raid_completes_and_survives_a_restart() {
     // Restart: a stray artifact is quarantined and the entry is rescanned.
     let stray = harness.capture_root.join("regular/Video_stray.mkv");
     fs::write(&stray, b"interrupted").unwrap();
-    let (root, library, capture_root, log_file) = (
-        harness.root.clone(),
-        harness.library.clone(),
-        harness.capture_root.clone(),
-        harness.log_file.clone(),
-    );
-    drop(harness);
-    let restarted = Harness::attach(root, library.clone(), capture_root, log_file);
+    let mut restarted = harness.restart();
     assert_eq!(restarted.latest.entries.len(), 1);
     assert!(restarted.latest.entries[0].protected);
     assert!(!stray.exists(), "stray artifact was not swept");
     assert!(
-        read_dir_count(&library.join(RECOVERY_DIR)) > 0,
+        read_dir_count(&restarted.library.join(RECOVERY_DIR)) > 0,
         "nothing was quarantined"
     );
 
@@ -513,7 +524,6 @@ fn automatic_raid_completes_and_survives_a_restart() {
     let fights = &restarted.latest.entries[0].meter.fights;
     assert_eq!(fights, &entry.meter.fights);
 
-    let mut restarted = restarted;
     let id = restarted.latest.entries[0].id.clone();
     restarted.send(Command::Delete { ids: vec![id] });
     restarted.pump(|snapshot| snapshot.entries.is_empty());
@@ -653,98 +663,53 @@ fn commands_are_served_while_a_capture_is_ending() {
 }
 
 #[test]
-fn the_migration_notice_survives_a_restart_and_one_dismissal_ends_it() {
-    let harness = Harness::new("migration-notice");
+fn dismissing_the_notice_and_the_release_notes_ends_them_for_good() {
+    let harness = Harness::new("dismissals");
     let config_path = harness.root.join("config.json");
     let mut config = Config::load(&config_path).expect("load the harness config");
     config.migration_notice_pending = true;
-    config.save(&config_path).expect("raise the notice");
-    let (root, library, capture_root, log_file) = (
-        harness.root.clone(),
-        harness.library.clone(),
-        harness.capture_root.clone(),
-        harness.log_file.clone(),
-    );
-    drop(harness);
-
-    // What the first launch after a legacy import looks like to the shell.
-    let mut harness = Harness::attach(root, library, capture_root, log_file);
-    assert!(harness.latest.config.migration_notice_pending);
-
-    harness.send(Command::DismissMigrationNotice);
-    harness.pump(|snapshot| !snapshot.config.migration_notice_pending);
-    assert!(
-        !Config::load(&config_path)
-            .expect("reload the saved config")
-            .migration_notice_pending,
-        "the dismissal must outlive the process"
-    );
-
-    // The notice offers the button that opens Settings, so the draft a save
-    // carries was cloned while the notice was still pending. Applying it must
-    // not bring the notice back, or it reappears on every later start.
-    let mut stale = harness.latest.config.clone();
-    stale.migration_notice_pending = true;
-    stale.capture.fps = 30;
-    harness.send(Command::SaveConfig {
-        draft: Box::new(stale),
-    });
-    harness.pump(|snapshot| snapshot.config.capture.fps == 30);
-    assert!(
-        !harness.latest.config.migration_notice_pending,
-        "a settings save must not resurrect the dismissed notice"
-    );
-    assert!(
-        !Config::load(&config_path)
-            .expect("reload after the settings save")
-            .migration_notice_pending,
-        "the resurrected notice must not reach disk either"
-    );
-}
-
-#[test]
-fn dismissing_the_release_notes_records_the_running_version_for_good() {
-    let harness = Harness::new("release-notes");
-    let config_path = harness.root.join("config.json");
-    let mut config = Config::load(&config_path).expect("load the harness config");
     // What an install updated from an earlier version looks like: the field
     // is missing from its config file, so it deserializes empty.
     config.last_seen_version = String::new();
-    config.save(&config_path).expect("clear the seen version");
-    let (root, library, capture_root, log_file) = (
-        harness.root.clone(),
-        harness.library.clone(),
-        harness.capture_root.clone(),
-        harness.log_file.clone(),
-    );
-    drop(harness);
-
-    let mut harness = Harness::attach(root, library, capture_root, log_file);
+    config.save(&config_path).expect("seed both pending states");
+    // What the first launch after a legacy import looks like to the shell.
+    let mut harness = harness.restart();
+    assert!(harness.latest.config.migration_notice_pending);
     assert!(harness.latest.config.last_seen_version.is_empty());
 
+    harness.send(Command::DismissMigrationNotice);
     harness.send(Command::DismissReleaseNotes);
-    harness.pump(|snapshot| snapshot.config.last_seen_version == warcraft_recorder::VERSION);
-    assert_eq!(
-        Config::load(&config_path)
-            .expect("reload the saved config")
-            .last_seen_version,
-        warcraft_recorder::VERSION,
-        "the acknowledgement must outlive the process"
+    harness.pump(|snapshot| {
+        !snapshot.config.migration_notice_pending
+            && snapshot.config.last_seen_version == warcraft_recorder::VERSION
+    });
+    let saved = Config::load(&config_path).expect("reload the saved config");
+    assert!(
+        !saved.migration_notice_pending && saved.last_seen_version == warcraft_recorder::VERSION,
+        "the dismissals must outlive the process"
     );
 
-    // Settings dialogs opened before the notes were closed carry a draft that
-    // still has the old value; applying it must not replay the dialog.
+    // The notice offers the button that opens Settings, and dialogs opened
+    // before the notes were closed carry a draft with the old values.
+    // Applying it must not replay either dialog, or they reappear on every
+    // later start.
     let mut stale = harness.latest.config.clone();
+    stale.migration_notice_pending = true;
     stale.last_seen_version = String::new();
     stale.capture.fps = 30;
     harness.send(Command::SaveConfig {
         draft: Box::new(stale),
     });
     harness.pump(|snapshot| snapshot.config.capture.fps == 30);
-    assert_eq!(
-        harness.latest.config.last_seen_version,
-        warcraft_recorder::VERSION,
-        "a settings save must not resurrect the dismissed notes"
+    assert!(
+        !harness.latest.config.migration_notice_pending
+            && harness.latest.config.last_seen_version == warcraft_recorder::VERSION,
+        "a settings save must not resurrect either dismissal"
+    );
+    let saved = Config::load(&config_path).expect("reload after the settings save");
+    assert!(
+        !saved.migration_notice_pending,
+        "the resurrected notice must not reach disk either"
     );
 }
 
@@ -766,15 +731,7 @@ fn a_dragged_layout_outlives_the_process() {
     });
     harness.pump(|snapshot| snapshot.config.interface.layout == layout);
 
-    let (root, library, capture_root, log_file) = (
-        harness.root.clone(),
-        harness.library.clone(),
-        harness.capture_root.clone(),
-        harness.log_file.clone(),
-    );
-    drop(harness);
-
-    let harness = Harness::attach(root, library, capture_root, log_file);
+    let harness = harness.restart();
     assert_eq!(harness.latest.config.interface.layout, layout);
 }
 
@@ -850,16 +807,7 @@ fn canary_harness(
     name: &str,
     protected: bool,
 ) -> (Harness, warcraft_recorder::domain::LibraryEntry) {
-    let root = std::env::temp_dir().join(format!("wr-slice-{name}-{}", uuid::Uuid::new_v4()));
-    let library = root.join("recordings with space");
-    let capture_root = root.join("buffer");
-    let log_dir = root.join("wow/_retail_/Logs");
-    for directory in [&library, &capture_root, &log_dir] {
-        fs::create_dir_all(directory).unwrap();
-    }
-    let log_file = log_dir.join("WoWCombatLog.txt");
-    fs::write(&log_file, b"").unwrap();
-    write_config(&root, &library, &capture_root, &log_dir);
+    let (root, library, capture_root, log_file) = spawn_tree(name);
     let start = now_unix_ms() - 61_000;
     fs::write(
         library.join("canary-old.json"),
@@ -987,15 +935,7 @@ fn completion_eviction_updates_the_index_without_a_full_rescan() {
 
 #[test]
 fn production_handle_starts_and_shuts_down() {
-    let root = std::env::temp_dir().join(format!("wr-slice-handle-{}", uuid::Uuid::new_v4()));
-    let library = root.join("recordings with space");
-    let capture_root = root.join("buffer");
-    let log_dir = root.join("wow/_retail_/Logs");
-    for directory in [&library, &capture_root, &log_dir] {
-        fs::create_dir_all(directory).unwrap();
-    }
-    fs::write(log_dir.join("WoWCombatLog.txt"), b"").unwrap();
-    write_config(&root, &library, &capture_root, &log_dir);
+    let (root, ..) = spawn_tree("handle");
 
     let mut handle = start(setup(&root), Box::new(|| {}));
     let mut snapshot = handle.snapshots.recv_timeout(STEP_TIMEOUT);

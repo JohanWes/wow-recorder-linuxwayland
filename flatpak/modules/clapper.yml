@@ -1,0 +1,27 @@
+name: clapper
+buildsystem: meson
+builddir: true
+config-opts:
+  - --buildtype=release
+  - -Dclapper=enabled
+  - -Dclapper-gtk=enabled
+  - -Dclapper-app=disabled
+  - -Dgst-plugin=enabled
+  - -Dintrospection=disabled
+  - -Dvapi=disabled
+  - -Ddoc=false
+  - -Denhancers-loader=disabled
+  - -Ddiscoverer=disabled
+  - -Dmpris=disabled
+  - -Dserver=disabled
+post-install:
+  - install -Dm644 ../COPYING-LGPL /app/share/licenses/$FLATPAK_ID/Clapper-COPYING-LGPL
+  - install -Dm644 ../COPYING-GPL /app/share/licenses/$FLATPAK_ID/Clapper-COPYING-GPL
+  # The native rewrite is GPL-3.0-or-later. The repository-root LICENSE is
+  # the untouched GPLv2 text for the deleted legacy app, so use Clapper's
+  # canonical GPLv3 text rather than mislabelling the legacy file.
+  - install -Dm644 ../COPYING-GPL /app/share/licenses/$FLATPAK_ID/WarcraftRecorder-GPL-3.0-or-later
+sources:
+  - type: archive
+    url: https://github.com/Rafostar/clapper/archive/refs/tags/0.10.0.tar.gz
+    sha256: 344c0f20e540a63c6fb44cdd5de88c168ed145bb66c1307e79b2b08124780118

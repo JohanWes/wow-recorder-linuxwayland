@@ -222,7 +222,7 @@ pub fn elapsed_label(anchor_unix_ms: i64, now_unix_ms: i64) -> String {
     }
 }
 
-fn recovery_label(action: RecoveryAction) -> &'static str {
+pub(crate) fn recovery_label(action: RecoveryAction) -> &'static str {
     match action {
         RecoveryAction::OpenSettings => "Open Settings",
         RecoveryAction::ReselectCaptureTarget => "Reselect capture target",
@@ -232,7 +232,7 @@ fn recovery_label(action: RecoveryAction) -> &'static str {
     }
 }
 
-fn shell_action(action: RecoveryAction) -> ShellAction {
+pub(crate) fn shell_action(action: RecoveryAction) -> ShellAction {
     match action {
         RecoveryAction::OpenSettings => ShellAction::OpenSettings,
         RecoveryAction::ReselectCaptureTarget => {

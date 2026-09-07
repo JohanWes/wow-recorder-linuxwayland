@@ -6,7 +6,7 @@
 Fetches the fully hotfix-merged SpellName, Spell and SpellMisc tables from the
 wago.tools db2-find API, joins them into a compact data/spells/spells.json
 (name/description/icon per spell), and downloads + decodes the icon textures
-(BLP2 -> 56x56 PNG) into data/spells/icons/.
+(BLP1/BLP2 -> 24x24 PNG) into data/spells/icons/.
 
 The API pages at 25 rows/page, so the table dumps are cached on disk and only
 missing pages are refetched on a re-run. Everything generated under
@@ -49,23 +49,12 @@ FILES_URL = "https://wago.tools/api/files?version={build}&format=json"
 FIND_URL = "https://wago.tools/api/db2-find/{table}?version={build}&page={page}"
 CASC_URL = "https://wago.tools/api/casc/{fdid}?version={build}"
 
-# Table -> page count. Kept in sync with the API totals; a stale low value only
-# truncates the dump, so bump when wago.tools adds rows.
+# Table -> page count. A starting guess only: fetch_pages prefers the API's
+# reported last page, so a stale value costs one extra probe instead of
+# truncating the dump.
 PAGES = {"SpellName": 16558, "Spell": 16558, "SpellMisc": 16702}
 
 _LOCK = threading.Lock()
-
-
-def http_json(url, tries=4):
-    for attempt in range(tries):
-        try:
-            req = urllib.request.Request(url, headers=UA)
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                return json.load(resp)
-        except Exception:
-            if attempt == tries - 1:
-                raise
-            time.sleep(1.5 * (attempt + 1))
 
 
 def http_bytes(url, tries=4):
@@ -78,6 +67,10 @@ def http_bytes(url, tries=4):
             if attempt == tries - 1:
                 raise
             time.sleep(1.5 * (attempt + 1))
+
+
+def http_json(url, tries=4):
+    return json.loads(http_bytes(url, tries))
 
 
 def resolve_build(requested):
@@ -254,7 +247,7 @@ def resolve_description_refs(raw_by_id):
 
 
 # ---------------------------------------------------------------------------
-# BLP2 decoding (the WoW icon texture format; gdk-pixbuf cannot read it).
+# BLP1/BLP2 decoding (the WoW icon texture format; gdk-pixbuf cannot read it).
 
 
 def _expand565(color):

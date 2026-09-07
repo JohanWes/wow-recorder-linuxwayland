@@ -499,7 +499,6 @@ pub fn present_release_notes(parent: &gtk4::Widget, sink: ActionSink, notes: &[&
 mod tests {
     use super::*;
     use warcraft_recorder::config::Config;
-    use warcraft_recorder::domain::Problem;
 
     fn snapshot(status: RecorderStatus, selected: Category, manual: bool) -> AppSnapshot {
         let mut config = Config::default();
@@ -577,26 +576,6 @@ mod tests {
         assert!(!view.stop_visible);
         assert!(!view.start_enabled);
         assert_eq!(view.elapsed_anchor_ms, None);
-    }
-
-    #[test]
-    fn failed_start_problem_is_recognized_for_the_error_bell() {
-        let mut snapshot = snapshot(RecorderStatus::Ready, Category::Manual, true);
-        snapshot.problems = vec![Problem {
-            summary: "A manual recording could not be started.".to_owned(),
-            safe_detail: None,
-            occurred_unix_ms: 10,
-            recovery_action: None,
-        }];
-        // The bar matches this summary only for clicks at or before the
-        // problem's timestamp.
-        assert!(
-            snapshot
-                .problems
-                .iter()
-                .any(|problem| problem.occurred_unix_ms >= 5
-                    && problem.summary == "A manual recording could not be started.")
-        );
     }
 
     #[test]

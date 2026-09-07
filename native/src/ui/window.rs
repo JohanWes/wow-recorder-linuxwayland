@@ -28,6 +28,7 @@ use super::operational_actions::{
 use super::player::Player;
 use super::settings::Settings;
 use super::sidebar::Sidebar;
+use super::status::{recovery_label, shell_action};
 use super::tray_backend::TrayBackend;
 use super::{ActionSink, LayoutStore, ShellAction, category_label, install_actions, primary_menu};
 
@@ -38,7 +39,6 @@ const DEFAULT_PLAYER_SPLIT: i32 = 400;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContentView {
     pub title: String,
-    pub table_empty: bool,
     pub setup_banner: Option<String>,
     pub problem_banner: Option<ProblemBanner>,
 }
@@ -51,13 +51,8 @@ pub struct ProblemBanner {
 
 pub fn content_view(snapshot: &AppSnapshot) -> ContentView {
     let selected = &snapshot.config.interface.selected_category;
-    let table_empty = !snapshot
-        .entries
-        .iter()
-        .any(|entry| &entry.category == selected);
     ContentView {
         title: category_label(selected).to_owned(),
-        table_empty,
         setup_banner: snapshot
             .setup_problems
             .first()
@@ -66,16 +61,6 @@ pub fn content_view(snapshot: &AppSnapshot) -> ContentView {
             summary: problem.summary.clone(),
             action: problem.recovery_action,
         }),
-    }
-}
-
-fn recovery_label(action: RecoveryAction) -> &'static str {
-    match action {
-        RecoveryAction::OpenSettings => "Open Settings",
-        RecoveryAction::ReselectCaptureTarget => "Reselect capture target",
-        RecoveryAction::Retry => "Try again",
-        RecoveryAction::OpenLogs => "Open logs",
-        RecoveryAction::Quit => "Quit",
     }
 }
 
@@ -179,6 +164,7 @@ pub struct Shell {
     nav_page: adw::NavigationPage,
     setup_banner: adw::Banner,
     problem_banner: adw::Banner,
+    problem_action: Rc<Cell<Option<RecoveryAction>>>,
     library: Library,
     player: Rc<Player>,
     manual_bar: ManualBar,
@@ -274,16 +260,15 @@ impl Shell {
             });
         }
         let problem_banner = adw::Banner::new("");
+        // `adw::Banner` only exposes its button label, so the typed action is
+        // carried here rather than reverse-mapped from displayed English.
+        let problem_action: Rc<Cell<Option<RecoveryAction>>> = Rc::default();
         {
             let sink = Rc::clone(&sink);
-            let banner = problem_banner.clone();
+            let problem_action = Rc::clone(&problem_action);
             problem_banner.connect_button_clicked(move |_| {
-                if let Some(action) = banner
-                    .button_label()
-                    .as_deref()
-                    .and_then(recovery_from_label)
-                {
-                    sink(recovery_shell_action(action));
+                if let Some(action) = problem_action.get() {
+                    sink(shell_action(action));
                 }
             });
         }
@@ -450,6 +435,7 @@ impl Shell {
             nav_page,
             setup_banner,
             problem_banner,
+            problem_action,
             library,
             player,
             manual_bar,
@@ -539,9 +525,13 @@ impl Shell {
                 self.problem_banner.set_title(&problem.summary);
                 self.problem_banner
                     .set_button_label(problem.action.map(recovery_label));
+                self.problem_action.set(problem.action);
                 self.problem_banner.set_revealed(true);
             }
-            None => self.problem_banner.set_revealed(false),
+            None => {
+                self.problem_action.set(None);
+                self.problem_banner.set_revealed(false);
+            }
         }
 
         // Last, so a notice lands over a window that already shows the real
@@ -701,29 +691,6 @@ fn make_sink(
     sink
 }
 
-fn recovery_from_label(label: &str) -> Option<RecoveryAction> {
-    match label {
-        "Open Settings" => Some(RecoveryAction::OpenSettings),
-        "Reselect capture target" => Some(RecoveryAction::ReselectCaptureTarget),
-        "Try again" => Some(RecoveryAction::Retry),
-        "Open logs" => Some(RecoveryAction::OpenLogs),
-        "Quit" => Some(RecoveryAction::Quit),
-        _ => None,
-    }
-}
-
-fn recovery_shell_action(action: RecoveryAction) -> ShellAction {
-    match action {
-        RecoveryAction::OpenSettings => ShellAction::OpenSettings,
-        RecoveryAction::ReselectCaptureTarget => {
-            ShellAction::Command(Command::ReselectCaptureTarget)
-        }
-        RecoveryAction::Retry => ShellAction::Retry,
-        RecoveryAction::OpenLogs => ShellAction::OpenLogs,
-        RecoveryAction::Quit => ShellAction::Quit,
-    }
-}
-
 /// Open (or re-present) the one Settings dialog against the newest snapshot.
 fn open_settings(
     window: &adw::ApplicationWindow,
@@ -809,7 +776,7 @@ pub(crate) mod tests {
     use warcraft_recorder::config::Config;
     use warcraft_recorder::domain::{
         ActivityDetails, Category, Codec, CorrelatedActivity, GameFlavor, LibraryEntry, MediaFacts,
-        MeterData, Outcome, Problem, RecorderStatus, RecordingId, StorageLimit,
+        MeterData, Outcome, Problem, RecorderStatus, RecordingId,
     };
 
     pub(crate) fn entry(category: Category, title: &str, start_unix_ms: i64) -> LibraryEntry {
@@ -869,7 +836,6 @@ pub(crate) mod tests {
             work: None,
             queued_jobs: 0,
             storage_used_bytes: 0,
-            storage_limit: StorageLimit::Unlimited,
             protected_over_limit: false,
         }
     }
@@ -879,17 +845,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn content_title_and_empty_state_follow_the_selected_category() {
+    fn content_title_follows_the_selected_category() {
         let snapshot = snapshot_with_entries(Vec::new());
-        let view = content_view(&snapshot);
-        assert_eq!(view.title, "3v3");
-        assert!(view.table_empty);
+        assert_eq!(content_view(&snapshot).title, "3v3");
 
         let mut snapshot = snapshot_with_entries(vec![entry(Category::Raids, "Boss", 10)]);
         snapshot.config.interface.selected_category = Category::Raids;
-        let view = content_view(&snapshot);
-        assert_eq!(view.title, "Raids");
-        assert!(!view.table_empty);
+        assert_eq!(content_view(&snapshot).title, "Raids");
     }
 
     #[test]

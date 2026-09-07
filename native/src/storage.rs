@@ -1960,6 +1960,12 @@ pub fn now_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Unique temporary root for one test tree, `wr-<prefix>-<uuid>`.
+#[cfg(test)]
+pub(crate) fn test_root(prefix: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("wr-{prefix}-{}", uuid::Uuid::new_v4()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2151,8 +2157,7 @@ mod tests {
 
     impl TempTree {
         fn new(name: &str) -> Self {
-            let root =
-                std::env::temp_dir().join(format!("wr-storage-{name}-{}", uuid::Uuid::new_v4()));
+            let root = test_root(&format!("storage-{name}"));
             let tree = Self { root };
             tree.storage().prepare().expect("prepare");
             fs::create_dir_all(tree.capture_root().join("replay")).expect("replay dir");

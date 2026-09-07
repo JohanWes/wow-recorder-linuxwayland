@@ -1100,8 +1100,7 @@ mod tests {
     }
 
     fn test_config(name: &str) -> CaptureConfig {
-        let root =
-            std::env::temp_dir().join(format!("wr-recorder-{name}-{}", uuid::Uuid::new_v4()));
+        let root = crate::storage::test_root(&format!("recorder-{name}"));
         CaptureConfig {
             gsr_binary: fake_gsr(),
             data_dir: root.join("data dir with späce"),

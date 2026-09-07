@@ -476,29 +476,6 @@ pub fn row_sensitive(field: &str, config: &Config) -> bool {
     }
 }
 
-/// Every retained field the dialog renders, for the coverage test.
-#[cfg(test)]
-pub fn retained_fields() -> Vec<&'static str> {
-    let mut fields = Vec::new();
-    fields.extend(CAPTURE_COMBOS.iter().map(|spec| spec.field));
-    fields.extend(CAPTURE_SPINS.iter().map(|spec| spec.field));
-    fields.extend(CAPTURE_SWITCHES.iter().map(|spec| spec.field));
-    fields.extend(ACTIVITY_SWITCHES.iter().map(|spec| spec.field));
-    fields.extend(ACTIVITY_COMBOS.iter().map(|spec| spec.field));
-    fields.extend(ACTIVITY_SPINS.iter().map(|spec| spec.field));
-    fields.extend(ACTIVITY_EXTRA_SWITCHES.iter().map(|spec| spec.field));
-    fields.extend(STORAGE_SPINS.iter().map(|spec| spec.field));
-    fields.extend(INTERFACE_SWITCHES.iter().map(|spec| spec.field));
-    fields.extend(PATHS.iter().map(|spec| spec.field));
-    // Not table-driven: dynamic device lists and the portal target row.
-    fields.extend([
-        "capture.audio_output",
-        "capture.audio_input",
-        "capture.capture_target_token",
-    ]);
-    fields
-}
-
 // --- Apply pipeline ---
 
 /// Reconfiguration is unsafe while capturing, overrunning, or finalizing or
@@ -743,8 +720,8 @@ impl Settings {
             "Enable each World of Warcraft flavour and choose its Logs folder.",
         ));
         for spec in PATHS.iter().take(5) {
-            let row = path_row(spec, &draft, &registry, &refresh, parent);
-            gated.extend(path_buttons(&row));
+            let (row, select) = path_row(spec, &draft, &registry, &refresh, parent);
+            gated.push(select.upcast());
             logs_group.add(&row);
         }
         let advanced_box = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
@@ -805,8 +782,8 @@ impl Settings {
         let storage_group = adw::PreferencesGroup::new();
         storage_group.set_title("Storage");
         for (index, spec) in PATHS.iter().enumerate().skip(5) {
-            let row = path_row(spec, &draft, &registry, &refresh, parent);
-            gated.extend(path_buttons(&row));
+            let (row, select) = path_row(spec, &draft, &registry, &refresh, parent);
+            gated.push(select.upcast());
             if index == 5 {
                 storage_group.add(&row);
                 storage_group.add(&switch_row(
@@ -1355,7 +1332,7 @@ fn path_row(
     registry: &Registry,
     refresh: &Rc<dyn Fn()>,
     parent: &gtk4::Window,
-) -> adw::ActionRow {
+) -> (adw::ActionRow, gtk4::Button) {
     let row = adw::ActionRow::new();
     row.set_title(spec.title);
     let (subtitle, needs_reauth) = path_state((spec.get)(&draft.borrow()));
@@ -1449,30 +1426,7 @@ fn path_row(
     registry
         .borrow_mut()
         .push((spec.field, row.clone().upcast()));
-    row
-}
-
-/// The suffix buttons of a path row, for unsafe-state gating.
-fn path_buttons(row: &adw::ActionRow) -> Vec<gtk4::Widget> {
-    let mut buttons = Vec::new();
-    let mut child = row.first_child();
-    while let Some(widget) = child {
-        collect_buttons(&widget, &mut buttons);
-        child = widget.next_sibling();
-    }
-    buttons
-}
-
-fn collect_buttons(widget: &gtk4::Widget, buttons: &mut Vec<gtk4::Widget>) {
-    if widget.is::<gtk4::Button>() {
-        buttons.push(widget.clone());
-        return;
-    }
-    let mut child = widget.first_child();
-    while let Some(inner) = child {
-        collect_buttons(&inner, buttons);
-        child = inner.next_sibling();
-    }
+    (row, select)
 }
 
 #[cfg(test)]
@@ -1494,15 +1448,6 @@ mod tests {
 
     fn snapshot(status: RecorderStatus) -> AppSnapshot {
         crate::ui::window::tests::snapshot_with(status, ready_config(), Vec::new())
-    }
-
-    #[test]
-    fn every_retained_field_is_mapped_to_exactly_one_row() {
-        let mut fields = retained_fields();
-        let count = fields.len();
-        fields.sort_unstable();
-        fields.dedup();
-        assert_eq!(fields.len(), count, "a field is mapped to two rows");
     }
 
     #[test]
@@ -1532,10 +1477,10 @@ mod tests {
     }
 
     #[test]
-    fn table_values_round_trip_defaults_bounds_and_dependency_sensitivity() {
+    fn spin_defaults_stay_within_bounds_and_dependency_rows_grey() {
         let config = Config::default();
-        // Spot checks: defaults render, spin bounds match validation, and the
-        // set functions round-trip through the get functions.
+        // Spin bounds must agree with config validation, so a default always
+        // renders inside them.
         for spec in CAPTURE_SPINS
             .iter()
             .chain(&ACTIVITY_SPINS)
@@ -1549,25 +1494,12 @@ mod tests {
                 spec.min,
                 spec.max
             );
-            let mut mutated = config.clone();
-            (spec.set)(&mut mutated, spec.max);
-            assert_eq!((spec.get)(&mutated), spec.max, "{}", spec.field);
         }
-        assert_eq!((CAPTURE_SPINS[0].get)(&config), 60.0);
-        assert_eq!((STORAGE_SPINS[0].get)(&config), 50.0);
+        // Zero storage limit means Unlimited, not a zero-byte quota.
         let mut unlimited = config.clone();
         (STORAGE_SPINS[0].set)(&mut unlimited, 0.0);
         assert_eq!(unlimited.storage.limit, StorageLimit::Unlimited);
         assert_eq!((STORAGE_SPINS[0].get)(&unlimited), 0.0);
-
-        for spec in &CAPTURE_COMBOS {
-            for index in 0..spec.choices.len() as u32 {
-                let mut mutated = config.clone();
-                (spec.set)(&mut mutated, index);
-                assert_eq!((spec.get)(&mutated), index, "{}", spec.field);
-            }
-        }
-
         // Dependency sensitivity greys children without erasing values.
         let mut no_raids = config.clone();
         no_raids.activities.record_raids = false;

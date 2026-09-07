@@ -61,53 +61,18 @@ pub fn choose<'a>(povs: &'a [Pov], preferred_player: Option<&str>) -> Option<&'a
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use warcraft_recorder::domain::{
-        ActivityDetails, Category, Codec, GameFlavor, MediaFacts, MeterData, Outcome, PlayerSummary,
-    };
+    use warcraft_recorder::domain::{Category, PlayerSummary};
 
-    fn entry(name: Option<(&str, u16)>, title: &str) -> LibraryEntry {
-        LibraryEntry {
-            id: RecordingId::new(),
-            media_path: PathBuf::from("/rec/v.mkv"),
-            sidecar_path: PathBuf::from("/rec/v.json"),
-            category: Category::Raids,
-            flavor: GameFlavor::Retail,
-            title: title.to_owned(),
-            start_unix_ms: 0,
-            duration_ms: 60_000,
-            outcome: Outcome::Win,
-            protected: false,
-            tag: None,
-            activity_hash: Some("hash".to_owned()),
-            player: name.map(|(name, spec)| PlayerSummary {
-                name: name.to_owned(),
-                realm: None,
-                guid: None,
-                class_id: None,
-                spec_id: Some(spec),
-            }),
-            combatants: Vec::new(),
-            details: ActivityDetails::Raid {
-                zone_id: None,
-                zone_name: None,
-                encounter_id: None,
-                encounter_name: None,
-                difficulty_id: None,
-                difficulty: None,
-                pull: None,
-                boss_percent: None,
-            },
-            timeline: Vec::new(),
-            media: MediaFacts {
-                fps: None,
-                width: None,
-                height: None,
-                codec: Some(Codec::H264),
-                has_content: true,
-            },
-            meter: MeterData::default(),
-        }
+    fn entry(player: Option<(&str, u16)>, title: &str) -> LibraryEntry {
+        let mut entry = crate::ui::window::tests::entry(Category::Raids, title, 0);
+        entry.player = player.map(|(name, spec)| PlayerSummary {
+            name: name.to_owned(),
+            realm: None,
+            guid: None,
+            class_id: None,
+            spec_id: Some(spec),
+        });
+        entry
     }
 
     #[test]

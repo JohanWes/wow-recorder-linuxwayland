@@ -126,8 +126,6 @@ pub struct ActiveRecordingView {
     /// Wall-clock anchor for the elapsed-time display.
     pub started_unix_ms: i64,
     pub requested_replay_ms: u64,
-    /// Set once the activity ended and only the overrun is left to record.
-    pub overrun_until_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -148,7 +146,6 @@ pub struct AppSnapshot {
     pub work: Option<WorkProgress>,
     pub queued_jobs: usize,
     pub storage_used_bytes: u64,
-    pub storage_limit: StorageLimit,
     pub protected_over_limit: bool,
 }
 
@@ -1682,7 +1679,6 @@ impl Coordinator {
             mode: active.mode.clone(),
             started_unix_ms: active.started_unix_ms,
             requested_replay_ms: active.requested_replay_ms,
-            overrun_until_ms: active.stop_at_ms,
         });
         Arc::new(AppSnapshot {
             entries: Arc::clone(&self.index.entries),
@@ -1697,7 +1693,6 @@ impl Coordinator {
             work: self.work.clone(),
             queued_jobs: self.finalize_queue.len() + self.user_queue.len(),
             storage_used_bytes: self.storage_used_bytes,
-            storage_limit: self.config.storage.limit,
             protected_over_limit: self.protected_over_limit,
         })
     }

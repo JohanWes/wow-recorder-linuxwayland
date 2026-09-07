@@ -39,55 +39,9 @@ cleanup-commands:
 modules:
   - modules/ffmpeg.yml
 
-  - name: gpu-screen-recorder
-    buildsystem: meson
-    builddir: true
-    config-opts:
-      - --buildtype=release
-      - -Dcapabilities=false
-      - -Dsystemd=false
-      - -Dnvidia_suspend_fix=false
-      - -Dportal=true
-      - -Dapp_audio=false
-      - -Dplugin_examples=false
-    post-install:
-      - rm -f /app/bin/gsr-kms-server
-      - install -Dm644 ../LICENSE /app/share/licenses/$FLATPAK_ID/gpu-screen-recorder-LICENSE
-    sources:
-      - type: archive
-        url: https://dec05eba.com/snapshot/gpu-screen-recorder.git.5.13.9.tar.gz
-        sha256: a09365f687002c87f99bcaa4665be1bd0188fa4358f437368fc6a95ab50f4d78
-        strip-components: 0
-      - type: patch
-        path: modules/gsr-run-hooks-in-sandbox.patch
+  - modules/gpu-screen-recorder.yml
 
-  - name: clapper
-    buildsystem: meson
-    builddir: true
-    config-opts:
-      - --buildtype=release
-      - -Dclapper=enabled
-      - -Dclapper-gtk=enabled
-      - -Dclapper-app=disabled
-      - -Dgst-plugin=enabled
-      - -Dintrospection=disabled
-      - -Dvapi=disabled
-      - -Ddoc=false
-      - -Denhancers-loader=disabled
-      - -Ddiscoverer=disabled
-      - -Dmpris=disabled
-      - -Dserver=disabled
-    post-install:
-      - install -Dm644 ../COPYING-LGPL /app/share/licenses/$FLATPAK_ID/Clapper-COPYING-LGPL
-      - install -Dm644 ../COPYING-GPL /app/share/licenses/$FLATPAK_ID/Clapper-COPYING-GPL
-      # The native rewrite is GPL-3.0-or-later. The repository-root LICENSE is
-      # the untouched GPLv2 text for the deleted legacy app, so use Clapper's
-      # canonical GPLv3 text rather than mislabelling the legacy file.
-      - install -Dm644 ../COPYING-GPL /app/share/licenses/$FLATPAK_ID/WarcraftRecorder-GPL-3.0-or-later
-    sources:
-      - type: archive
-        url: https://github.com/Rafostar/clapper/archive/refs/tags/0.10.0.tar.gz
-        sha256: 344c0f20e540a63c6fb44cdd5de88c168ed145bb66c1307e79b2b08124780118
+  - modules/clapper.yml
 
   - name: warcraft-recorder
     buildsystem: simple
