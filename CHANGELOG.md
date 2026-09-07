@@ -9,6 +9,14 @@ project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
 ## Unreleased
 
+### Changed
+- Startup and bulk library edits are faster. Orphan detection and sidecar
+  loading no longer build throwaway JSON trees, the scan orders entries
+  without cloning them, and tagging or protecting many recordings lets the
+  coordinator service the recorder and combat log between writes. On a
+  498 MiB library the pre-library-snapshot work drops from 2.2 s to 1.1 s at
+  half the peak memory, and protecting 37 recordings from 2.1 s to 0.79 s.
+
 ### Removed
 - The AppImage migration path and the one-time Electron config import with its
   post-migration notice are gone. Every user is on the Flatpak now.

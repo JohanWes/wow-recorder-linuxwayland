@@ -15,12 +15,14 @@
 //! sidecar/media paths, so no second in-memory index is needed.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::de::{IgnoredAny, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -202,8 +204,10 @@ impl Storage {
     /// counted, unreadable sidecars are reported, and nothing is repaired.
     pub fn scan(&self) -> LibraryIndex {
         let mut index = LibraryIndex::default();
-        let mut starts: Vec<Option<i64>> = Vec::new();
         let mut used_ids: HashSet<RecordingId> = HashSet::new();
+        // Loaded in directory order, sorted once at the end: no per-entry
+        // clone of the (possibly meter-heavy) entries.
+        let mut scanned: Vec<(LibraryEntry, Option<i64>)> = Vec::new();
 
         let Ok(read_dir) = fs::read_dir(&self.root) else {
             return index;
@@ -229,16 +233,15 @@ impl Storage {
             }
 
             match self.load_sidecar(&path) {
-                Ok(loaded) => {
-                    let mut entry = loaded.entry;
+                Ok(sidecar) => {
+                    let mut entry = sidecar.entry;
                     if !used_ids.insert(entry.id.clone()) {
                         // Legacy identifiers derive from the media name, so a
                         // duplicate is possible; keep both addressable.
                         entry.id = entry.id.with_legacy_duplicate_suffix(&path);
                         used_ids.insert(entry.id.clone());
                     }
-                    starts.push(loaded.correlation_start_ms);
-                    Arc::make_mut(&mut index.entries).push(entry);
+                    scanned.push((entry, sidecar.correlation_start_ms));
                 }
                 Err(reason) => index.skipped.push(SkippedEntry {
                     sidecar_path: path,
@@ -247,13 +250,9 @@ impl Storage {
             }
         }
 
-        let mut order: Vec<usize> = (0..index.entries.len()).collect();
-        order.sort_by(|left, right| entry_order(&index.entries[*left], &index.entries[*right]));
-        let entries: Vec<LibraryEntry> = order
-            .iter()
-            .map(|position| index.entries[*position].clone())
-            .collect();
-        let starts: Vec<Option<i64>> = order.iter().map(|position| starts[*position]).collect();
+        // The one library ordering: newest first, ties broken by media path.
+        scanned.sort_by(|(left, _), (right, _)| entry_order(left, right));
+        let (entries, starts): (Vec<LibraryEntry>, Vec<Option<i64>>) = scanned.into_iter().unzip();
         index.correlations = Arc::new(correlate(&entries, &starts));
         index.correlation_starts = starts;
         index.entries = Arc::new(entries);
@@ -262,11 +261,11 @@ impl Storage {
 
     fn load_sidecar(&self, path: &Path) -> Result<LoadedSidecar, String> {
         let text = fs::read_to_string(path).map_err(|error| format!("unreadable: {error}"))?;
-        let value: Value =
+        let probe: SidecarProbe =
             serde_json::from_str(&text).map_err(|error| format!("invalid JSON: {error}"))?;
 
-        if value.get("schema_version").is_some() {
-            let sidecar: NativeSidecar = serde_json::from_value(value)
+        if probe.schema_version {
+            let sidecar: NativeSidecar = serde_json::from_str(&text)
                 .map_err(|error| format!("invalid native sidecar: {error}"))?;
             if sidecar.schema_version > SIDECAR_SCHEMA_VERSION {
                 return Err(format!(
@@ -287,7 +286,7 @@ impl Storage {
             });
         }
 
-        let legacy: LegacySidecar = serde_json::from_value(value)
+        let legacy: LegacySidecar = serde_json::from_str(&text)
             .map_err(|error| format!("invalid legacy sidecar: {error}"))?;
         let media_path = path.with_extension(MEDIA_EXTENSION);
         let has_content = media_has_content(&media_path)?;
@@ -419,7 +418,7 @@ impl Storage {
         self.check_owned(&entry.sidecar_path)
             .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
         let text = fs::read_to_string(&entry.sidecar_path)?;
-        let value: Value = serde_json::from_str(&text)
+        let probe: SidecarProbe = serde_json::from_str(&text)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
 
         let mut updated = entry.clone();
@@ -434,11 +433,15 @@ impl Storage {
             }
         }
 
-        let json = if value.get("schema_version").is_some() {
+        let json = if probe.schema_version {
+            // The typed model already holds the whole entry; the on-disk
+            // document is only probed for its schema, never materialized.
             NativeSidecar::from_entry(&updated, &self.root).to_json()?
         } else {
             // The sole sanctioned untyped escape hatch; it never enters the
             // domain model.
+            let value: Value = serde_json::from_str(&text)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
             let Value::Object(mut object) = value else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -674,10 +677,12 @@ impl Storage {
             let Ok(text) = fs::read_to_string(&path) else {
                 continue;
             };
-            let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            // A sidecar the scanner rejects can still own its media, so the
+            // reference is probed without materializing the document.
+            let Ok(probe) = serde_json::from_str::<SidecarProbe>(&text) else {
                 continue;
             };
-            match value.get("media_file").and_then(Value::as_str) {
+            match probe.media_file.as_deref() {
                 Some(media_file) => {
                     referenced.insert(self.root.join(media_file));
                 }
@@ -713,6 +718,157 @@ struct LoadedSidecar {
     /// Recorded activity start used for multi-POV correlation; `None` when the
     /// legacy sidecar had no start time and cannot be correlated.
     correlation_start_ms: Option<i64>,
+}
+
+/// Classification probe parsed ahead of the full sidecar: whether a
+/// `schema_version` key is present at all (native, whatever its value) and
+/// which media file the sidecar names. The meter payload can be tens of
+/// megabytes, so unknown fields are streamed past instead of materialized.
+#[derive(Debug, Default)]
+struct SidecarProbe {
+    schema_version: bool,
+    media_file: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for SidecarProbe {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ProbeVisitor;
+
+        impl<'de> Visitor<'de> for ProbeVisitor {
+            type Value = SidecarProbe;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a JSON sidecar")
+            }
+
+            // Whatever is not an object is neither native nor a media
+            // reference; the sibling media name keeps applying, as before.
+            fn visit_bool<E>(self, _value: bool) -> Result<SidecarProbe, E> {
+                Ok(SidecarProbe::default())
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<SidecarProbe, E> {
+                Ok(SidecarProbe::default())
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<SidecarProbe, E> {
+                Ok(SidecarProbe::default())
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<SidecarProbe, E> {
+                Ok(SidecarProbe::default())
+            }
+
+            fn visit_str<E>(self, _value: &str) -> Result<SidecarProbe, E> {
+                Ok(SidecarProbe::default())
+            }
+
+            fn visit_unit<E>(self) -> Result<SidecarProbe, E> {
+                Ok(SidecarProbe::default())
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<SidecarProbe, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                while sequence.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(SidecarProbe::default())
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<SidecarProbe, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                let mut probe = SidecarProbe::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        // Present with any value, `null` included.
+                        "schema_version" => {
+                            map.next_value::<IgnoredAny>()?;
+                            probe.schema_version = true;
+                        }
+                        // A duplicated key keeps the last occurrence.
+                        "media_file" => probe.media_file = map.next_value::<MediaFile>()?.0,
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(probe)
+            }
+        }
+
+        deserializer.deserialize_any(ProbeVisitor)
+    }
+}
+
+/// A sidecar `media_file`: a string names the media; every other value —
+/// `null`, a number, a container — is consumed leniently and falls back to
+/// the sibling media name, like the legacy layout.
+struct MediaFile(Option<String>);
+
+impl<'de> Deserialize<'de> for MediaFile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct MediaFileVisitor;
+
+        impl<'de> Visitor<'de> for MediaFileVisitor {
+            type Value = MediaFile;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a media file name")
+            }
+
+            fn visit_str<E>(self, name: &str) -> Result<MediaFile, E> {
+                Ok(MediaFile(Some(name.to_owned())))
+            }
+
+            fn visit_bool<E>(self, _value: bool) -> Result<MediaFile, E> {
+                Ok(MediaFile(None))
+            }
+
+            fn visit_i64<E>(self, _value: i64) -> Result<MediaFile, E> {
+                Ok(MediaFile(None))
+            }
+
+            fn visit_u64<E>(self, _value: u64) -> Result<MediaFile, E> {
+                Ok(MediaFile(None))
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<MediaFile, E> {
+                Ok(MediaFile(None))
+            }
+
+            fn visit_unit<E>(self) -> Result<MediaFile, E> {
+                Ok(MediaFile(None))
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<MediaFile, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                while sequence.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(MediaFile(None))
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<MediaFile, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                while map.next_key::<IgnoredAny>()?.is_some() {
+                    map.next_value::<IgnoredAny>()?;
+                }
+                Ok(MediaFile(None))
+            }
+        }
+
+        deserializer.deserialize_any(MediaFileVisitor)
+    }
 }
 
 // --- Native sidecar ---
@@ -796,9 +952,8 @@ impl NativeSidecar {
     }
 
     fn to_json(&self) -> io::Result<String> {
-        serde_json::to_value(self)
+        serde_json::to_string_pretty(self)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
-            .and_then(|value| pretty_json(&value))
     }
 }
 
@@ -2424,5 +2579,73 @@ mod tests {
                 .iter()
                 .any(|skipped| skipped.reason.contains("missing category"))
         );
+    }
+
+    /// A `schema_version` key of any value, `null` or wrong-typed included,
+    /// classifies the sidecar as native: it is skipped with a native
+    /// diagnostic, never misread as a legacy sidecar.
+    #[test]
+    fn a_schema_key_of_any_value_classifies_the_sidecar_as_native() {
+        let tree = TempTree::new("schema-key");
+        let storage = tree.storage();
+        tree.write(
+            "null-version.json",
+            r#"{"schema_version":null,"category":"Raids","duration":10,"start":1}"#,
+        );
+        tree.write(
+            "string-version.json",
+            r#"{"schema_version":"1","category":"Raids","duration":10,"start":1}"#,
+        );
+        tree.write("null-version.mp4", "media");
+        tree.write("string-version.mp4", "media");
+
+        let index = storage.scan();
+        assert!(index.entries.is_empty());
+        assert_eq!(index.skipped.len(), 2);
+        assert!(
+            index
+                .skipped
+                .iter()
+                .all(|skipped| skipped.reason.starts_with("invalid native sidecar"))
+        );
+    }
+
+    /// The sweep resolves references from sidecars whatever the scanner thinks
+    /// of them: the sibling fallback for a legacy layout, a non-string
+    /// `media_file`, and valid JSON that is not an object; malformed JSON
+    /// references nothing and its media is swept.
+    #[test]
+    fn sweep_honors_references_from_sidecars_that_fail_to_load() {
+        let tree = TempTree::new("sweep-references");
+        let storage = tree.storage();
+        tree.write(
+            "rejected.json",
+            r#"{"schema_version":null,"media_file":"named.mp4"}"#,
+        );
+        tree.write("named.mp4", "media");
+        tree.write("sibling.json", r#"{"category":"Raids","duration":10}"#);
+        tree.write("sibling.mp4", "media");
+        tree.write("wrongtype.json", r#"{"media_file":5}"#);
+        tree.write("wrongtype.mp4", "media");
+        // Valid JSON that is not an object: no reference at all, but the
+        // sibling media name keeps applying.
+        tree.write("nonobject.json", r#"["not","an","object"]"#);
+        tree.write("nonobject.mp4", "media");
+        // Malformed JSON references nothing, so its media is swept.
+        tree.write("truncated.json", r#"{"media_file":"lost.mp4""#);
+        tree.write("lost.mp4", "media");
+        let orphan = tree.write("orphan.mp4", "unreferenced media");
+
+        let report = storage.sweep_orphans();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.quarantined.len(), 2);
+        for moved in &report.quarantined {
+            assert!(moved.starts_with(tree.library().join(RECOVERY_DIR)));
+        }
+        assert!(!orphan.exists());
+        assert!(!tree.library().join("lost.mp4").exists());
+        assert!(tree.library().join("named.mp4").exists());
+        assert!(tree.library().join("sibling.mp4").exists());
+        assert!(tree.library().join("wrongtype.mp4").exists());
     }
 }

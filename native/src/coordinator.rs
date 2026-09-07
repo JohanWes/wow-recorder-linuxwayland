@@ -1233,6 +1233,14 @@ impl Coordinator {
 
     fn update_entries(&mut self, ids: &[RecordingId], change: &EntryUpdate) {
         for id in ids {
+            // Servicing between writes keeps a bulk pass from delaying log
+            // handling and recorder deadlines by the full batch. Commands are
+            // not drained (ordering is preserved) and media completions are
+            // not polled: their fold enforces the storage limit, which could
+            // evict entries this batch has not protected yet.
+            self.poll_recorder();
+            self.poll_logs();
+            self.check_deadlines();
             let Some(entry) = self.entry(id).cloned() else {
                 self.push_problem(
                     "A selected recording is no longer in the library.",
@@ -2059,11 +2067,21 @@ fn test_events(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     use super::{
-        CAPTURE_RESTART_FAILED_PROBLEM, CAPTURE_STOPPED_PROBLEM, Problem, RecoveryAction,
-        clear_recovered_capture_problems, test_events, utc_offset_minutes,
+        ActiveRecording, CAPTURE_RESTART_FAILED_PROBLEM, CAPTURE_STOPPED_PROBLEM, Coordinator,
+        EntryUpdate, MediaConfig, Problem, RecordingDraft, RecordingMode, RecoveryAction, Setup,
+        Storage, Timeouts, clear_recovered_capture_problems, now_unix_ms, test_events,
+        utc_offset_minutes,
     };
-    use crate::domain::Category;
+    use crate::domain::{
+        ActivityDetails, Category, GameFlavor, LibraryEntry, MediaFacts, MeterData, Outcome,
+        RecordingId,
+    };
     use crate::parser::CombatEvent;
 
     #[test]
@@ -2133,5 +2151,135 @@ mod tests {
             events.last().map(|event| &event.event),
             Some(CombatEvent::UnitDied { .. })
         ));
+    }
+    /// A bulk mutation must service recorder deadlines between entries, not
+    /// only once the tick's own polls run: serial sidecar writes would
+    /// otherwise delay every recorder event by the full batch. Two real
+    /// sidecars are protected while an already-due deadline fires, and the
+    /// recorder problem landing before the missing-id problem proves the
+    /// servicing happened inside the batch. No timing: the deadline is due
+    /// the moment the batch starts.
+    #[test]
+    fn bulk_mutation_services_a_due_capture_deadline_mid_batch() {
+        let root = std::env::temp_dir().join(format!(
+            "wr-midbatch-{}-{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let library = root.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let sidecar_storage = Storage::new(&library, root.join("buffer"));
+        let mut entries = Vec::new();
+        for name in ["bulk-a", "bulk-b"] {
+            let (media_path, sidecar_path) = sidecar_storage.claim_output(name).unwrap();
+            let source = library.join(format!("{name}-source.mp4"));
+            std::fs::write(&source, b"media").unwrap();
+            let entry = LibraryEntry {
+                id: RecordingId::new(),
+                media_path,
+                sidecar_path,
+                category: Category::Manual,
+                flavor: GameFlavor::Retail,
+                title: name.to_owned(),
+                start_unix_ms: now_unix_ms() - 61_000,
+                duration_ms: 60_000,
+                outcome: Outcome::Unknown,
+                protected: false,
+                tag: None,
+                activity_hash: None,
+                player: None,
+                combatants: Vec::new(),
+                details: ActivityDetails::Manual,
+                timeline: Vec::new(),
+                media: MediaFacts {
+                    fps: None,
+                    width: None,
+                    height: None,
+                    codec: None,
+                    has_content: true,
+                },
+                meter: MeterData::default(),
+            };
+            sidecar_storage.write_new_entry(&entry, &source).unwrap();
+            entries.push(entry);
+        }
+
+        {
+            let (_commands, commands_rx) = mpsc::sync_channel(1);
+            let (snapshot_tx, _snapshots) = mpsc::sync_channel(1);
+            let mut coordinator = Coordinator::new(
+                Setup {
+                    config_path: root.join("config.json"),
+                    data_dir: root.join("recorder"),
+                    gsr_binary: PathBuf::from("true"),
+                    media: MediaConfig::default(),
+                    year: 2026,
+                    recorder_timeouts: Timeouts::default(),
+                    poll_interval: Duration::from_millis(5),
+                    test_duration: Duration::from_millis(200),
+                },
+                commands_rx,
+                snapshot_tx,
+                Box::new(|| {}),
+            );
+            // Never let the default-config storage point at real directories.
+            coordinator.storage = Storage::new(&library, root.join("buffer"));
+            coordinator.index.entries = Arc::new(entries.clone());
+            coordinator.active = Some(ActiveRecording {
+                draft: RecordingDraft {
+                    id: RecordingId::new(),
+                    category: Category::Raids,
+                    flavor: GameFlavor::Retail,
+                    started_at_ms: now_unix_ms(),
+                    overrun_ms: 0,
+                    details: ActivityDetails::Manual,
+                    player: None,
+                    combatants: Vec::new(),
+                    timeline: Vec::new(),
+                    outcome: None,
+                    ended_at_ms: None,
+                    duration_ms: None,
+                    title: None,
+                    activity_hash: None,
+                    meter: MeterData::default(),
+                },
+                mode: RecordingMode::Automatic,
+                started_unix_ms: now_unix_ms(),
+                requested_replay_ms: 0,
+                stop_at_ms: Some(now_unix_ms()),
+            });
+
+            let mut ids: Vec<RecordingId> = entries.iter().map(|entry| entry.id.clone()).collect();
+            // The lookup failure stays in the batch so its problem pins the
+            // servicing order.
+            ids.push(RecordingId::new());
+            coordinator.update_entries(&ids, &EntryUpdate::Protected(true));
+
+            assert!(
+                coordinator.active.is_none(),
+                "the due capture deadline was not serviced during the batch"
+            );
+            assert!(
+                coordinator
+                    .index
+                    .entries
+                    .iter()
+                    .all(|entry| entry.protected),
+                "the protection writes did not land in the index"
+            );
+            let summaries: Vec<&str> = coordinator
+                .problems
+                .iter()
+                .map(|problem| problem.summary.as_str())
+                .collect();
+            assert_eq!(
+                summaries,
+                vec![
+                    "The recorder was not ready for that.",
+                    "A selected recording is no longer in the library.",
+                ]
+            );
+        } // The coordinator joins its media worker here, before temp cleanup.
+        std::fs::remove_dir_all(&root).ok();
     }
 }
