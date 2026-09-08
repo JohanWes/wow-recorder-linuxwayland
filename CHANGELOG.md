@@ -7,7 +7,11 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
-## Unreleased
+## 1.0.10 - 2026-09-09
+
+### Added
+- The combat meter gains a Buffs tab with per-player buff uptime, and the
+  buff list shows buff icons instead of a folded "Other" row.
 
 ### Changed
 - Startup and bulk library edits are faster. Orphan detection and sidecar
