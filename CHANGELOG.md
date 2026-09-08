@@ -23,10 +23,11 @@ project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 - The one-time startup backfill that rewrote old Electron sidecars with
   Bloodlust timelines parsed from historical combat logs is gone. Sidecars
   that were already enriched keep their timeline.
-- Recordings made by the old Electron application no longer appear in the
-  library. Their video and JSON files are left untouched on disk, but the
-  reader for that sidecar format is gone, so only recordings made by this
-  application are listed.
+- A recording made by the old Electron application whose category is not one
+  this application knows is now skipped instead of being listed under an
+  "Unknown" category. Recordings in the normal categories are unaffected.
+- Old Electron recordings no longer report a video codec in the library. Every
+  other detail they carry is unchanged.
 - Dead code left behind by earlier removals: the imported-path constructor
   orphaned by the Electron config import, an unused spell-database size
   accessor, a write-only first-time-setup flag, a duplicate spell-data fetch

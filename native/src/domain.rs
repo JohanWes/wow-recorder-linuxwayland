@@ -20,6 +20,11 @@ impl RecordingId {
         Self(Uuid::new_v4().to_string())
     }
 
+    /// Legacy recording ids are the bare media file name.
+    pub fn from_media_name(name: &str) -> Self {
+        Self(name.to_owned())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

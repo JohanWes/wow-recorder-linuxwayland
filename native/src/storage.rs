@@ -24,14 +24,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::{IgnoredAny, Visitor};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::activity::RecordingDraft;
 use crate::domain::{
-    ActivityDetails, Category, CombatantSummary, CorrelatedActivity, GameFlavor, LibraryEntry,
-    MediaFacts, MeterData, Outcome, PlayerSummary, RecordingId, StorageLimit, TimelineItem,
-    TimelineShape,
+    ActivityDetails, BLOODLUST_DURATION_MS, Category, CombatantSummary, CorrelatedActivity,
+    GameFlavor, LibraryEntry, MediaFacts, MeterData, Outcome, PlayerSummary, RecordingId,
+    RoundSummary, StorageLimit, TimelineItem, TimelineKind, TimelineShape,
 };
 use crate::meter::SAMPLE_INTERVAL_MS;
+use crate::parser::days_from_civil;
 use crate::recorder::CaptureArtifacts;
 
 /// Schema version written into every native sidecar.
@@ -250,24 +252,44 @@ impl Storage {
 
     fn load_sidecar(&self, path: &Path) -> Result<LoadedSidecar, String> {
         let text = fs::read_to_string(path).map_err(|error| format!("unreadable: {error}"))?;
-        let sidecar: NativeSidecar = serde_json::from_str(&text)
-            .map_err(|error| format!("invalid native sidecar: {error}"))?;
-        if sidecar.schema_version > SIDECAR_SCHEMA_VERSION {
-            return Err(format!(
-                "sidecar schema version {} is newer than {SIDECAR_SCHEMA_VERSION}",
-                sidecar.schema_version
-            ));
+        let probe: SidecarProbe =
+            serde_json::from_str(&text).map_err(|error| format!("invalid JSON: {error}"))?;
+
+        if probe.schema_version {
+            let sidecar: NativeSidecar = serde_json::from_str(&text)
+                .map_err(|error| format!("invalid native sidecar: {error}"))?;
+            if sidecar.schema_version > SIDECAR_SCHEMA_VERSION {
+                return Err(format!(
+                    "sidecar schema version {} is newer than {SIDECAR_SCHEMA_VERSION}",
+                    sidecar.schema_version
+                ));
+            }
+            let media_path = self.root.join(&sidecar.media_file);
+            self.check_owned(&media_path)?;
+            let has_content = media_has_content(&media_path)?;
+            let start = sidecar.start_unix_ms;
+            let mut entry = sidecar.into_entry(media_path, path.to_path_buf());
+            entry.media.has_content = has_content;
+            entry.validate().map_err(|error| error.to_string())?;
+            return Ok(LoadedSidecar {
+                entry,
+                correlation_start_ms: start,
+            });
         }
-        let media_path = self.root.join(&sidecar.media_file);
-        self.check_owned(&media_path)?;
+
+        let legacy: LegacySidecar = serde_json::from_str(&text)
+            .map_err(|error| format!("invalid legacy sidecar: {error}"))?;
+        let media_path = path.with_extension(MEDIA_EXTENSION);
         let has_content = media_has_content(&media_path)?;
-        let start = sidecar.start_unix_ms;
-        let mut entry = sidecar.into_entry(media_path, path.to_path_buf());
+        let mtime_ms = file_modified_ms(&media_path).unwrap_or(0);
+        let mut entry = legacy.into_entry(media_path, path.to_path_buf(), mtime_ms)?;
         entry.media.has_content = has_content;
-        entry.validate().map_err(|error| error.to_string())?;
+        // Legacy sidecars without a recorded start fall back to the media
+        // mtime, which two POVs of one activity rarely share.
+        let correlation_start_ms = entry.start_unix_ms;
         Ok(LoadedSidecar {
             entry,
-            correlation_start_ms: start,
+            correlation_start_ms,
         })
     }
 
@@ -382,10 +404,15 @@ impl Storage {
 
     // --- Mutation and deletion ---
 
-    /// Rewrite only the sidecar, atomically, from the typed model.
+    /// Rewrite only the sidecar, atomically. A legacy sidecar keeps its original
+    /// schema and unknown fields: only the `protected`/`tag` keys are patched so
+    /// the legacy Electron app can still read it.
     pub fn update(&self, entry: &LibraryEntry, change: &EntryUpdate) -> io::Result<LibraryEntry> {
         self.check_owned(&entry.sidecar_path)
             .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
+        let text = fs::read_to_string(&entry.sidecar_path)?;
+        let probe: SidecarProbe = serde_json::from_str(&text)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
 
         let mut updated = entry.clone();
         match change {
@@ -399,7 +426,37 @@ impl Storage {
             }
         }
 
-        let json = NativeSidecar::from_entry(&updated, &self.root).to_json()?;
+        let json = if probe.schema_version {
+            // The typed model already holds the whole entry; the on-disk
+            // document is only probed for its schema, never materialized.
+            NativeSidecar::from_entry(&updated, &self.root).to_json()?
+        } else {
+            // The sole sanctioned untyped escape hatch; it never enters the
+            // domain model.
+            let value: Value = serde_json::from_str(&text)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+            let Value::Object(mut object) = value else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "legacy sidecar is not a JSON object",
+                ));
+            };
+            match change {
+                EntryUpdate::Protected(protected) => {
+                    object.insert("protected".to_owned(), Value::Bool(*protected));
+                }
+                EntryUpdate::Tag(_) => match &updated.tag {
+                    Some(tag) => {
+                        object.insert("tag".to_owned(), Value::String(tag.clone()));
+                    }
+                    None => {
+                        object.remove("tag");
+                    }
+                },
+            }
+            pretty_json(&Value::Object(object))?
+        };
+
         let temp = temp_sibling(&entry.sidecar_path);
         write_atomic(&temp, Some(&entry.sidecar_path), json.as_bytes())?;
         Ok(updated)
@@ -655,11 +712,13 @@ struct LoadedSidecar {
     correlation_start_ms: i64,
 }
 
-/// Media-reference probe parsed ahead of the full sidecar, used by the startup
-/// sweep. The meter payload can be tens of megabytes, so unknown fields are
-/// streamed past instead of materialized.
+/// Classification probe parsed ahead of the full sidecar: whether a
+/// `schema_version` key is present at all (native, whatever its value) and
+/// which media file the sidecar names. The meter payload can be tens of
+/// megabytes, so unknown fields are streamed past instead of materialized.
 #[derive(Debug, Default)]
 struct SidecarProbe {
+    schema_version: bool,
     media_file: Option<String>,
 }
 
@@ -718,6 +777,12 @@ impl<'de> Deserialize<'de> for SidecarProbe {
                 let mut probe = SidecarProbe::default();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
+                        // Present with any value, `null` included.
+                        "schema_version" => {
+                            map.next_value::<IgnoredAny>()?;
+                            probe.schema_version = true;
+                        }
+                        // A duplicated key keeps the last occurrence.
                         "media_file" => probe.media_file = map.next_value::<MediaFile>()?.0,
                         _ => {
                             map.next_value::<IgnoredAny>()?;
@@ -882,6 +947,546 @@ impl NativeSidecar {
         serde_json::to_string_pretty(self)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
     }
+}
+
+// --- Legacy sidecar ---
+
+/// The real legacy JSON written by the Electron application. Private to
+/// storage: it is converted to the clean model and never exposed. Cloud-only
+/// fields are simply not read.
+#[derive(Debug, Deserialize)]
+struct LegacySidecar {
+    #[serde(default)]
+    category: String,
+    #[serde(rename = "parentCategory")]
+    parent_category: Option<String>,
+    #[serde(default)]
+    duration: f64,
+    start: Option<f64>,
+    #[serde(rename = "clippedAt")]
+    clipped_at: Option<f64>,
+    #[serde(default)]
+    result: bool,
+    flavour: Option<String>,
+    #[serde(rename = "zoneID")]
+    zone_id: Option<u32>,
+    #[serde(rename = "zoneName")]
+    zone_name: Option<String>,
+    #[serde(rename = "encounterID")]
+    encounter_id: Option<u32>,
+    #[serde(rename = "encounterName")]
+    encounter_name: Option<String>,
+    #[serde(rename = "difficultyID")]
+    difficulty_id: Option<u32>,
+    difficulty: Option<String>,
+    player: Option<LegacyCombatant>,
+    #[serde(rename = "teamMMR")]
+    team_mmr: Option<u32>,
+    #[serde(default)]
+    deaths: Vec<LegacyDeath>,
+    #[serde(rename = "upgradeLevel")]
+    upgrade_level: Option<u8>,
+    #[serde(rename = "mapID")]
+    map_id: Option<u32>,
+    #[serde(rename = "challengeModeTimeline", default)]
+    challenge_mode_timeline: Vec<LegacySegment>,
+    #[serde(rename = "bloodlustTimeline", default)]
+    bloodlust_timeline: Vec<LegacyBloodlust>,
+    #[serde(rename = "soloShuffleTimeline", default)]
+    solo_shuffle_timeline: Vec<LegacyRound>,
+    /// Pre-cloud keystone level.
+    level: Option<u32>,
+    #[serde(rename = "keystoneLevel")]
+    keystone_level: Option<u32>,
+    #[serde(default)]
+    protected: bool,
+    #[serde(rename = "soloShuffleRoundsWon")]
+    solo_shuffle_rounds_won: Option<u8>,
+    #[serde(rename = "soloShuffleRoundsPlayed")]
+    solo_shuffle_rounds_played: Option<u8>,
+    #[serde(default)]
+    combatants: Vec<LegacyCombatant>,
+    #[serde(default)]
+    affixes: Vec<u32>,
+    tag: Option<String>,
+    #[serde(rename = "uniqueHash")]
+    unique_hash: Option<String>,
+    #[serde(rename = "bossPercent")]
+    boss_percent: Option<u8>,
+    /// Recorder FPS; present on newer sidecars only.
+    fps: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyCombatant {
+    #[serde(rename = "_GUID")]
+    guid: Option<String>,
+    #[serde(rename = "_teamID")]
+    team_id: Option<i32>,
+    #[serde(rename = "_specID")]
+    spec_id: Option<u16>,
+    #[serde(rename = "_name")]
+    name: Option<String>,
+    #[serde(rename = "_realm")]
+    realm: Option<String>,
+    #[serde(rename = "_region")]
+    region: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyDeath {
+    #[serde(default)]
+    name: String,
+    /// Seconds from the activity start.
+    #[serde(default)]
+    timestamp: f64,
+    #[serde(default)]
+    friendly: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacySegment {
+    #[serde(rename = "segmentType")]
+    segment_type: Option<String>,
+    #[serde(rename = "logStart")]
+    log_start: Option<String>,
+    #[serde(rename = "logEnd")]
+    log_end: Option<String>,
+    /// Seconds from the activity start.
+    timestamp: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyRound {
+    #[serde(default)]
+    round: u32,
+    /// Seconds from the activity start.
+    #[serde(default)]
+    timestamp: f64,
+    #[serde(default)]
+    result: bool,
+    duration: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct LegacyBloodlust {
+    /// Milliseconds since Unix epoch in the legacy sidecar, converted to a
+    /// relative offset before the legacy sidecar enters the domain.
+    #[serde(rename = "timestampMs")]
+    timestamp_ms: i64,
+    #[serde(rename = "spellName")]
+    spell_name: String,
+}
+
+impl LegacySidecar {
+    fn into_entry(
+        self,
+        media_path: PathBuf,
+        sidecar_path: PathBuf,
+        mtime_ms: i64,
+    ) -> Result<LibraryEntry, String> {
+        if self.category.trim().is_empty() {
+            return Err("missing category".to_owned());
+        }
+        if !self.duration.is_finite() || self.duration < 0.0 {
+            return Err(format!("invalid duration {}", self.duration));
+        }
+        // The Electron category set is closed: an unrecognized string means a
+        // junk file, not a category the app should carry around.
+        let category = legacy_category(&self.category)
+            .ok_or_else(|| format!("unknown legacy category {:?}", self.category))?;
+        // Clips are parented by category; an unknown or absent parent is
+        // rejected instead of defaulting.
+        let parent = match category {
+            Category::Clip => match self.parent_category.as_deref().map(legacy_category) {
+                Some(Some(parent)) => parent,
+                Some(None) => {
+                    return Err(format!(
+                        "unknown legacy parent category {:?}",
+                        self.parent_category.as_deref().unwrap_or_default()
+                    ));
+                }
+                None => return Err("legacy clip without a parent category".to_owned()),
+            },
+            _ => category.clone(),
+        };
+        let duration_ms = (self.duration * 1000.0).round() as u64;
+        let start_unix_ms = self
+            .clipped_at
+            .or(self.start)
+            .filter(|value| value.is_finite())
+            .map(|value| value as i64)
+            .unwrap_or(mtime_ms);
+        let outcome = legacy_outcome(&parent, self.result);
+        let timeline = self.legacy_timeline(duration_ms);
+        let media_name = media_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let details = self.legacy_details(&category, parent, &media_name);
+        let title = match legacy_title(
+            &self.encounter_name,
+            &self.legacy_place_name(),
+            self.player.as_ref(),
+        ) {
+            title if title.is_empty() => default_title(&category),
+            title => title,
+        };
+
+        let entry = LibraryEntry {
+            id: RecordingId::from_media_name(&media_name),
+            media_path,
+            sidecar_path,
+            category,
+            flavor: legacy_flavor(self.flavour.as_deref()),
+            title,
+            start_unix_ms,
+            duration_ms,
+            outcome,
+            protected: self.protected,
+            tag: self.tag.filter(|tag| !tag.trim().is_empty()),
+            activity_hash: self.unique_hash,
+            player: self.player.as_ref().and_then(legacy_player),
+            combatants: self.combatants.iter().map(legacy_combatant).collect(),
+            details,
+            timeline,
+            media: MediaFacts {
+                fps: self.fps,
+                width: None,
+                height: None,
+                codec: None,
+                has_content: true,
+            },
+            meter: MeterData::default(),
+        };
+        entry.validate().map_err(|error| error.to_string())?;
+        Ok(entry)
+    }
+
+    fn legacy_timeline(&self, duration_ms: u64) -> Vec<TimelineItem> {
+        let mut items: Vec<TimelineItem> = Vec::new();
+        for death in &self.deaths {
+            let start_ms = seconds_to_ms(death.timestamp);
+            if start_ms > duration_ms {
+                continue;
+            }
+            items.push(TimelineItem::point(
+                TimelineKind::Death,
+                start_ms,
+                Some(death.name.clone()),
+                Some(if death.friendly {
+                    Outcome::Loss
+                } else {
+                    Outcome::Win
+                }),
+                None,
+            ));
+        }
+
+        for segment in &self.challenge_mode_timeline {
+            let Some(timestamp) = segment.timestamp else {
+                continue;
+            };
+            let start_ms = seconds_to_ms(timestamp);
+            if start_ms > duration_ms {
+                continue;
+            }
+            // A legacy segment's length is the difference of its ISO log stamps.
+            let length_ms = match (
+                segment.log_start.as_deref().and_then(iso_epoch_ms),
+                segment.log_end.as_deref().and_then(iso_epoch_ms),
+            ) {
+                (Some(from), Some(to)) => to.saturating_sub(from).max(0) as u64,
+                _ => 0,
+            };
+            let kind = match segment.segment_type.as_deref() {
+                Some("Boss") => TimelineKind::Encounter,
+                Some("Trash") => TimelineKind::Trash,
+                Some(other) => TimelineKind::Unknown(other.to_owned()),
+                None => TimelineKind::Unknown(String::new()),
+            };
+            let end_ms = start_ms.saturating_add(length_ms).min(duration_ms);
+            if let Ok(item) = TimelineItem::span(kind, start_ms, end_ms, None, None, None) {
+                items.push(item);
+            }
+        }
+
+        if let Some(activity_start_ms) = self.start.filter(|value| value.is_finite()) {
+            let activity_start_ms = activity_start_ms as i64;
+            for cast in &self.bloodlust_timeline {
+                let start_ms = cast.timestamp_ms.saturating_sub(activity_start_ms).max(0) as u64;
+                if start_ms > duration_ms {
+                    continue;
+                }
+                let end_ms = start_ms
+                    .saturating_add(BLOODLUST_DURATION_MS)
+                    .min(duration_ms);
+                if let Ok(item) = TimelineItem::span(
+                    TimelineKind::Bloodlust,
+                    start_ms,
+                    end_ms,
+                    Some(cast.spell_name.clone()),
+                    None,
+                    None,
+                ) {
+                    items.push(item);
+                }
+            }
+        }
+
+        for round in &self.solo_shuffle_timeline {
+            let start_ms = seconds_to_ms(round.timestamp);
+            if start_ms > duration_ms {
+                continue;
+            }
+            let label = Some(format!("Round {}", round.round));
+            let outcome = Some(if round.result {
+                Outcome::Win
+            } else {
+                Outcome::Loss
+            });
+            let item = match round.duration {
+                Some(seconds) => TimelineItem::span(
+                    TimelineKind::Round,
+                    start_ms,
+                    start_ms
+                        .saturating_add(seconds_to_ms(seconds))
+                        .min(duration_ms),
+                    label,
+                    outcome,
+                    None,
+                )
+                .ok(),
+                None => Some(TimelineItem::point(
+                    TimelineKind::Round,
+                    start_ms,
+                    label,
+                    outcome,
+                    None,
+                )),
+            };
+            items.extend(item);
+        }
+
+        items.sort_by_key(TimelineItem::start_ms);
+        items
+    }
+
+    /// Legacy sidecars usually store only `zoneID`/`mapID`; resolve the display
+    /// name from the instance table when the sidecar carries no name.
+    fn legacy_place_name(&self) -> Option<String> {
+        self.zone_name.clone().or_else(|| {
+            crate::activity::instance_name(
+                &legacy_flavor(self.flavour.as_deref()),
+                self.zone_id.unwrap_or(0),
+                self.map_id.unwrap_or(0),
+            )
+        })
+    }
+
+    fn legacy_details(
+        &self,
+        category: &Category,
+        parent: Category,
+        media_name: &str,
+    ) -> ActivityDetails {
+        match category {
+            Category::Clip => ActivityDetails::Clip {
+                source_recording: legacy_clip_source_id(media_name),
+                source_category: parent,
+                source_title: self
+                    .encounter_name
+                    .clone()
+                    .or_else(|| self.legacy_place_name()),
+            },
+            Category::Raids => ActivityDetails::Raid {
+                zone_id: self.zone_id,
+                zone_name: self.zone_name.clone(),
+                encounter_id: self.encounter_id,
+                encounter_name: self.encounter_name.clone(),
+                difficulty_id: self.difficulty_id,
+                difficulty: self.difficulty.clone(),
+                pull: None,
+                boss_percent: self.boss_percent,
+            },
+            Category::MythicPlus => ActivityDetails::Dungeon {
+                zone_id: self.zone_id,
+                dungeon_name: self.legacy_place_name(),
+                map_id: self.map_id,
+                keystone_level: self.keystone_level.or(self.level),
+                affixes: self.affixes.clone(),
+                upgrade_level: self.upgrade_level,
+            },
+            Category::SoloShuffle => ActivityDetails::SoloRounds {
+                map_id: self.zone_id,
+                map_name: self.legacy_place_name(),
+                rounds_won: self.solo_shuffle_rounds_won,
+                rounds_played: self.solo_shuffle_rounds_played,
+                rounds: self
+                    .solo_shuffle_timeline
+                    .iter()
+                    .map(|round| RoundSummary {
+                        round: round.round,
+                        outcome: if round.result {
+                            Outcome::Win
+                        } else {
+                            Outcome::Loss
+                        },
+                        start_ms: seconds_to_ms(round.timestamp),
+                        duration_ms: round.duration.map(seconds_to_ms),
+                    })
+                    .collect(),
+            },
+            Category::TwoVTwo
+            | Category::ThreeVThree
+            | Category::FiveVFive
+            | Category::Skirmish
+            | Category::Battlegrounds => ActivityDetails::ArenaOrBattleground {
+                map_id: self.zone_id,
+                map_name: self.legacy_place_name(),
+                team_mmr: self.team_mmr,
+            },
+            Category::Manual => ActivityDetails::Manual,
+        }
+    }
+}
+
+/// A legacy clip stores no parent identifier, but its filename is the source
+/// video name plus ` - Clipped at <date>`. Stripping that suffix rebuilds the
+/// identifier the source recording has in this library.
+fn legacy_clip_source_id(media_name: &str) -> RecordingId {
+    let stem = media_name
+        .rsplit_once(" - Clipped at ")
+        .map(|(source, _)| format!("{source}.{MEDIA_EXTENSION}"))
+        .unwrap_or_else(|| media_name.to_owned());
+    RecordingId::from_media_name(&stem)
+}
+
+fn legacy_category(value: &str) -> Option<Category> {
+    Some(match value {
+        "2v2" => Category::TwoVTwo,
+        "3v3" => Category::ThreeVThree,
+        "5v5" => Category::FiveVFive,
+        "Skirmish" => Category::Skirmish,
+        "Solo Shuffle" => Category::SoloShuffle,
+        "Mythic+" => Category::MythicPlus,
+        "Raids" => Category::Raids,
+        "Battlegrounds" => Category::Battlegrounds,
+        "Clips" => Category::Clip,
+        "Manual" => Category::Manual,
+        _ => return None,
+    })
+}
+
+fn legacy_flavor(value: Option<&str>) -> GameFlavor {
+    match value {
+        Some("Retail") | None => GameFlavor::Retail,
+        Some("Classic") => GameFlavor::Classic,
+        Some(other) => GameFlavor::Unknown(other.to_owned()),
+    }
+}
+
+/// The legacy `result` boolean means different things per category; this is the
+/// same mapping the activity engine writes for new recordings.
+fn legacy_outcome(category: &Category, result: bool) -> Outcome {
+    match category {
+        Category::MythicPlus => {
+            if result {
+                Outcome::Complete
+            } else {
+                Outcome::Abandoned
+            }
+        }
+        Category::Manual => Outcome::Unknown,
+        _ => {
+            if result {
+                Outcome::Win
+            } else {
+                Outcome::Loss
+            }
+        }
+    }
+}
+
+/// Legacy sidecars store no title; the library rebuilds a display string from
+/// the fields they do store. Missing values simply drop out.
+fn legacy_title(
+    encounter_name: &Option<String>,
+    zone_name: &Option<String>,
+    player: Option<&LegacyCombatant>,
+) -> String {
+    let base = encounter_name
+        .clone()
+        .or_else(|| zone_name.clone())
+        .unwrap_or_default();
+    match player.and_then(|player| player.name.clone()) {
+        Some(name) if !base.is_empty() => format!("{name} - {base}"),
+        Some(name) => name,
+        None => base,
+    }
+}
+
+fn legacy_player(combatant: &LegacyCombatant) -> Option<PlayerSummary> {
+    Some(PlayerSummary {
+        name: combatant.name.clone()?,
+        realm: combatant.realm.clone(),
+        guid: combatant.guid.clone(),
+        class_id: None,
+        spec_id: combatant.spec_id,
+    })
+}
+
+fn legacy_combatant(combatant: &LegacyCombatant) -> CombatantSummary {
+    CombatantSummary {
+        name: combatant.name.clone(),
+        realm: combatant.realm.clone(),
+        guid: combatant.guid.clone(),
+        region: combatant.region.clone(),
+        class_id: None,
+        spec_id: combatant.spec_id,
+        team_id: combatant.team_id.and_then(|team| u8::try_from(team).ok()),
+    }
+}
+
+fn seconds_to_ms(seconds: f64) -> u64 {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return 0;
+    }
+    (seconds * 1000.0).round() as u64
+}
+
+fn file_modified_ms(path: &Path) -> Option<i64> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_millis() as i64)
+}
+
+/// Legacy sidecars are `JSON.stringify(metadata, null, 2)` with no trailing
+/// newline; native sidecars use the same shape.
+fn pretty_json(value: &Value) -> io::Result<String> {
+    serde_json::to_string_pretty(value)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
+}
+
+/// Minimal ISO-8601 UTC parser for the legacy `logStart`/`logEnd` strings
+/// (`YYYY-MM-DDTHH:MM:SS[.mmm]Z`). Only their difference is used.
+fn iso_epoch_ms(value: &str) -> Option<i64> {
+    let number = |from: usize, to: usize| value.get(from..to)?.parse::<i64>().ok();
+    let year = number(0, 4)?;
+    let month = number(5, 7)?;
+    let day = number(8, 10)?;
+    let hour = number(11, 13)?;
+    let minute = number(14, 16)?;
+    let second = number(17, 19)?;
+    let millis = value
+        .get(20..23)
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    let days = days_from_civil(year as i32, month as i32, day as i32);
+    Some((((days * 24 + hour) * 60 + minute) * 60 + second) * 1000 + millis)
 }
 
 // --- Correlation ---
@@ -1189,6 +1794,10 @@ mod tests {
         MeterFight, MeterMetric, MeterSample, TimelineKind,
     };
 
+    fn fixture_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/native/fixtures/legacy/sidecars")
+    }
+
     struct TempTree {
         root: PathBuf,
     }
@@ -1251,6 +1860,29 @@ mod tests {
                 name
             })
             .collect()
+    }
+
+    /// Copy every legacy fixture plus a placeholder media file for each.
+    fn install_legacy_fixtures(tree: &TempTree) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut entries: Vec<PathBuf> = fs::read_dir(fixture_dir())
+            .expect("fixtures")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            let name = path
+                .file_stem()
+                .expect("stem")
+                .to_string_lossy()
+                .into_owned();
+            let json = fs::read_to_string(&path).expect("read fixture");
+            tree.write(&format!("{name}.json"), &json);
+            tree.write(&format!("{name}.mp4"), "fake media bytes");
+            names.push(name);
+        }
+        names
     }
 
     fn draft(id: &RecordingId) -> RecordingDraft {
@@ -1663,6 +2295,309 @@ mod tests {
     }
 
     #[test]
+    fn legacy_sidecars_load_with_their_contract_intact() {
+        let tree = TempTree::new("legacy-scan");
+        let names = install_legacy_fixtures(&tree);
+        // One unrelated file that must only be counted.
+        tree.write("notes.txt", "not a recording");
+
+        let storage = tree.storage();
+        let index = storage.scan();
+        assert_eq!(index.entries.len(), names.len());
+        assert_eq!(index.ignored_files, 1);
+        assert!(index.skipped.is_empty(), "{:?}", index.skipped);
+
+        let raid = index
+            .entries
+            .iter()
+            .find(|entry| entry.category == Category::Raids)
+            .expect("raid entry");
+        assert_eq!(raid.outcome, Outcome::Win);
+        assert_eq!(raid.start_unix_ms, 1_772_323_200_000);
+        assert_eq!(raid.duration_ms, 214_500);
+        assert_eq!(raid.title, "Testone - Chrome King Gallywix");
+        assert!(raid.protected);
+        assert_eq!(raid.tag.as_deref(), Some("good pull"));
+        assert_eq!(
+            raid.activity_hash.as_deref(),
+            Some("0f1e2d3c4b5a69788796a5b4c3d2e1f0")
+        );
+        assert_eq!(raid.media.codec, None);
+        let player = raid.player.as_ref().expect("raid player");
+        assert_eq!(player.name, "Testone");
+        assert_eq!(player.realm.as_deref(), Some("Testrealm"));
+        assert_eq!(raid.combatants.len(), 2);
+        assert_eq!(
+            raid.details,
+            ActivityDetails::Raid {
+                zone_id: Some(2769),
+                zone_name: Some("Undermine".to_owned()),
+                encounter_id: Some(3009),
+                encounter_name: Some("Chrome King Gallywix".to_owned()),
+                difficulty_id: Some(16),
+                difficulty: Some("M".to_owned()),
+                pull: None,
+                boss_percent: Some(0),
+            }
+        );
+        // Deaths become points at their second offsets; a friendly death is a
+        // loss, a hostile one a win.
+        let deaths: Vec<_> = raid
+            .timeline
+            .iter()
+            .filter(|item| item.kind() == &TimelineKind::Death)
+            .collect();
+        assert_eq!(deaths.len(), 2);
+        assert_eq!(deaths[0].start_ms(), 130_500);
+        assert_eq!(deaths[0].outcome(), Some(Outcome::Loss));
+        assert_eq!(deaths[0].label(), Some("Testtwo"));
+        assert_eq!(deaths[1].start_ms(), 214_000);
+        assert_eq!(deaths[1].outcome(), Some(Outcome::Win));
+
+        let shuffle = index
+            .entries
+            .iter()
+            .find(|entry| entry.category == Category::SoloShuffle)
+            .expect("solo shuffle entry");
+        assert_eq!(shuffle.outcome, Outcome::Win);
+        let ActivityDetails::SoloRounds {
+            rounds_won,
+            rounds_played,
+            rounds,
+            ..
+        } = &shuffle.details
+        else {
+            panic!("solo shuffle details");
+        };
+        assert_eq!(*rounds_won, Some(4));
+        assert_eq!(*rounds_played, Some(6));
+        assert_eq!(rounds.len(), 6);
+        assert_eq!(rounds[0].outcome, Outcome::Win);
+        assert_eq!(rounds[1].outcome, Outcome::Loss);
+        // Round timeline items carry the same per-round outcomes.
+        assert_eq!(shuffle.timeline.len(), 6);
+        assert_eq!(shuffle.timeline[0].label(), Some("Round 1"));
+        assert_eq!(shuffle.timeline[1].outcome(), Some(Outcome::Loss));
+
+        let mythic = index
+            .entries
+            .iter()
+            .find(|entry| entry.category == Category::MythicPlus)
+            .expect("mythic plus entry");
+        assert_eq!(mythic.outcome, Outcome::Abandoned);
+        assert!(!mythic.protected);
+        let ActivityDetails::Dungeon {
+            keystone_level,
+            affixes,
+            upgrade_level,
+            ..
+        } = &mythic.details
+        else {
+            panic!("dungeon details");
+        };
+        assert_eq!(*keystone_level, Some(12));
+        assert_eq!(affixes, &vec![9, 10, 152]);
+        assert_eq!(*upgrade_level, Some(0));
+        // Challenge-mode segments become spans from their ISO log stamps, the
+        // bloodlust cast sits at its offset from the activity start, and the
+        // friendly death is a loss.
+        let span_at = |start_ms: u64| {
+            mythic
+                .timeline
+                .iter()
+                .find(|item| item.start_ms() == start_ms)
+                .unwrap_or_else(|| panic!("no timeline item at {start_ms}"))
+        };
+        let trash = span_at(0);
+        assert_eq!(trash.end_ms(), Some(160_000));
+        let bloodlust = span_at(120_000);
+        assert_eq!(bloodlust.kind(), &TimelineKind::Bloodlust);
+        assert_eq!(bloodlust.end_ms(), Some(160_000));
+        let boss = span_at(160_000);
+        assert_eq!(boss.kind(), &TimelineKind::Encounter);
+        assert_eq!(boss.end_ms(), Some(310_000));
+        let death = span_at(230_000);
+        assert_eq!(death.kind(), &TimelineKind::Death);
+        assert_eq!(death.outcome(), Some(Outcome::Loss));
+
+        let clip = index
+            .entries
+            .iter()
+            .find(|entry| entry.category == Category::Clip)
+            .expect("clip entry");
+        assert_eq!(clip.start_unix_ms, 1_772_410_000_000);
+        assert_eq!(clip.duration_ms, 28_000);
+        assert_eq!(clip.outcome, Outcome::Win);
+        let ActivityDetails::Clip {
+            source_recording,
+            source_category,
+            source_title,
+        } = &clip.details
+        else {
+            panic!("clip details");
+        };
+        // The clip resolves back to the source recording's id via its filename.
+        assert_eq!(source_recording.as_str(), raid.id.as_str());
+        assert_eq!(source_category, &Category::Raids);
+        assert_eq!(source_title.as_deref(), Some("Chrome King Gallywix"));
+
+        // Reading the library never rewrites a legacy sidecar.
+        for name in names {
+            let original =
+                fs::read_to_string(fixture_dir().join(format!("{name}.json"))).expect("fixture");
+            let on_disk =
+                fs::read_to_string(tree.library().join(format!("{name}.json"))).expect("scanned");
+            assert_eq!(original, on_disk, "{name} was modified");
+        }
+    }
+
+    #[test]
+    fn updates_patch_legacy_sidecars_in_place() {
+        let tree = TempTree::new("legacy-update");
+        let storage = tree.storage();
+        tree.write(
+            "arena-2v2.json",
+            r#"{"category":"2v2","duration":60,"start":1,"result":true,"teamMMR":1850,"uniqueHash":"aa00bb11cc22dd33ee44ff5566778899"}"#,
+        );
+        tree.write("arena-2v2.mp4", "media");
+        let legacy = storage
+            .scan()
+            .entries
+            .first()
+            .cloned()
+            .expect("legacy entry");
+
+        let tagged = storage
+            .update(&legacy, &EntryUpdate::Tag(" nice one ".to_owned()))
+            .expect("tag");
+        let protected = storage
+            .update(&tagged, &EntryUpdate::Protected(true))
+            .expect("protect");
+        assert_eq!(protected.tag.as_deref(), Some(" nice one "));
+        assert!(protected.protected);
+
+        let patched: Value =
+            serde_json::from_str(&fs::read_to_string(&legacy.sidecar_path).expect("read"))
+                .expect("json");
+        assert_eq!(patched["tag"], Value::String(" nice one ".to_owned()));
+        assert_eq!(patched["protected"], Value::Bool(true));
+        // Unknown and legacy-only fields survive untouched, and no schema
+        // version is added: the sidecar keeps its legacy schema.
+        assert_eq!(patched["teamMMR"], Value::from(1850));
+        assert_eq!(
+            patched["uniqueHash"],
+            Value::from("aa00bb11cc22dd33ee44ff5566778899")
+        );
+        assert!(patched.get("schema_version").is_none());
+
+        // Clearing removes the key exactly like the baseline's undefined tag.
+        storage
+            .update(&protected, &EntryUpdate::Tag("   ".to_owned()))
+            .expect("clear tag");
+        let cleared: Value =
+            serde_json::from_str(&fs::read_to_string(&legacy.sidecar_path).expect("read"))
+                .expect("json");
+        assert!(cleared.get("tag").is_none());
+        assert_eq!(cleared["protected"], Value::Bool(true));
+    }
+
+    #[test]
+    fn legacy_categories_flavors_and_clips_map_or_reject() {
+        let tree = TempTree::new("legacy-arms");
+        let storage = tree.storage();
+        tree.write(
+            "arena-classic.json",
+            r#"{"category":"2v2","duration":60,"start":1,"result":true,"teamMMR":1850,"flavour":"Classic"}"#,
+        );
+        tree.write("arena-classic.mp4", "media");
+        tree.write(
+            "battleground.json",
+            r#"{"category":"Battlegrounds","duration":60,"start":2,"result":false,"zoneID":30}"#,
+        );
+        tree.write("battleground.mp4", "media");
+        tree.write(
+            "manual.json",
+            r#"{"category":"Manual","duration":10,"start":3}"#,
+        );
+        tree.write("manual.mp4", "media");
+        tree.write(
+            "era-raid.json",
+            r#"{"category":"Raids","duration":10,"start":4,"flavour":"Era"}"#,
+        );
+        tree.write("era-raid.mp4", "media");
+        tree.write(
+            "unknown-category.json",
+            r#"{"category":"Brawls","duration":10,"start":5}"#,
+        );
+        tree.write("unknown-category.mp4", "media");
+        tree.write(
+            "parentless-clip.json",
+            r#"{"category":"Clips","duration":10,"start":6}"#,
+        );
+        tree.write("parentless-clip.mp4", "media");
+        tree.write(
+            "unknown-parent-clip.json",
+            r#"{"category":"Clips","parentCategory":"Brawls","duration":10,"start":7}"#,
+        );
+        tree.write("unknown-parent-clip.mp4", "media");
+
+        let index = storage.scan();
+        assert_eq!(index.entries.len(), 4);
+        assert_eq!(index.skipped.len(), 3);
+        assert!(index.skipped.iter().any(|skipped| {
+            skipped
+                .reason
+                .contains("unknown legacy category \"Brawls\"")
+        }));
+        assert!(index.skipped.iter().any(|skipped| {
+            skipped
+                .reason
+                .contains("legacy clip without a parent category")
+        }));
+        assert!(
+            index
+                .skipped
+                .iter()
+                .any(|skipped| skipped.reason.contains("unknown legacy parent category"))
+        );
+
+        let entry_of = |name: &str| {
+            index
+                .entries
+                .iter()
+                .find(|entry| entry.id.as_str() == format!("{name}.mp4"))
+                .unwrap_or_else(|| panic!("{name} missing"))
+        };
+        let arena = entry_of("arena-classic");
+        assert_eq!(arena.flavor, GameFlavor::Classic);
+        assert_eq!(arena.outcome, Outcome::Win);
+        assert_eq!(
+            arena.details,
+            ActivityDetails::ArenaOrBattleground {
+                map_id: None,
+                map_name: None,
+                team_mmr: Some(1850),
+            }
+        );
+        let battleground = entry_of("battleground");
+        assert_eq!(battleground.outcome, Outcome::Loss);
+        assert!(matches!(
+            battleground.details,
+            ActivityDetails::ArenaOrBattleground {
+                map_id: Some(30),
+                ..
+            }
+        ));
+        let manual = entry_of("manual");
+        assert_eq!(manual.flavor, GameFlavor::Retail);
+        assert_eq!(manual.outcome, Outcome::Unknown);
+        assert_eq!(manual.details, ActivityDetails::Manual);
+        // An unrecognized flavour string stays verbatim instead of guessing.
+        let era = entry_of("era-raid");
+        assert_eq!(era.flavor, GameFlavor::Unknown("Era".to_owned()));
+    }
+
+    #[test]
     fn deletion_reports_per_entry_failures_and_refuses_paths_outside_the_root() {
         let tree = TempTree::new("delete");
         let storage = tree.storage();
@@ -1809,7 +2744,7 @@ mod tests {
             index
                 .skipped
                 .iter()
-                .any(|skipped| skipped.reason.contains("invalid native sidecar"))
+                .any(|skipped| skipped.reason.contains("invalid JSON"))
         );
         assert!(
             index
