@@ -4,6 +4,18 @@ Commit subjects per release, written by `scripts/generate-release-notes.sh` and
 compiled into the binary: the "What's new" dialog reads the section matching the
 running version. Only `## <version>` headings and `- ` lines are parsed.
 
+
+## 1.0.10
+- Retire the AppImage migration release
+- Add buffs tab with per-player buff uptime to meter
+- Cut duplicated test boilerplate and dead derived state
+- Remove AppImage and Electron config migration code
+- Drop legacy Bloodlust backfill and legacy_ids tracking
+- Speed up sidecar parsing and keep coordinator responsive during bulk edits
+- Drop the Electron sidecar reader and code it kept alive
+- Restore a leaner Electron sidecar reader
+- Drop the folded Other buff row and show buff icons
+
 ## 1.0.9
 - Claim the single instance before touching storage
 - Release the spell borrow before clearing it
@@ -39,3 +51,4 @@ running version. Only `## <version>` headings and `- ` lines are parsed.
 - order by spell %
 - remove casts in non detailed view
 - Document the local combat meter
+
