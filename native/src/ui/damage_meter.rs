@@ -1245,7 +1245,7 @@ impl Inner {
                 let (uptime, apps) = actor
                     .spells
                     .iter()
-                    .filter(|entry| entry.metric == MeterMetric::Buffs)
+                    .filter(|entry| entry.metric == MeterMetric::Buffs && entry.key != OTHER_KEY)
                     .fold((0_u64, 0_u32), |(uptime, apps), entry| {
                         (uptime + entry.amount, apps + entry.hits)
                     });
@@ -1277,7 +1277,8 @@ impl Inner {
 
     /// The player's buffs: name on the left, applications and their share of
     /// the fight's timed window on the right. Activating a buff lists when it
-    /// was applied; the folded "Other" row has no single list to show.
+    /// was applied; the folded "Other" row is filtered out because it is not
+    /// a real buff.
     fn rebuild_buffs(self: &Rc<Self>, actor: &ProjectedActor, fight: &MeterProjection) {
         // Bound to a `let` first, mirroring `rebuild_breakdown`: a buff that
         // left the projection below must clear `spell`.
@@ -1296,7 +1297,7 @@ impl Inner {
         let mut buffs: Vec<&ProjectedEntry> = actor
             .spells
             .iter()
-            .filter(|entry| entry.metric == MeterMetric::Buffs)
+            .filter(|entry| entry.metric == MeterMetric::Buffs && entry.key != OTHER_KEY)
             .collect();
         if buffs.is_empty() {
             self.show_empty(&view_empty_message(View::Buffs));
@@ -1324,15 +1325,12 @@ impl Inner {
                 &right,
                 share,
             );
+            self.attach_spell_icon(&row, &entry.key);
             row.add_css_class("wr-meter-row");
-            if entry.key == OTHER_KEY {
-                content.append(&row);
-            } else {
-                let key = entry.key.clone();
-                content.append(&self.row_button(&row, move |this| {
-                    this.spell.replace(Some(key.clone()));
-                }));
-            }
+            let key = entry.key.clone();
+            content.append(&self.row_button(&row, move |this| {
+                this.spell.replace(Some(key.clone()));
+            }));
         }
         self.set_content(&content);
     }
