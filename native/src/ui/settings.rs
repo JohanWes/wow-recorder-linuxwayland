@@ -503,8 +503,7 @@ pub fn apply_outcome(draft: &Config, unsafe_reason: Option<&'static str>) -> App
     if let Some(reason) = unsafe_reason {
         return ApplyOutcome::Blocked(reason);
     }
-    let mut draft = draft.clone();
-    draft.first_time_setup_complete = true;
+    let draft = draft.clone();
     let problems = draft.validate();
     if problems.is_empty() {
         ApplyOutcome::Save(Box::new(draft))
@@ -986,9 +985,6 @@ impl Settings {
 
     fn on_apply(&self) {
         self.clear_marks();
-        // Keep the draft equal to what a confirmed save will report back, so
-        // the discard warning stays quiet after Apply.
-        self.draft.borrow_mut().first_time_setup_complete = true;
         match apply_outcome(&self.draft.borrow(), None) {
             ApplyOutcome::Blocked(_) => {}
             ApplyOutcome::Invalid(problems) => self.show_problems(&problems),
@@ -1442,7 +1438,6 @@ mod tests {
             enabled: true,
             log_dir: AuthorizedPath::authorized("/wow/_retail_/Logs"),
         };
-        config.first_time_setup_complete = true;
         config
     }
 
@@ -1468,7 +1463,10 @@ mod tests {
         // Unset, and imported-but-unauthorized, both ask.
         config.storage.recording_dir = AuthorizedPath::unset();
         assert!(path_needs_attention("storage.recording_dir", &config));
-        config.flavors.retail.log_dir = AuthorizedPath::imported("/wow/_retail_/Logs");
+        config.flavors.retail.log_dir = AuthorizedPath {
+            path: PathBuf::from("/wow/_retail_/Logs"),
+            authorization: PathAuthorization::ImportedInactive,
+        };
         assert!(path_needs_attention("flavors.retail", &config));
 
         // A flavour that is switched off needs no log folder.
@@ -1521,11 +1519,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_validates_blocks_unsafe_states_and_marks_setup_complete() {
+    fn apply_validates_blocks_unsafe_states() {
         let draft = ready_config();
         match apply_outcome(&draft, None) {
             ApplyOutcome::Save(saved) => {
-                assert!(saved.first_time_setup_complete);
                 assert_eq!(saved.capture, draft.capture);
             }
             other => panic!("expected save, got {other:?}"),
@@ -1533,7 +1530,10 @@ mod tests {
 
         let mut invalid = ready_config();
         invalid.capture.fps = 61;
-        invalid.storage.recording_dir = AuthorizedPath::imported("/recordings");
+        invalid.storage.recording_dir = AuthorizedPath {
+            path: PathBuf::from("/recordings"),
+            authorization: PathAuthorization::ImportedInactive,
+        };
         let ApplyOutcome::Invalid(problems) = apply_outcome(&invalid, None) else {
             panic!("invalid draft must not save");
         };
@@ -1595,7 +1595,10 @@ mod tests {
             path_state(&AuthorizedPath::unset()),
             ("Not selected".to_owned(), false)
         );
-        let (subtitle, reauth) = path_state(&AuthorizedPath::imported("/old/Logs"));
+        let (subtitle, reauth) = path_state(&AuthorizedPath {
+            path: PathBuf::from("/old/Logs"),
+            authorization: PathAuthorization::ImportedInactive,
+        });
         assert!(reauth);
         assert!(subtitle.contains("Permission required"));
         assert!(subtitle.contains("/old/Logs"));
@@ -1646,14 +1649,5 @@ mod tests {
         );
         assert!(probe_folder(&directory.join("missing"), false).is_err());
         std::fs::remove_dir_all(&directory).expect("remove probe directory");
-    }
-
-    #[test]
-    fn storage_summary_is_binary_gib() {
-        assert_eq!(storage_summary(0), "Currently using 0.0 GiB.");
-        assert_eq!(
-            storage_summary(3 * 1024 * 1024 * 1024 + 512 * 1024 * 1024),
-            "Currently using 3.5 GiB."
-        );
     }
 }

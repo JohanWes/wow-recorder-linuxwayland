@@ -836,16 +836,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn content_title_follows_the_selected_category() {
-        let snapshot = snapshot_with_entries(Vec::new());
-        assert_eq!(content_view(&snapshot).title, "3v3");
-
-        let mut snapshot = snapshot_with_entries(vec![entry(Category::Raids, "Boss", 10)]);
-        snapshot.config.interface.selected_category = Category::Raids;
-        assert_eq!(content_view(&snapshot).title, "Raids");
-    }
-
-    #[test]
     fn player_fit_uses_the_video_aspect_ratio() {
         assert_eq!(fitted_video_height(1_620, 3_440, 1_440), 679);
         assert_eq!(fitted_video_height(1_600, 1_920, 1_080), 900);

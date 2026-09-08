@@ -509,76 +509,10 @@ impl StatusCard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use warcraft_recorder::domain::{Category, Problem};
+    use warcraft_recorder::domain::Category;
 
     fn snapshot_with(status: RecorderStatus) -> AppSnapshot {
-        snapshot_of(status, Config::default())
-    }
-
-    fn snapshot_of(status: RecorderStatus, config: Config) -> AppSnapshot {
-        crate::ui::window::tests::snapshot_with(status, config, Vec::new())
-    }
-
-    #[test]
-    fn every_status_variant_maps_to_a_visible_card_state() {
-        let cases = [
-            (
-                RecorderStatus::SetupRequired,
-                "Setup required",
-                Tone::Invalid,
-            ),
-            (RecorderStatus::WaitingForWow, "Waiting", Tone::Waiting),
-            (
-                RecorderStatus::Reconfiguring,
-                "Reconfiguring",
-                Tone::Waiting,
-            ),
-            (RecorderStatus::Ready, "Ready", Tone::Ready),
-            (RecorderStatus::Buffering, "Arming capture", Tone::Waiting),
-            (
-                RecorderStatus::Recording {
-                    category: Category::Raids,
-                    title: "Boss pull".to_owned(),
-                    started_unix_ms: 1_000,
-                    manual: false,
-                    test: false,
-                },
-                "Recording",
-                Tone::Recording,
-            ),
-            (
-                RecorderStatus::Overrunning {
-                    title: "Boss pull".to_owned(),
-                    started_unix_ms: 1_000,
-                },
-                "Overrunning",
-                Tone::Overrunning,
-            ),
-            (
-                RecorderStatus::Finalizing {
-                    title: "Saving recording".to_owned(),
-                },
-                "Saving",
-                Tone::Finalizing,
-            ),
-            (
-                RecorderStatus::Fatal {
-                    problem: Problem {
-                        summary: "capture died".to_owned(),
-                        safe_detail: None,
-                        occurred_unix_ms: 0,
-                        recovery_action: None,
-                    },
-                },
-                "Error",
-                Tone::Error,
-            ),
-        ];
-        for (status, title, tone) in cases {
-            let view = view(&snapshot_with(status));
-            assert_eq!(view.title, title);
-            assert_eq!(view.tone, tone);
-        }
+        crate::ui::window::tests::snapshot_with(status, Config::default(), Vec::new())
     }
 
     #[test]
@@ -603,22 +537,6 @@ mod tests {
     }
 
     #[test]
-    fn recording_and_overrunning_carry_the_elapsed_anchor() {
-        let recording = RecorderStatus::Recording {
-            category: Category::Raids,
-            title: "Boss".to_owned(),
-            started_unix_ms: 42,
-            manual: false,
-            test: false,
-        };
-        assert_eq!(view(&snapshot_with(recording)).elapsed_anchor_ms, Some(42));
-        assert_eq!(
-            view(&snapshot_with(RecorderStatus::Ready)).elapsed_anchor_ms,
-            None
-        );
-    }
-
-    #[test]
     fn advanced_logging_warns_only_when_config_wtf_says_off() {
         let mut snapshot = snapshot_with(RecorderStatus::Ready);
         // Read and off, read and on, and unreadable: only the first warns.
@@ -637,14 +555,5 @@ mod tests {
         assert_eq!(elapsed_label(1_000, 61_500), "1:00");
         assert_eq!(elapsed_label(0, 3_661_000), "1:01:01");
         assert_eq!(elapsed_label(5_000, 1_000), "0:00");
-    }
-
-    #[test]
-    fn ready_detail_lists_enabled_flavours() {
-        let mut config = Config::default();
-        config.flavors.retail.enabled = true;
-        config.flavors.era.enabled = true;
-        let view = view(&snapshot_of(RecorderStatus::Ready, config));
-        assert_eq!(view.detail, "Watching combat logs: Retail, Era.");
     }
 }

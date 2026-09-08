@@ -4,7 +4,7 @@
 
 use std::fmt;
 use std::num::NonZeroU64;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
@@ -18,21 +18,6 @@ pub struct RecordingId(String);
 impl RecordingId {
     pub fn new() -> Self {
         Self(Uuid::new_v4().to_string())
-    }
-
-    pub fn from_legacy(value: Option<&str>, relative_media_path: &Path) -> Self {
-        if let Some(value) = value.filter(|value| Uuid::parse_str(value).is_ok()) {
-            return Self(value.to_owned());
-        }
-
-        Self(normalized_relative_path(relative_media_path))
-    }
-
-    pub fn with_legacy_duplicate_suffix(&self, sidecar_filename: &Path) -> Self {
-        let filename = sidecar_filename
-            .file_name()
-            .unwrap_or(sidecar_filename.as_os_str());
-        Self(format!("{}#{}", self.0, filename.to_string_lossy()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -50,24 +35,6 @@ impl fmt::Display for RecordingId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
     }
-}
-
-fn normalized_relative_path(path: &Path) -> String {
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => parts.push(part.to_string_lossy()),
-            std::path::Component::ParentDir => {
-                if parts.last().is_some_and(|part| part != "..") {
-                    parts.pop();
-                } else {
-                    parts.push("..".into());
-                }
-            }
-            _ => {}
-        }
-    }
-    parts.join("/")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -94,7 +61,6 @@ pub enum Category {
     Battlegrounds,
     Manual,
     Clip,
-    Unknown(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,9 +186,6 @@ pub enum ActivityDetails {
         source_title: Option<String>,
     },
     Manual,
-    UnknownLegacy {
-        description: Option<String>,
-    },
 }
 
 impl ActivityDetails {
@@ -242,7 +205,6 @@ impl ActivityDetails {
                 | (Category::SoloShuffle, Self::SoloRounds { .. })
                 | (Category::Clip, Self::Clip { .. })
                 | (Category::Manual, Self::Manual)
-                | (Category::Unknown(_), Self::UnknownLegacy { .. })
         )
     }
 }
@@ -559,7 +521,7 @@ pub struct LibraryEntry {
     pub timeline: Vec<TimelineItem>,
     pub media: MediaFacts,
     /// Pre-aggregated damage/healing facts, media-relative after finalize.
-    /// Empty for clips, manual recordings, and legacy sidecars.
+    /// Empty for clips and manual recordings.
     pub meter: MeterData,
 }
 
@@ -694,7 +656,7 @@ mod tests {
 
     fn entry(category: Category, details: ActivityDetails) -> LibraryEntry {
         LibraryEntry {
-            id: RecordingId::from_legacy(None, Path::new("Raids/example.mkv")),
+            id: RecordingId::new(),
             media_path: PathBuf::from("/recordings/example.mkv"),
             sidecar_path: PathBuf::from("/recordings/example.json"),
             category,
@@ -792,25 +754,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_recording_ids_are_stable_and_uuid_values_are_preserved() {
+    fn recording_ids_are_uuid_values() {
         assert_eq!(
             Uuid::parse_str(RecordingId::new().as_str())
                 .expect("new recording UUID")
                 .get_version_num(),
             4
-        );
-        let legacy_uuid = "6BA7B810-9DAD-11D1-80B4-00C04FD430C8";
-        assert_eq!(
-            RecordingId::from_legacy(Some(legacy_uuid), Path::new("ignored.mkv")).as_str(),
-            legacy_uuid
-        );
-        let fallback = RecordingId::from_legacy(None, Path::new("./Raids/../pull.mkv"));
-        assert_eq!(fallback.as_str(), "pull.mkv");
-        assert_eq!(
-            fallback
-                .with_legacy_duplicate_suffix(Path::new("pull.json"))
-                .as_str(),
-            "pull.mkv#pull.json"
         );
     }
 }

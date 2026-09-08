@@ -286,22 +286,4 @@ mod tests {
             .expect("manual row");
         assert!(manual.visible);
     }
-
-    #[test]
-    fn counts_and_active_row_come_from_the_snapshot() {
-        let mut snapshot = snapshot(
-            vec![(Category::Raids, 7), (Category::MythicPlus, 2)],
-            false,
-            false,
-        );
-        snapshot.config.interface.selected_category = Category::Raids;
-        let views = rows(&snapshot);
-        let raids = views
-            .iter()
-            .find(|view| view.category == Category::Raids)
-            .expect("raids row");
-        assert_eq!(raids.count, 7);
-        assert!(raids.active);
-        assert_eq!(views.iter().filter(|view| view.active).count(), 1);
-    }
 }

@@ -679,8 +679,8 @@ impl Inner {
         true
     }
 
-    /// Legacy sidecars carry no media dimensions. Wait briefly for Clapper's
-    /// decoder to expose the authoritative active-stream size.
+    /// Sidecars carry no media dimensions. Wait briefly for Clapper's decoder
+    /// to expose the authoritative active-stream size.
     fn watch_for_video_dimensions(
         self: &Rc<Self>,
         id: RecordingId,

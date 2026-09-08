@@ -65,7 +65,7 @@ fn family_of(category: &Category) -> Family {
         | Category::SoloShuffle
         | Category::Battlegrounds => Family::Pvp,
         Category::Clip => Family::Clip,
-        Category::Manual | Category::Unknown(_) => Family::Manual,
+        Category::Manual => Family::Manual,
     }
 }
 

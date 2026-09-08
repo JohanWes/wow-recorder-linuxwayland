@@ -47,19 +47,6 @@ impl AuthorizedPath {
         }
     }
 
-    pub fn imported(path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
-        let authorization = if path.as_os_str().is_empty() {
-            PathAuthorization::Unset
-        } else {
-            PathAuthorization::ImportedInactive
-        };
-        Self {
-            path,
-            authorization,
-        }
-    }
-
     pub fn authorized(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -276,7 +263,6 @@ pub struct Config {
     pub manual: ManualSettings,
     pub interface: InterfaceSettings,
     pub validate_log_paths: bool,
-    pub first_time_setup_complete: bool,
     /// The version whose release notes were last acknowledged. Empty until
     /// the user closes the "What's new" dialog, so an install that predates
     /// the dialog still gets one for the version it just updated to.
@@ -295,7 +281,6 @@ impl Default for Config {
             manual: ManualSettings::default(),
             interface: InterfaceSettings::default(),
             validate_log_paths: true,
-            first_time_setup_complete: false,
             // A clean install has no earlier version to report on.
             last_seen_version: crate::VERSION.to_owned(),
         }
@@ -455,12 +440,6 @@ impl Config {
             problems.push(ValidationProblem::new(
                 "activities.dungeon_overrun_seconds",
                 "Dungeon overrun must be between 0 and 60 seconds.",
-            ));
-        }
-        if matches!(self.interface.selected_category, Category::Unknown(_)) {
-            problems.push(ValidationProblem::new(
-                "interface.selected_category",
-                "Choose a supported recording category.",
             ));
         }
 
@@ -758,7 +737,6 @@ mod tests {
             enabled: true,
             log_dir: AuthorizedPath::authorized("/games/wow/_retail_/Logs"),
         };
-        config.first_time_setup_complete = true;
         config
     }
 
@@ -830,12 +808,6 @@ mod tests {
                 "capture.capture_target_token",
                 Box::new(|config| config.capture.capture_target_token = Some(String::new())),
             ),
-            (
-                "interface.selected_category",
-                Box::new(|config| {
-                    config.interface.selected_category = Category::Unknown("future".to_owned())
-                }),
-            ),
         ];
 
         for (expected_field, mutate) in cases {
@@ -854,9 +826,15 @@ mod tests {
             version: 99,
             ..Config::default()
         };
-        config.storage.recording_dir = AuthorizedPath::imported("/recordings#old");
+        config.storage.recording_dir = AuthorizedPath {
+            path: PathBuf::from("/recordings#old"),
+            authorization: PathAuthorization::ImportedInactive,
+        };
         config.storage.separate_buffer_dir = true;
-        config.storage.buffer_dir = AuthorizedPath::imported("/recordings#old");
+        config.storage.buffer_dir = AuthorizedPath {
+            path: PathBuf::from("/recordings#old"),
+            authorization: PathAuthorization::ImportedInactive,
+        };
         config.capture.fps = 14;
         config.capture.bitrate_kbps = 999;
         config.capture.replay_buffer_seconds = 29;
@@ -867,7 +845,10 @@ mod tests {
         config.activities.dungeon_overrun_seconds = 61;
         config.flavors.retail = FlavorConfig {
             enabled: true,
-            log_dir: AuthorizedPath::imported("/games/wow/_retail_/Logs"),
+            log_dir: AuthorizedPath {
+                path: PathBuf::from("/games/wow/_retail_/Logs"),
+                authorization: PathAuthorization::ImportedInactive,
+            },
         };
         disable_automatic_activities(&mut config);
 

@@ -2076,19 +2076,12 @@ mod tests {
         ActiveRecording, CAPTURE_RESTART_FAILED_PROBLEM, CAPTURE_STOPPED_PROBLEM, Coordinator,
         EntryUpdate, MediaConfig, Problem, RecordingDraft, RecordingMode, RecoveryAction, Setup,
         Storage, Timeouts, clear_recovered_capture_problems, now_unix_ms, test_events,
-        utc_offset_minutes,
     };
     use crate::domain::{
         ActivityDetails, Category, GameFlavor, LibraryEntry, MediaFacts, MeterData, Outcome,
         RecordingId,
     };
     use crate::parser::CombatEvent;
-
-    #[test]
-    fn timezone_offset_converts_seconds_to_minutes() {
-        assert_eq!(utc_offset_minutes(7_200), 120);
-        assert_eq!(utc_offset_minutes(-12_600), -210);
-    }
 
     #[test]
     fn recovered_capture_problems_are_removed_without_touching_other_problems() {

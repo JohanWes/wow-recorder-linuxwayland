@@ -24,16 +24,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::{IgnoredAny, Visitor};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::activity::RecordingDraft;
 use crate::domain::{
-    ActivityDetails, BLOODLUST_DURATION_MS, Category, Codec, CombatantSummary, CorrelatedActivity,
-    GameFlavor, LibraryEntry, MediaFacts, MeterData, Outcome, PlayerSummary, RecordingId,
-    RoundSummary, StorageLimit, TimelineItem, TimelineKind, TimelineShape,
+    ActivityDetails, Category, CombatantSummary, CorrelatedActivity, GameFlavor, LibraryEntry,
+    MediaFacts, MeterData, Outcome, PlayerSummary, RecordingId, StorageLimit, TimelineItem,
+    TimelineShape,
 };
 use crate::meter::SAMPLE_INTERVAL_MS;
-use crate::parser::days_from_civil;
 use crate::recorder::CaptureArtifacts;
 
 /// Schema version written into every native sidecar.
@@ -73,10 +71,9 @@ pub struct LibraryIndex {
     /// Reverse chronological.
     pub entries: Arc<Vec<LibraryEntry>>,
     /// Per-entry recorded activity start used for multi-POV correlation,
-    /// parallel to `entries`. Legacy sidecars without a start time cannot
-    /// correlate, so incremental updates can rebuild groups exactly like a
-    /// full scan would.
-    pub correlation_starts: Vec<Option<i64>>,
+    /// parallel to `entries`, so incremental updates can rebuild groups
+    /// exactly like a full scan would.
+    pub correlation_starts: Vec<i64>,
     pub correlations: Arc<Vec<CorrelatedActivity>>,
     pub skipped: Vec<SkippedEntry>,
     /// Bounded summary: how many unrelated/unsupported files were ignored.
@@ -99,7 +96,7 @@ impl LibraryIndex {
         let position = match entries.binary_search_by(|probe| entry_order(probe, &entry)) {
             Ok(position) | Err(position) => position,
         };
-        let start = Some(entry.start_unix_ms);
+        let start = entry.start_unix_ms;
         entries.insert(position, entry);
         self.correlation_starts.insert(position, start);
         self.correlations = Arc::new(correlate(entries, &self.correlation_starts));
@@ -204,10 +201,9 @@ impl Storage {
     /// counted, unreadable sidecars are reported, and nothing is repaired.
     pub fn scan(&self) -> LibraryIndex {
         let mut index = LibraryIndex::default();
-        let mut used_ids: HashSet<RecordingId> = HashSet::new();
         // Loaded in directory order, sorted once at the end: no per-entry
         // clone of the (possibly meter-heavy) entries.
-        let mut scanned: Vec<(LibraryEntry, Option<i64>)> = Vec::new();
+        let mut scanned: Vec<(LibraryEntry, i64)> = Vec::new();
 
         let Ok(read_dir) = fs::read_dir(&self.root) else {
             return index;
@@ -234,14 +230,7 @@ impl Storage {
 
             match self.load_sidecar(&path) {
                 Ok(sidecar) => {
-                    let mut entry = sidecar.entry;
-                    if !used_ids.insert(entry.id.clone()) {
-                        // Legacy identifiers derive from the media name, so a
-                        // duplicate is possible; keep both addressable.
-                        entry.id = entry.id.with_legacy_duplicate_suffix(&path);
-                        used_ids.insert(entry.id.clone());
-                    }
-                    scanned.push((entry, sidecar.correlation_start_ms));
+                    scanned.push((sidecar.entry, sidecar.correlation_start_ms));
                 }
                 Err(reason) => index.skipped.push(SkippedEntry {
                     sidecar_path: path,
@@ -252,7 +241,7 @@ impl Storage {
 
         // The one library ordering: newest first, ties broken by media path.
         scanned.sort_by(|(left, _), (right, _)| entry_order(left, right));
-        let (entries, starts): (Vec<LibraryEntry>, Vec<Option<i64>>) = scanned.into_iter().unzip();
+        let (entries, starts): (Vec<LibraryEntry>, Vec<i64>) = scanned.into_iter().unzip();
         index.correlations = Arc::new(correlate(&entries, &starts));
         index.correlation_starts = starts;
         index.entries = Arc::new(entries);
@@ -261,42 +250,24 @@ impl Storage {
 
     fn load_sidecar(&self, path: &Path) -> Result<LoadedSidecar, String> {
         let text = fs::read_to_string(path).map_err(|error| format!("unreadable: {error}"))?;
-        let probe: SidecarProbe =
-            serde_json::from_str(&text).map_err(|error| format!("invalid JSON: {error}"))?;
-
-        if probe.schema_version {
-            let sidecar: NativeSidecar = serde_json::from_str(&text)
-                .map_err(|error| format!("invalid native sidecar: {error}"))?;
-            if sidecar.schema_version > SIDECAR_SCHEMA_VERSION {
-                return Err(format!(
-                    "sidecar schema version {} is newer than {SIDECAR_SCHEMA_VERSION}",
-                    sidecar.schema_version
-                ));
-            }
-            let media_path = self.root.join(&sidecar.media_file);
-            self.check_owned(&media_path)?;
-            let has_content = media_has_content(&media_path)?;
-            let start = sidecar.start_unix_ms;
-            let mut entry = sidecar.into_entry(media_path, path.to_path_buf());
-            entry.media.has_content = has_content;
-            entry.validate().map_err(|error| error.to_string())?;
-            return Ok(LoadedSidecar {
-                entry,
-                correlation_start_ms: Some(start),
-            });
+        let sidecar: NativeSidecar = serde_json::from_str(&text)
+            .map_err(|error| format!("invalid native sidecar: {error}"))?;
+        if sidecar.schema_version > SIDECAR_SCHEMA_VERSION {
+            return Err(format!(
+                "sidecar schema version {} is newer than {SIDECAR_SCHEMA_VERSION}",
+                sidecar.schema_version
+            ));
         }
-
-        let legacy: LegacySidecar = serde_json::from_str(&text)
-            .map_err(|error| format!("invalid legacy sidecar: {error}"))?;
-        let media_path = path.with_extension(MEDIA_EXTENSION);
+        let media_path = self.root.join(&sidecar.media_file);
+        self.check_owned(&media_path)?;
         let has_content = media_has_content(&media_path)?;
-        let mtime_ms = file_modified_ms(&media_path).unwrap_or(0);
-        let correlation_start_ms = legacy.start.map(|start| start as i64);
-        let mut entry = legacy.into_entry(media_path, path.to_path_buf(), mtime_ms)?;
+        let start = sidecar.start_unix_ms;
+        let mut entry = sidecar.into_entry(media_path, path.to_path_buf());
         entry.media.has_content = has_content;
+        entry.validate().map_err(|error| error.to_string())?;
         Ok(LoadedSidecar {
             entry,
-            correlation_start_ms,
+            correlation_start_ms: start,
         })
     }
 
@@ -411,15 +382,10 @@ impl Storage {
 
     // --- Mutation and deletion ---
 
-    /// Rewrite only the sidecar, atomically. A legacy sidecar keeps its original
-    /// schema and unknown fields: only the `protected`/`tag` keys are patched so
-    /// the legacy Electron app can still read it.
+    /// Rewrite only the sidecar, atomically, from the typed model.
     pub fn update(&self, entry: &LibraryEntry, change: &EntryUpdate) -> io::Result<LibraryEntry> {
         self.check_owned(&entry.sidecar_path)
             .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
-        let text = fs::read_to_string(&entry.sidecar_path)?;
-        let probe: SidecarProbe = serde_json::from_str(&text)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
 
         let mut updated = entry.clone();
         match change {
@@ -433,37 +399,7 @@ impl Storage {
             }
         }
 
-        let json = if probe.schema_version {
-            // The typed model already holds the whole entry; the on-disk
-            // document is only probed for its schema, never materialized.
-            NativeSidecar::from_entry(&updated, &self.root).to_json()?
-        } else {
-            // The sole sanctioned untyped escape hatch; it never enters the
-            // domain model.
-            let value: Value = serde_json::from_str(&text)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-            let Value::Object(mut object) = value else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "legacy sidecar is not a JSON object",
-                ));
-            };
-            match change {
-                EntryUpdate::Protected(protected) => {
-                    object.insert("protected".to_owned(), Value::Bool(*protected));
-                }
-                EntryUpdate::Tag(_) => match &updated.tag {
-                    Some(tag) => {
-                        object.insert("tag".to_owned(), Value::String(tag.clone()));
-                    }
-                    None => {
-                        object.remove("tag");
-                    }
-                },
-            }
-            pretty_json(&Value::Object(object))?
-        };
-
+        let json = NativeSidecar::from_entry(&updated, &self.root).to_json()?;
         let temp = temp_sibling(&entry.sidecar_path);
         write_atomic(&temp, Some(&entry.sidecar_path), json.as_bytes())?;
         Ok(updated)
@@ -715,18 +651,15 @@ impl Storage {
 
 struct LoadedSidecar {
     entry: LibraryEntry,
-    /// Recorded activity start used for multi-POV correlation; `None` when the
-    /// legacy sidecar had no start time and cannot be correlated.
-    correlation_start_ms: Option<i64>,
+    /// Recorded activity start used for multi-POV correlation.
+    correlation_start_ms: i64,
 }
 
-/// Classification probe parsed ahead of the full sidecar: whether a
-/// `schema_version` key is present at all (native, whatever its value) and
-/// which media file the sidecar names. The meter payload can be tens of
-/// megabytes, so unknown fields are streamed past instead of materialized.
+/// Media-reference probe parsed ahead of the full sidecar, used by the startup
+/// sweep. The meter payload can be tens of megabytes, so unknown fields are
+/// streamed past instead of materialized.
 #[derive(Debug, Default)]
 struct SidecarProbe {
-    schema_version: bool,
     media_file: Option<String>,
 }
 
@@ -785,12 +718,6 @@ impl<'de> Deserialize<'de> for SidecarProbe {
                 let mut probe = SidecarProbe::default();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        // Present with any value, `null` included.
-                        "schema_version" => {
-                            map.next_value::<IgnoredAny>()?;
-                            probe.schema_version = true;
-                        }
-                        // A duplicated key keeps the last occurrence.
                         "media_file" => probe.media_file = map.next_value::<MediaFile>()?.0,
                         _ => {
                             map.next_value::<IgnoredAny>()?;
@@ -807,7 +734,7 @@ impl<'de> Deserialize<'de> for SidecarProbe {
 
 /// A sidecar `media_file`: a string names the media; every other value —
 /// `null`, a number, a container — is consumed leniently and falls back to
-/// the sibling media name, like the legacy layout.
+/// the sibling media name.
 struct MediaFile(Option<String>);
 
 impl<'de> Deserialize<'de> for MediaFile {
@@ -957,517 +884,6 @@ impl NativeSidecar {
     }
 }
 
-// --- Legacy sidecar ---
-
-/// The real legacy JSON written by the Electron application. Private to
-/// storage: it is converted to the clean model and never exposed. Cloud-only
-/// fields are simply not read.
-#[derive(Debug, Deserialize)]
-struct LegacySidecar {
-    #[serde(default)]
-    category: String,
-    #[serde(rename = "parentCategory")]
-    parent_category: Option<String>,
-    #[serde(default)]
-    duration: f64,
-    start: Option<f64>,
-    #[serde(rename = "clippedAt")]
-    clipped_at: Option<f64>,
-    #[serde(default)]
-    result: bool,
-    flavour: Option<String>,
-    #[serde(rename = "zoneID")]
-    zone_id: Option<u32>,
-    #[serde(rename = "zoneName")]
-    zone_name: Option<String>,
-    #[serde(rename = "encounterID")]
-    encounter_id: Option<u32>,
-    #[serde(rename = "encounterName")]
-    encounter_name: Option<String>,
-    #[serde(rename = "difficultyID")]
-    difficulty_id: Option<u32>,
-    difficulty: Option<String>,
-    player: Option<LegacyCombatant>,
-    #[serde(rename = "teamMMR")]
-    team_mmr: Option<u32>,
-    #[serde(default)]
-    deaths: Vec<LegacyDeath>,
-    #[serde(rename = "upgradeLevel")]
-    upgrade_level: Option<u8>,
-    #[serde(rename = "mapID")]
-    map_id: Option<u32>,
-    #[serde(rename = "challengeModeTimeline", default)]
-    challenge_mode_timeline: Vec<LegacySegment>,
-    #[serde(rename = "bloodlustTimeline", default)]
-    bloodlust_timeline: Vec<LegacyBloodlust>,
-    #[serde(rename = "soloShuffleTimeline", default)]
-    solo_shuffle_timeline: Vec<LegacyRound>,
-    /// Pre-cloud keystone level.
-    level: Option<u32>,
-    #[serde(rename = "keystoneLevel")]
-    keystone_level: Option<u32>,
-    #[serde(default)]
-    protected: bool,
-    #[serde(rename = "soloShuffleRoundsWon")]
-    solo_shuffle_rounds_won: Option<u8>,
-    #[serde(rename = "soloShuffleRoundsPlayed")]
-    solo_shuffle_rounds_played: Option<u8>,
-    #[serde(default)]
-    combatants: Vec<LegacyCombatant>,
-    #[serde(default)]
-    affixes: Vec<u32>,
-    tag: Option<String>,
-    #[serde(rename = "uniqueHash")]
-    unique_hash: Option<String>,
-    #[serde(rename = "bossPercent")]
-    boss_percent: Option<u8>,
-    encoder: Option<String>,
-    /// Recorder FPS; present on newer sidecars only.
-    fps: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyCombatant {
-    #[serde(rename = "_GUID")]
-    guid: Option<String>,
-    #[serde(rename = "_teamID")]
-    team_id: Option<i32>,
-    #[serde(rename = "_specID")]
-    spec_id: Option<u16>,
-    #[serde(rename = "_name")]
-    name: Option<String>,
-    #[serde(rename = "_realm")]
-    realm: Option<String>,
-    #[serde(rename = "_region")]
-    region: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyDeath {
-    #[serde(default)]
-    name: String,
-    /// Seconds from the activity start.
-    #[serde(default)]
-    timestamp: f64,
-    #[serde(default)]
-    friendly: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacySegment {
-    #[serde(rename = "segmentType")]
-    segment_type: Option<String>,
-    #[serde(rename = "logStart")]
-    log_start: Option<String>,
-    #[serde(rename = "logEnd")]
-    log_end: Option<String>,
-    /// Seconds from the activity start.
-    timestamp: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyRound {
-    #[serde(default)]
-    round: u32,
-    /// Seconds from the activity start.
-    #[serde(default)]
-    timestamp: f64,
-    #[serde(default)]
-    result: bool,
-    duration: Option<f64>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct LegacyBloodlust {
-    /// Milliseconds since Unix epoch in the legacy sidecar, converted to a
-    /// relative offset before the legacy sidecar enters the domain.
-    #[serde(rename = "timestampMs")]
-    timestamp_ms: i64,
-    #[serde(rename = "spellName")]
-    spell_name: String,
-}
-
-impl LegacySidecar {
-    fn into_entry(
-        self,
-        media_path: PathBuf,
-        sidecar_path: PathBuf,
-        mtime_ms: i64,
-    ) -> Result<LibraryEntry, String> {
-        if self.category.trim().is_empty() {
-            return Err("missing category".to_owned());
-        }
-        if !self.duration.is_finite() || self.duration < 0.0 {
-            return Err(format!("invalid duration {}", self.duration));
-        }
-        let category = legacy_category(&self.category);
-        let parent = self.parent_category.as_deref().map(legacy_category);
-        let duration_ms = (self.duration * 1000.0).round() as u64;
-        let start_unix_ms = self
-            .clipped_at
-            .or(self.start)
-            .filter(|value| value.is_finite())
-            .map(|value| value as i64)
-            .unwrap_or(mtime_ms);
-        let outcome = legacy_outcome(parent.as_ref().unwrap_or(&category), self.result);
-        let timeline = self.legacy_timeline(duration_ms);
-        let media_name = media_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let details = self.legacy_details(&category, parent, &media_name);
-        let title = match legacy_title(
-            &self.encounter_name,
-            &self.legacy_place_name(),
-            self.player.as_ref(),
-        ) {
-            title if title.is_empty() => default_title(&category),
-            title => title,
-        };
-
-        let entry = LibraryEntry {
-            id: RecordingId::from_legacy(
-                None,
-                Path::new(media_path.file_name().unwrap_or_default()),
-            ),
-            media_path,
-            sidecar_path,
-            category,
-            flavor: legacy_flavor(self.flavour.as_deref()),
-            title,
-            start_unix_ms,
-            duration_ms,
-            outcome,
-            protected: self.protected,
-            tag: self.tag.filter(|tag| !tag.trim().is_empty()),
-            activity_hash: self.unique_hash,
-            player: self.player.as_ref().and_then(legacy_player),
-            combatants: self.combatants.iter().map(legacy_combatant).collect(),
-            details,
-            timeline,
-            media: MediaFacts {
-                fps: self.fps,
-                width: None,
-                height: None,
-                codec: self.encoder.as_deref().and_then(legacy_codec),
-                has_content: true,
-            },
-            meter: MeterData::default(),
-        };
-        entry.validate().map_err(|error| error.to_string())?;
-        Ok(entry)
-    }
-
-    fn legacy_timeline(&self, duration_ms: u64) -> Vec<TimelineItem> {
-        let mut items: Vec<TimelineItem> = Vec::new();
-        for death in &self.deaths {
-            let start_ms = seconds_to_ms(death.timestamp);
-            if start_ms > duration_ms {
-                continue;
-            }
-            items.push(TimelineItem::point(
-                TimelineKind::Death,
-                start_ms,
-                Some(death.name.clone()),
-                Some(if death.friendly {
-                    Outcome::Loss
-                } else {
-                    Outcome::Win
-                }),
-                None,
-            ));
-        }
-
-        for segment in &self.challenge_mode_timeline {
-            let Some(timestamp) = segment.timestamp else {
-                continue;
-            };
-            let start_ms = seconds_to_ms(timestamp);
-            if start_ms > duration_ms {
-                continue;
-            }
-            // A legacy segment's length is the difference of its ISO log stamps.
-            let length_ms = match (
-                segment.log_start.as_deref().and_then(iso_epoch_ms),
-                segment.log_end.as_deref().and_then(iso_epoch_ms),
-            ) {
-                (Some(from), Some(to)) => to.saturating_sub(from).max(0) as u64,
-                _ => 0,
-            };
-            let kind = match segment.segment_type.as_deref() {
-                Some("Boss") => TimelineKind::Encounter,
-                Some("Trash") => TimelineKind::Trash,
-                Some(other) => TimelineKind::Unknown(other.to_owned()),
-                None => TimelineKind::Unknown(String::new()),
-            };
-            let end_ms = start_ms.saturating_add(length_ms).min(duration_ms);
-            if let Ok(item) = TimelineItem::span(kind, start_ms, end_ms, None, None, None) {
-                items.push(item);
-            }
-        }
-
-        if let Some(activity_start_ms) = self.start.filter(|value| value.is_finite()) {
-            let activity_start_ms = activity_start_ms as i64;
-            for cast in &self.bloodlust_timeline {
-                let start_ms = cast.timestamp_ms.saturating_sub(activity_start_ms).max(0) as u64;
-                if start_ms > duration_ms {
-                    continue;
-                }
-                let end_ms = start_ms
-                    .saturating_add(BLOODLUST_DURATION_MS)
-                    .min(duration_ms);
-                if let Ok(item) = TimelineItem::span(
-                    TimelineKind::Bloodlust,
-                    start_ms,
-                    end_ms,
-                    Some(cast.spell_name.clone()),
-                    None,
-                    None,
-                ) {
-                    items.push(item);
-                }
-            }
-        }
-
-        for round in &self.solo_shuffle_timeline {
-            let start_ms = seconds_to_ms(round.timestamp);
-            if start_ms > duration_ms {
-                continue;
-            }
-            let label = Some(format!("Round {}", round.round));
-            let outcome = Some(if round.result {
-                Outcome::Win
-            } else {
-                Outcome::Loss
-            });
-            let item = match round.duration {
-                Some(seconds) => TimelineItem::span(
-                    TimelineKind::Round,
-                    start_ms,
-                    start_ms
-                        .saturating_add(seconds_to_ms(seconds))
-                        .min(duration_ms),
-                    label,
-                    outcome,
-                    None,
-                )
-                .ok(),
-                None => Some(TimelineItem::point(
-                    TimelineKind::Round,
-                    start_ms,
-                    label,
-                    outcome,
-                    None,
-                )),
-            };
-            items.extend(item);
-        }
-
-        items.sort_by_key(TimelineItem::start_ms);
-        items
-    }
-
-    /// Legacy sidecars usually store only `zoneID`/`mapID`; resolve the display
-    /// name from the instance table when the sidecar carries no name.
-    fn legacy_place_name(&self) -> Option<String> {
-        self.zone_name.clone().or_else(|| {
-            crate::activity::instance_name(
-                &legacy_flavor(self.flavour.as_deref()),
-                self.zone_id.unwrap_or(0),
-                self.map_id.unwrap_or(0),
-            )
-        })
-    }
-
-    fn legacy_details(
-        &self,
-        category: &Category,
-        parent: Option<Category>,
-        media_name: &str,
-    ) -> ActivityDetails {
-        let source = match category {
-            Category::Clip => {
-                return ActivityDetails::Clip {
-                    source_recording: legacy_clip_source_id(media_name),
-                    source_category: parent.unwrap_or_else(|| Category::Unknown(String::new())),
-                    source_title: self
-                        .encounter_name
-                        .clone()
-                        .or_else(|| self.legacy_place_name()),
-                };
-            }
-            other => other,
-        };
-
-        match source {
-            Category::Raids => ActivityDetails::Raid {
-                zone_id: self.zone_id,
-                zone_name: self.zone_name.clone(),
-                encounter_id: self.encounter_id,
-                encounter_name: self.encounter_name.clone(),
-                difficulty_id: self.difficulty_id,
-                difficulty: self.difficulty.clone(),
-                pull: None,
-                boss_percent: self.boss_percent,
-            },
-            Category::MythicPlus => ActivityDetails::Dungeon {
-                zone_id: self.zone_id,
-                dungeon_name: self.legacy_place_name(),
-                map_id: self.map_id,
-                keystone_level: self.keystone_level.or(self.level),
-                affixes: self.affixes.clone(),
-                upgrade_level: self.upgrade_level,
-            },
-            Category::SoloShuffle => ActivityDetails::SoloRounds {
-                map_id: self.zone_id,
-                map_name: self.legacy_place_name(),
-                rounds_won: self.solo_shuffle_rounds_won,
-                rounds_played: self.solo_shuffle_rounds_played,
-                rounds: self
-                    .solo_shuffle_timeline
-                    .iter()
-                    .map(|round| RoundSummary {
-                        round: round.round,
-                        outcome: if round.result {
-                            Outcome::Win
-                        } else {
-                            Outcome::Loss
-                        },
-                        start_ms: seconds_to_ms(round.timestamp),
-                        duration_ms: round.duration.map(seconds_to_ms),
-                    })
-                    .collect(),
-            },
-            Category::TwoVTwo
-            | Category::ThreeVThree
-            | Category::FiveVFive
-            | Category::Skirmish
-            | Category::Battlegrounds => ActivityDetails::ArenaOrBattleground {
-                map_id: self.zone_id,
-                map_name: self.legacy_place_name(),
-                team_mmr: self.team_mmr,
-            },
-            Category::Manual => ActivityDetails::Manual,
-            Category::Clip | Category::Unknown(_) => ActivityDetails::UnknownLegacy {
-                description: self.zone_name.clone(),
-            },
-        }
-    }
-}
-
-/// A legacy clip stores no parent identifier, but its filename is the source
-/// video name plus ` - Clipped at <date>`. Stripping that suffix rebuilds the
-/// identifier the source recording has in this library.
-fn legacy_clip_source_id(media_name: &str) -> RecordingId {
-    let stem = media_name
-        .rsplit_once(" - Clipped at ")
-        .map(|(source, _)| format!("{source}.{MEDIA_EXTENSION}"))
-        .unwrap_or_else(|| media_name.to_owned());
-    RecordingId::from_legacy(None, Path::new(&stem))
-}
-
-fn legacy_category(value: &str) -> Category {
-    match value {
-        "2v2" => Category::TwoVTwo,
-        "3v3" => Category::ThreeVThree,
-        "5v5" => Category::FiveVFive,
-        "Skirmish" => Category::Skirmish,
-        "Solo Shuffle" => Category::SoloShuffle,
-        "Mythic+" => Category::MythicPlus,
-        "Raids" => Category::Raids,
-        "Battlegrounds" => Category::Battlegrounds,
-        "Clips" => Category::Clip,
-        "Manual" => Category::Manual,
-        other => Category::Unknown(other.to_owned()),
-    }
-}
-
-/// The legacy `encoder` string is an OBS encoder id on Windows and the GSR
-/// codec on Linux; only the codec family is recoverable from it.
-fn legacy_codec(encoder: &str) -> Option<Codec> {
-    let encoder = encoder.to_ascii_lowercase();
-    if encoder.contains("av1") {
-        Some(Codec::Av1)
-    } else if encoder.contains("hevc") || encoder.contains("265") {
-        Some(Codec::Hevc)
-    } else if encoder.contains("264") {
-        Some(Codec::H264)
-    } else {
-        None
-    }
-}
-
-fn legacy_flavor(value: Option<&str>) -> GameFlavor {
-    match value {
-        Some("Retail") | None => GameFlavor::Retail,
-        Some("Classic") => GameFlavor::Classic,
-        Some(other) => GameFlavor::Unknown(other.to_owned()),
-    }
-}
-
-/// The legacy `result` boolean means different things per category; this is the
-/// same mapping the activity engine writes for new recordings.
-fn legacy_outcome(category: &Category, result: bool) -> Outcome {
-    match category {
-        Category::MythicPlus => {
-            if result {
-                Outcome::Complete
-            } else {
-                Outcome::Abandoned
-            }
-        }
-        Category::Manual | Category::Unknown(_) => Outcome::Unknown,
-        _ => {
-            if result {
-                Outcome::Win
-            } else {
-                Outcome::Loss
-            }
-        }
-    }
-}
-
-/// Legacy sidecars store no title; the library rebuilds a display string from
-/// the fields they do store. Missing values simply drop out.
-fn legacy_title(
-    encounter_name: &Option<String>,
-    zone_name: &Option<String>,
-    player: Option<&LegacyCombatant>,
-) -> String {
-    let base = encounter_name
-        .clone()
-        .or_else(|| zone_name.clone())
-        .unwrap_or_default();
-    match player.and_then(|player| player.name.clone()) {
-        Some(name) if !base.is_empty() => format!("{name} - {base}"),
-        Some(name) => name,
-        None => base,
-    }
-}
-
-fn legacy_player(combatant: &LegacyCombatant) -> Option<PlayerSummary> {
-    Some(PlayerSummary {
-        name: combatant.name.clone()?,
-        realm: combatant.realm.clone(),
-        guid: combatant.guid.clone(),
-        class_id: None,
-        spec_id: combatant.spec_id,
-    })
-}
-
-fn legacy_combatant(combatant: &LegacyCombatant) -> CombatantSummary {
-    CombatantSummary {
-        name: combatant.name.clone(),
-        realm: combatant.realm.clone(),
-        guid: combatant.guid.clone(),
-        region: combatant.region.clone(),
-        class_id: None,
-        spec_id: combatant.spec_id,
-        team_id: combatant.team_id.and_then(|team| u8::try_from(team).ok()),
-    }
-}
-
 // --- Correlation ---
 
 /// The library's one ordering: newest first, ties broken by media path.
@@ -1481,18 +897,17 @@ fn entry_order(left: &LibraryEntry, right: &LibraryEntry) -> std::cmp::Ordering 
 /// Correlation: identical unique hash and activity start times within one
 /// minute. Clips, solo shuffle, and manual recordings only ever group with the
 /// literally identical video, which for a local-only library means never.
-fn correlate(entries: &[LibraryEntry], starts: &[Option<i64>]) -> Vec<CorrelatedActivity> {
+fn correlate(entries: &[LibraryEntry], starts: &[i64]) -> Vec<CorrelatedActivity> {
     let mut correlated: Vec<CorrelatedActivity> = Vec::new();
     let mut primary_starts: Vec<i64> = Vec::new();
     let mut primaries_by_hash: HashMap<&str, Vec<usize>> = HashMap::new();
 
-    for (entry, start) in entries.iter().zip(starts.iter()) {
+    for (entry, start) in entries.iter().zip(starts.iter().copied()) {
         let matched = entry
             .activity_hash
             .as_deref()
-            .zip(*start)
             .filter(|_| !excluded_from_correlation(&entry.category))
-            .and_then(|(hash, start)| {
+            .and_then(|hash| {
                 primaries_by_hash.get(hash).and_then(|positions| {
                     positions.iter().copied().find(|position| {
                         (primary_starts[*position] - start).abs() <= CORRELATION_TOLERANCE_MS
@@ -1510,10 +925,9 @@ fn correlate(entries: &[LibraryEntry], starts: &[Option<i64>]) -> Vec<Correlated
             primary_id: entry.id.clone(),
             local_pov_ids: Vec::new(),
         });
-        primary_starts.push(start.unwrap_or(entry.start_unix_ms));
+        primary_starts.push(start);
         if !excluded_from_correlation(&entry.category)
             && let Some(hash) = entry.activity_hash.as_deref()
-            && start.is_some()
         {
             primaries_by_hash.entry(hash).or_default().push(position);
         }
@@ -1707,13 +1121,6 @@ fn recorded_flavor(flavor: &GameFlavor) -> GameFlavor {
     }
 }
 
-fn seconds_to_ms(seconds: f64) -> u64 {
-    if !seconds.is_finite() || seconds <= 0.0 {
-        return 0;
-    }
-    (seconds * 1000.0).round() as u64
-}
-
 fn media_has_content(path: &Path) -> Result<bool, String> {
     match fs::metadata(path) {
         // Scanning must never decode media, so a nonzero length is the only
@@ -1722,14 +1129,6 @@ fn media_has_content(path: &Path) -> Result<bool, String> {
         Ok(_) => Err(format!("media path {} is not a file", path.display())),
         Err(error) => Err(format!("media file {}: {error}", path.display())),
     }
-}
-
-fn file_modified_ms(path: &Path) -> Option<i64> {
-    fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|elapsed| elapsed.as_millis() as i64)
 }
 
 fn temp_sibling(path: &Path) -> PathBuf {
@@ -1742,13 +1141,6 @@ fn reason_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".recovery.txt");
     path.with_file_name(name)
-}
-
-/// Legacy sidecars are `JSON.stringify(metadata, null, 2)` with no trailing
-/// newline; native sidecars use the same shape.
-fn pretty_json(value: &Value) -> io::Result<String> {
-    serde_json::to_string_pretty(value)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
 }
 
 fn write_atomic(temp: &Path, final_path: Option<&Path>, bytes: &[u8]) -> io::Result<()> {
@@ -1773,24 +1165,6 @@ fn move_file(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
-/// Minimal ISO-8601 UTC parser for the legacy `logStart`/`logEnd` strings
-/// (`YYYY-MM-DDTHH:MM:SS[.mmm]Z`). Only their difference is used.
-fn iso_epoch_ms(value: &str) -> Option<i64> {
-    let number = |from: usize, to: usize| value.get(from..to)?.parse::<i64>().ok();
-    let year = number(0, 4)?;
-    let month = number(5, 7)?;
-    let day = number(8, 10)?;
-    let hour = number(11, 13)?;
-    let minute = number(14, 16)?;
-    let second = number(17, 19)?;
-    let millis = value
-        .get(20..23)
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(0);
-    let days = days_from_civil(year as i32, month as i32, day as i32);
-    Some((((days * 24 + hour) * 60 + minute) * 60 + second) * 1000 + millis)
-}
-
 /// Wall-clock milliseconds; used for generated clip dates.
 pub fn now_unix_ms() -> i64 {
     SystemTime::now()
@@ -1811,19 +1185,9 @@ mod tests {
     use std::num::NonZeroU64;
 
     use crate::domain::{
-        MeterActor, MeterDeath, MeterDeathEvent, MeterDeathEventKind, MeterEntry, MeterFight,
-        MeterMetric, MeterSample,
+        Codec, MeterActor, MeterDeath, MeterDeathEvent, MeterDeathEventKind, MeterEntry,
+        MeterFight, MeterMetric, MeterSample, TimelineKind,
     };
-
-    fn fixture_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/native/fixtures/legacy/sidecars")
-    }
-
-    fn golden_path(name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../tests/native/golden")
-            .join(name)
-    }
 
     struct TempTree {
         root: PathBuf,
@@ -1865,111 +1229,28 @@ mod tests {
         }
     }
 
-    /// Copy every legacy fixture plus a placeholder media file for each.
-    fn install_legacy_fixtures(tree: &TempTree) -> Vec<String> {
-        let mut names = Vec::new();
-        let mut entries: Vec<PathBuf> = fs::read_dir(fixture_dir())
-            .expect("fixtures")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .collect();
-        entries.sort();
-        for path in entries {
-            let name = path
-                .file_stem()
-                .expect("stem")
-                .to_string_lossy()
-                .into_owned();
-            let json = fs::read_to_string(&path).expect("read fixture");
-            tree.write(&format!("{name}.json"), &json);
-            tree.write(&format!("{name}.mp4"), "fake media bytes");
-            names.push(name);
-        }
-        names
-    }
-
-    #[derive(Serialize)]
-    struct Snapshot {
-        entries: Vec<Value>,
-        correlations: Vec<Value>,
-        skipped: Vec<String>,
-        ignored_files: usize,
-    }
-
-    fn snapshot(index: &LibraryIndex, root: &Path) -> String {
-        let entries = index
-            .entries
-            .iter()
-            .map(|entry| {
-                serde_json::to_value(NativeSidecar::from_entry(entry, root))
-                    .expect("serialize entry")
+    /// Write `count` valid native sidecars, the first `protected_count` of
+    /// them protected, plus a placeholder media file for each: the same
+    /// on-disk shape finalize produces, without running the capture pipeline.
+    fn install_native_fixtures(
+        tree: &TempTree,
+        count: usize,
+        protected_count: usize,
+    ) -> Vec<String> {
+        (0..count)
+            .map(|index| {
+                let name = format!("native-{index:02}");
+                let id = uuid::Uuid::new_v4();
+                let protected = index < protected_count;
+                let start = 1_772_323_200_000 + index as i64;
+                let sidecar = format!(
+                    r#"{{"schema_version":1,"media_file":"{name}.mp4","id":"{id}","category":"raids","flavor":"retail","title":"Native {index}","start_unix_ms":{start},"duration_ms":60000,"outcome":"unknown","protected":{protected},"combatants":[],"timeline":[],"details":{{"kind":"raid"}},"media":{{"has_content":true}}}}"#
+                );
+                tree.write(&format!("{name}.json"), &sidecar);
+                tree.write(&format!("{name}.mp4"), "fake media bytes");
+                name
             })
-            .collect();
-        let correlations = index
-            .correlations
-            .iter()
-            .map(|correlated| {
-                serde_json::json!({
-                    "primary": correlated.primary_id.as_str(),
-                    "local_pov_ids": correlated
-                        .local_pov_ids
-                        .iter()
-                        .map(RecordingId::as_str)
-                        .collect::<Vec<_>>(),
-                })
-            })
-            .collect();
-        let snapshot = Snapshot {
-            entries,
-            correlations,
-            skipped: index
-                .skipped
-                .iter()
-                .map(|skipped| {
-                    format!(
-                        "{}: {}",
-                        skipped
-                            .sidecar_path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy(),
-                        skipped.reason
-                    )
-                })
-                .collect(),
-            ignored_files: index.ignored_files,
-        };
-        serde_json::to_string_pretty(&snapshot).expect("serialize snapshot")
-    }
-
-    #[test]
-    fn legacy_sidecars_map_to_the_golden_and_stay_unmodified_on_disk() {
-        let tree = TempTree::new("legacy-scan");
-        let names = install_legacy_fixtures(&tree);
-        // One unrelated file that must only be counted.
-        tree.write("notes.txt", "not a recording");
-
-        let storage = tree.storage();
-        let index = storage.scan();
-        assert_eq!(index.entries.len(), names.len());
-        assert_eq!(index.ignored_files, 1);
-        assert!(index.skipped.is_empty(), "{:?}", index.skipped);
-
-        let actual = snapshot(&index, &tree.library());
-        let golden = golden_path("legacy-scan.json");
-        let expected = fs::read_to_string(&golden).unwrap_or_else(|error| {
-            panic!("read {}: {error}\nactual:\n{actual}", golden.display())
-        });
-        assert_eq!(actual.trim(), expected.trim());
-
-        // Reading the library never rewrites a legacy sidecar.
-        for name in names {
-            let original =
-                fs::read_to_string(fixture_dir().join(format!("{name}.json"))).expect("fixture");
-            let on_disk =
-                fs::read_to_string(tree.library().join(format!("{name}.json"))).expect("scanned");
-            assert_eq!(original, on_disk, "{name} was modified");
-        }
+            .collect()
     }
 
     fn draft(id: &RecordingId) -> RecordingDraft {
@@ -2142,7 +1423,7 @@ mod tests {
     fn scan_accepts_zero_byte_performance_placeholders_without_decoding() {
         let tree = TempTree::new("zero-byte-corpus");
         let storage = tree.storage();
-        let names = install_legacy_fixtures(&tree);
+        let names = install_native_fixtures(&tree, 3, 0);
         let media = tree.library().join(&names[0]).with_extension("mp4");
         fs::write(&media, []).expect("truncate placeholder media");
 
@@ -2281,8 +1562,8 @@ mod tests {
     fn startup_sweep_quarantines_interruption_leftovers_only() {
         let tree = TempTree::new("sweep");
         let storage = tree.storage();
-        install_legacy_fixtures(&tree);
-        let kept = tree.library().join("manual.mp4");
+        install_native_fixtures(&tree, 11, 2);
+        let kept = tree.library().join("native-00.mp4");
 
         // One row per interruption state the architecture can actually create.
         let orphan_media = tree.write("activity-1772323200000-orphan.mp4", "media with no sidecar");
@@ -2323,50 +1604,9 @@ mod tests {
     }
 
     #[test]
-    fn updates_rewrite_native_sidecars_and_patch_legacy_ones_in_place() {
+    fn updates_rewrite_native_sidecars_from_the_typed_model() {
         let tree = TempTree::new("update");
         let storage = tree.storage();
-        install_legacy_fixtures(&tree);
-        let index = storage.scan();
-
-        let legacy = index
-            .entries
-            .iter()
-            .find(|entry| entry.id.as_str().starts_with("arena-2v2"))
-            .expect("legacy entry")
-            .clone();
-
-        let tagged = storage
-            .update(&legacy, &EntryUpdate::Tag(" nice one ".to_owned()))
-            .expect("tag");
-        let protected = storage
-            .update(&tagged, &EntryUpdate::Protected(true))
-            .expect("protect");
-        assert_eq!(protected.tag.as_deref(), Some(" nice one "));
-        assert!(protected.protected);
-
-        let patched: Value =
-            serde_json::from_str(&fs::read_to_string(&legacy.sidecar_path).expect("read"))
-                .expect("json");
-        assert_eq!(patched["tag"], Value::String(" nice one ".to_owned()));
-        assert_eq!(patched["protected"], Value::Bool(true));
-        // Unknown and legacy-only fields survive untouched.
-        assert_eq!(patched["teamMMR"], Value::from(1850));
-        assert_eq!(
-            patched["uniqueHash"],
-            Value::from("aa00bb11cc22dd33ee44ff5566778899")
-        );
-        assert!(patched.get("schema_version").is_none());
-        assert!(patched["combatants"].as_array().expect("combatants").len() == 2);
-
-        // Clearing removes the key exactly like the baseline's undefined tag.
-        storage
-            .update(&protected, &EntryUpdate::Tag("   ".to_owned()))
-            .expect("clear tag");
-        let cleared: Value =
-            serde_json::from_str(&fs::read_to_string(&legacy.sidecar_path).expect("read"))
-                .expect("json");
-        assert!(cleared.get("tag").is_none());
 
         // A native sidecar round-trips through the typed model; the meter must
         // survive the tag/protect rewrite.
@@ -2394,6 +1634,10 @@ mod tests {
         let updated = storage
             .update(&native, &EntryUpdate::Protected(true))
             .expect("protect native");
+        let tagged = storage
+            .update(&updated, &EntryUpdate::Tag("  keeper  ".to_owned()))
+            .expect("tag native");
+        assert_eq!(tagged.tag.as_deref(), Some("  keeper  "));
         // The update path rebuilds the sidecar from the entry: meter contents
         // must come back byte-identical, and the rescan equality below proves
         // they were actually written.
@@ -2415,14 +1659,14 @@ mod tests {
             .find(|entry| entry.id == native.id)
             .cloned()
             .expect("rescan");
-        assert_eq!(reloaded, updated);
+        assert_eq!(reloaded, tagged);
     }
 
     #[test]
     fn deletion_reports_per_entry_failures_and_refuses_paths_outside_the_root() {
         let tree = TempTree::new("delete");
         let storage = tree.storage();
-        install_legacy_fixtures(&tree);
+        install_native_fixtures(&tree, 3, 0);
         let index = storage.scan();
 
         let mut good = index.entries[0].clone();
@@ -2453,7 +1697,7 @@ mod tests {
 
         let tree = TempTree::new("delete-parent-symlink");
         let storage = tree.storage();
-        install_legacy_fixtures(&tree);
+        install_native_fixtures(&tree, 1, 0);
         let mut entry = storage.scan().entries[0].clone();
 
         let outside = tree.root.join("outside");
@@ -2478,7 +1722,7 @@ mod tests {
     fn storage_limits_evict_only_unprotected_recordings_oldest_first() {
         let tree = TempTree::new("evict");
         let storage = tree.storage();
-        install_legacy_fixtures(&tree);
+        install_native_fixtures(&tree, 11, 2);
         let entries = storage.scan().entries;
 
         // Unlimited never evicts.
@@ -2553,9 +1797,9 @@ mod tests {
         tree.write("broken.mp4", "media");
         tree.write(
             "no-media.json",
-            r#"{"category":"Raids","duration":10,"start":1}"#,
+            r#"{"schema_version":1,"media_file":"missing.mp4","id":"0d8a0e10-1a2b-4c3d-8e4f-aabbccddeeff","category":"raids","flavor":"retail","title":"No media","start_unix_ms":1,"duration_ms":10,"outcome":"unknown","protected":false,"combatants":[],"timeline":[],"details":{"kind":"raid"},"media":{"has_content":true}}"#,
         );
-        tree.write("no-category.json", r#"{"duration":10,"start":1}"#);
+        tree.write("no-category.json", r#"{"schema_version":1,"media_file":"no-category.mp4","id":"0d8a0e10-1a2b-4c3d-8e4f-aabbccddeeff","flavor":"retail","title":"No category","start_unix_ms":1,"duration_ms":10,"outcome":"unknown","protected":false,"combatants":[],"timeline":[],"details":{"kind":"raid"},"media":{"has_content":true}}"#);
         tree.write("no-category.mp4", "media");
 
         let index = storage.scan();
@@ -2565,7 +1809,7 @@ mod tests {
             index
                 .skipped
                 .iter()
-                .any(|skipped| skipped.reason.contains("invalid JSON"))
+                .any(|skipped| skipped.reason.contains("invalid native sidecar"))
         );
         assert!(
             index
@@ -2577,43 +1821,14 @@ mod tests {
             index
                 .skipped
                 .iter()
-                .any(|skipped| skipped.reason.contains("missing category"))
-        );
-    }
-
-    /// A `schema_version` key of any value, `null` or wrong-typed included,
-    /// classifies the sidecar as native: it is skipped with a native
-    /// diagnostic, never misread as a legacy sidecar.
-    #[test]
-    fn a_schema_key_of_any_value_classifies_the_sidecar_as_native() {
-        let tree = TempTree::new("schema-key");
-        let storage = tree.storage();
-        tree.write(
-            "null-version.json",
-            r#"{"schema_version":null,"category":"Raids","duration":10,"start":1}"#,
-        );
-        tree.write(
-            "string-version.json",
-            r#"{"schema_version":"1","category":"Raids","duration":10,"start":1}"#,
-        );
-        tree.write("null-version.mp4", "media");
-        tree.write("string-version.mp4", "media");
-
-        let index = storage.scan();
-        assert!(index.entries.is_empty());
-        assert_eq!(index.skipped.len(), 2);
-        assert!(
-            index
-                .skipped
-                .iter()
-                .all(|skipped| skipped.reason.starts_with("invalid native sidecar"))
+                .any(|skipped| skipped.reason.contains("missing field `category`"))
         );
     }
 
     /// The sweep resolves references from sidecars whatever the scanner thinks
-    /// of them: the sibling fallback for a legacy layout, a non-string
-    /// `media_file`, and valid JSON that is not an object; malformed JSON
-    /// references nothing and its media is swept.
+    /// of them: a sidecar that names its media, the sibling fallback when no
+    /// `media_file` is found (even a non-string one), and valid JSON that is
+    /// not an object; malformed JSON references nothing and its media is swept.
     #[test]
     fn sweep_honors_references_from_sidecars_that_fail_to_load() {
         let tree = TempTree::new("sweep-references");

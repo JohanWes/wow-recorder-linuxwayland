@@ -793,7 +793,7 @@ fn missing_regular_artifact_replaces_the_child_and_recovers() {
     assert!(entry.media_path.exists(), "media was not written");
 }
 
-/// A harness over a tree that already holds one scanned legacy recording
+/// A harness over a tree that already holds one scanned recording
 /// (`canary-old`), optionally protected. Its media is removed right after
 /// startup, so any full library rescan would drop it: the canary stays in the
 /// index only while completion, mutation, and eviction update incrementally.
@@ -803,11 +803,12 @@ fn canary_harness(
 ) -> (Harness, warcraft_recorder::domain::LibraryEntry) {
     let (root, library, capture_root, log_file) = spawn_tree(name);
     let start = now_unix_ms() - 61_000;
-    fs::write(
-        library.join("canary-old.json"),
-        format!(r#"{{"category":"Raids","duration":60,"start":{start},"protected":{protected}}}"#),
-    )
-    .unwrap();
+    // A native sidecar, exactly as finalize would write one: the canary must
+    // scan like any recording the app itself produced.
+    let sidecar = format!(
+        r#"{{"schema_version":1,"media_file":"canary-old.mp4","id":"0d8a0e10-1a2b-4c3d-8e4f-aabbccddeeff","category":"raids","flavor":"retail","title":"Canary","start_unix_ms":{start},"duration_ms":60000,"outcome":"unknown","protected":{protected},"combatants":[],"timeline":[],"details":{{"kind":"raid"}},"media":{{"has_content":true}}}}"#
+    );
+    fs::write(library.join("canary-old.json"), sidecar).unwrap();
     fs::write(library.join("canary-old.mp4"), b"canary media").unwrap();
 
     let harness = Harness::attach(root, library, capture_root, log_file);

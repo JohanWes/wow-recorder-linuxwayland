@@ -143,7 +143,7 @@ pub enum DiscardReason {
     /// Raid duration (including overrun) below the configured minimum.
     BelowMinDuration,
     /// The recording player could not be identified or has no combatant/name,
-    /// so the legacy app would fail to build metadata and drop the video.
+    /// so there is no metadata worth keeping the video for.
     IncompleteMetadata,
 }
 
@@ -2542,7 +2542,6 @@ fn category_hash_name(category: &Category) -> &'static str {
         Category::Battlegrounds => "Battlegrounds",
         Category::Manual => "Manual",
         Category::Clip => "Clips",
-        Category::Unknown(_) => "Unknown",
     }
 }
 
@@ -2979,8 +2978,8 @@ fn arena_zone_name(flavor: &GameFlavor, zone_id: u32) -> Option<String> {
 }
 
 /// Instance names by zone id (battlegrounds, arenas, dungeons) with the classic
-/// MoP challenge-mode fallback, without a default. Crate-public because legacy
-/// sidecars store only ids and storage restores display names from this table.
+/// MoP challenge-mode fallback, without a default. Resolves the display name
+/// for new Mythic+ recordings, whose logs carry only zone and map ids.
 pub(crate) fn instance_name(flavor: &GameFlavor, zone_id: u32, map_id: u32) -> Option<String> {
     let merged = retail_battleground_name(zone_id)
         .or_else(|| classic_battleground_name(zone_id))
@@ -3091,7 +3090,10 @@ fn classic_unique_aura(spell: &str) -> Option<u16> {
     spell_lookup(CLASSIC_UNIQUE_SPEC_AURAS, spell)
 }
 
-// --- MD5 (RFC 1321) for the legacy-compatible activity hash ---
+// --- MD5 (RFC 1321) for the activity hash ---
+//
+// The hash is persisted in every sidecar and drives multi-POV correlation, so
+// the digest must stay byte-stable across releases.
 
 fn md5_hex(input: &[u8]) -> String {
     const S: [u32; 64] = [

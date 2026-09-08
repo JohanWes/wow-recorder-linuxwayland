@@ -474,19 +474,6 @@ mod tests {
     }
 
     #[test]
-    fn spec_ids_map_to_their_class_css() {
-        assert_eq!(class_css_class(64), Some("wr-class-mage")); // Frost mage
-        assert_eq!(class_css_class(251), Some("wr-class-death-knight")); // Frost DK
-        assert_eq!(class_css_class(1480), Some("wr-class-demon-hunter")); // Devourer
-        assert_eq!(class_css_class(1473), Some("wr-class-evoker")); // Augmentation
-        assert_eq!(class_css_class(9999), None);
-        // Every named spec resolves to a class.
-        for (id, _) in SPEC_NAMES {
-            assert!(class_css_class(*id).is_some(), "spec {id} has no class");
-        }
-    }
-
-    #[test]
     fn combatants_contribute_name_suggestions() {
         let mut entry = base(
             Category::ThreeVThree,

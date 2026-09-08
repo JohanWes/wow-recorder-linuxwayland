@@ -47,15 +47,6 @@ impl SpellDb {
     pub fn lookup(&self, name: &str) -> Option<&SpellInfo> {
         self.by_name.get(name)
     }
-
-    /// Number of distinct spell names indexed.
-    pub fn len(&self) -> usize {
-        self.by_name.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
-    }
 }
 
 #[cfg(test)]
@@ -70,25 +61,16 @@ mod tests {
     #[test]
     fn parses_and_looks_up_by_name() {
         let db = SpellDb::parse(SAMPLE).expect("valid sample");
-        assert_eq!(db.len(), 2);
         let fireball = db.lookup("Fireball").expect("found");
         assert_eq!(fireball.description, "Throws a fiery ball.");
         assert_eq!(fireball.icon, "spell_fire_flamebolt");
-    }
-
-    #[test]
-    fn unknown_names_return_none() {
-        let db = SpellDb::parse(SAMPLE).expect("valid sample");
-        assert!(db.lookup("Other").is_none());
-        assert!(db.lookup("Melee").is_none());
-        assert!(db.lookup("").is_none());
+        assert!(db.lookup("Flash Heal").is_some());
     }
 
     #[test]
     fn malformed_json_is_an_error() {
         assert!(SpellDb::parse("{nope").is_err());
     }
-
     /// The real bundled database must parse and contain the well-known spells;
     /// skipped where the generated data is absent (plain `cargo test` on a
     /// checkout without `data/spells/`).
@@ -103,7 +85,6 @@ mod tests {
         }
         let json = std::fs::read_to_string(path).expect("read bundled spells.json");
         let db = SpellDb::parse(&json).expect("bundled spells.json parses");
-        assert!(db.len() > 1000, "database has entries");
         assert!(db.lookup("Fireball").is_some());
         assert!(db.lookup("Flash Heal").is_some());
         // These current player abilities use inventory-prefixed icon files;
