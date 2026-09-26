@@ -145,7 +145,6 @@ pub struct DeleteResult {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EvictionResult {
     pub evicted: Vec<RecordingId>,
-    pub freed_bytes: u64,
     pub remaining_bytes: u64,
     /// A deletion removed the media but could not remove its sidecar, so the
     /// library no longer matches the directory even though nothing was fully
@@ -181,10 +180,6 @@ impl Storage {
             regular_dir: capture_root.join("regular"),
             staging_dir: capture_root.join("staging"),
         }
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     pub fn staging_dir(&self) -> &Path {
@@ -570,7 +565,6 @@ impl Storage {
             match self.delete_one(entry) {
                 Ok(()) => {
                     used = used.saturating_sub(size);
-                    result.freed_bytes += size;
                     result.evicted.push(entry.id.clone());
                 }
                 Err(error) => {
@@ -583,7 +577,6 @@ impl Storage {
                     // make the caller rescan.
                     if error.starts_with("sidecar:") {
                         used = used.saturating_sub(size);
-                        result.freed_bytes += size;
                         result.partially_deleted = true;
                     }
                 }

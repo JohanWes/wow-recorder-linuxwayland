@@ -1338,6 +1338,13 @@ impl Coordinator {
 
     fn rescan(&mut self) {
         self.index = self.storage.scan();
+        for skipped in &self.index.skipped {
+            tracing::warn!(
+                sidecar = %skipped.sidecar_path.display(),
+                reason = %skipped.reason,
+                "recording skipped"
+            );
+        }
         self.recount();
     }
 
