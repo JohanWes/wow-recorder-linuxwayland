@@ -214,12 +214,13 @@ pub struct Setup {
 impl Setup {
     pub fn from_environment() -> Result<Self, ConfigError> {
         let (year, utc_offset_minutes) = local_clock();
+        let config_path = crate::config::config_path_from_environment()?;
         Ok(Self {
-            config_path: crate::config::config_path_from_environment()?,
-            data_dir: crate::config::config_path_from_environment()?
+            data_dir: config_path
                 .parent()
                 .unwrap_or(Path::new("."))
                 .join("recorder"),
+            config_path,
             gsr_binary: PathBuf::from("gpu-screen-recorder"),
             media: MediaConfig {
                 utc_offset_minutes,
