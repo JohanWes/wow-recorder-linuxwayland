@@ -995,7 +995,9 @@ impl Coordinator {
         for event in start_events {
             self.feed(event);
         }
-        if self.active.is_some() {
+        // Nothing was in flight, so any capture now running is this test's.
+        if let Some(active) = self.active.as_mut() {
+            active.mode = RecordingMode::Test(category.clone());
             self.pending_test_end = Some((end_ms, end_event));
         }
     }

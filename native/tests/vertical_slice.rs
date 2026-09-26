@@ -581,7 +581,16 @@ fn manual_and_test_recordings_reuse_the_capture_pipeline() {
     harness.send(Command::RunTest {
         category: Category::Raids,
     });
-    harness.pump(|snapshot| snapshot.active.is_some());
+    harness.pump(|snapshot| {
+        matches!(
+            snapshot.status,
+            RecorderStatus::Recording {
+                test: true,
+                manual: false,
+                ..
+            }
+        )
+    });
     harness.emit_artifacts(true);
     harness.pump(|snapshot| snapshot.entries.len() == 2);
     let raid = harness.entries_of(&Category::Raids)[0];
