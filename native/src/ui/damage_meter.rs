@@ -12,6 +12,8 @@ use std::rc::Rc;
 
 use gtk4::gdk::Texture;
 use gtk4::prelude::*;
+use libadwaita as adw;
+use libadwaita::prelude::*;
 
 use warcraft_recorder::domain::{
     LibraryEntry, MeterData, MeterDeath, MeterDeathEventKind, MeterFight, MeterMetric,
@@ -56,7 +58,11 @@ const SEEK_LEAD_MS: u64 = 3_000;
 /// How long a bar fill eases from its previous on-screen position toward
 /// the new one. Kept under the 500 ms sample cadence so consecutive
 /// updates chain into continuous motion instead of jagged jumps.
-const FILL_ANIMATE_MS: i64 = 400;
+const FILL_ANIMATE_MS: u32 = 400;
+/// Fill changes smaller than this (about a pixel on the default panel) are
+/// applied without an animation, so a settled late-fight meter does not keep
+/// the frame clock running for invisible motion.
+const MIN_ANIMATED_STEP: f64 = 0.004;
 
 /// Pixels between the meter's left edge and the tooltip that opens to its
 /// left.
@@ -354,45 +360,58 @@ struct BarRow {
     has_icon: Cell<bool>,
     /// The fraction the fill is heading to.
     target: Cell<f64>,
-    tick: RefCell<Option<gtk4::TickCallbackId>>,
+    /// Eases the fill toward `target`. libadwaita skips straight to the end
+    /// when animations are disabled or the row is unmapped.
+    animation: adw::TimedAnimation,
 }
 
 impl BarRow {
+    fn new(root: gtk4::Widget, widgets: BarWidgets) -> Self {
+        let fill = widgets.fill.clone();
+        let animation = adw::TimedAnimation::new(
+            &widgets.fill,
+            0.0,
+            0.0,
+            FILL_ANIMATE_MS,
+            adw::CallbackAnimationTarget::new(move |value| fill.set_fraction(value)),
+        );
+        // Quick off the old position, settling on the new one.
+        animation.set_easing(adw::Easing::EaseOutCubic);
+        Self {
+            root,
+            fill: widgets.fill,
+            line: widgets.line,
+            left: widgets.left,
+            right: widgets.right,
+            has_icon: Cell::new(false),
+            target: Cell::new(0.0),
+            animation,
+        }
+    }
+
     fn update(&self, bar: &Bar) {
         set_text_if_changed(&self.left, &bar.left);
         set_text_if_changed(&self.right, &bar.right);
         self.set_fraction(bar.fraction.clamp(0.0, 1.0));
     }
 
-    /// Ease the fill from its on-screen position toward `target` over
-    /// [`FILL_ANIMATE_MS`], so consecutive sample updates chain into
-    /// continuous motion.
+    /// Ease the fill from its on-screen position toward `target`, so
+    /// consecutive sample updates chain into continuous motion. A sub-pixel
+    /// step from rest is applied directly instead of animating.
     fn set_fraction(&self, target: f64) {
         if self.target.replace(target) == target {
             return;
         }
-        if let Some(tick) = self.tick.take() {
-            tick.remove();
+        let from = self.fill.fraction();
+        if self.animation.state() != adw::AnimationState::Playing
+            && (target - from).abs() < MIN_ANIMATED_STEP
+        {
+            self.fill.set_fraction(target);
+            return;
         }
-        let start = self.fill.fraction();
-        let begin = Cell::new(None);
-        let tick = self.fill.add_tick_callback(move |fill, clock| {
-            let now = clock.frame_time();
-            let started = begin.get().unwrap_or_else(|| {
-                begin.set(Some(now));
-                now
-            });
-            let progress = (now - started) as f64 / (FILL_ANIMATE_MS as f64 * 1_000.0);
-            if progress >= 1.0 {
-                fill.set_fraction(target);
-                return gtk4::glib::ControlFlow::Break;
-            }
-            // Ease-out cubic: quick off the old position, settling on the
-            // new one.
-            fill.set_fraction(start + (target - start) * (1.0 - (1.0 - progress).powi(3)));
-            gtk4::glib::ControlFlow::Continue
-        });
-        self.tick.replace(Some(tick));
+        self.animation.set_value_from(from);
+        self.animation.set_value_to(target);
+        self.animation.play();
     }
 }
 
@@ -1737,18 +1756,9 @@ impl Inner {
                 self.row_button(&widgets.overlay, move |this| this.open_row(&open))
                     .upcast()
             }
-            None => widgets.overlay.upcast(),
+            None => widgets.overlay.clone().upcast(),
         };
-        RowWidgets::Bar(BarRow {
-            root,
-            fill: widgets.fill,
-            line: widgets.line,
-            left: widgets.left,
-            right: widgets.right,
-            has_icon: Cell::new(false),
-            target: Cell::new(0.0),
-            tick: RefCell::new(None),
-        })
+        RowWidgets::Bar(BarRow::new(root, widgets))
     }
 
     /// Drop every keyed row; the next `set_lines` builds them afresh.
