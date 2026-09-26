@@ -607,12 +607,14 @@ impl Storage {
     // --- Startup sweep ---
 
     /// Quarantine every media/GSR/`.tmp` artifact in the storage, replay,
-    /// regular, and staging directories that no sidecar references. Runs once at
-    /// startup, before scan and before capture is armed. Nothing is deleted,
-    /// repaired, or claimed by name/time proximity.
-    pub fn sweep_orphans(&self) -> RecoveryReport {
+    /// regular, and staging directories that no sidecar references. `index` is
+    /// a fresh scan of this storage: its entries name their media, and only
+    /// the sidecars it skipped are read again. Runs at startup, before capture
+    /// is armed. Nothing is deleted, repaired, or claimed by name/time
+    /// proximity.
+    pub fn sweep_orphans(&self, index: &LibraryIndex) -> RecoveryReport {
         let mut report = RecoveryReport::default();
-        let referenced = self.referenced_media();
+        let referenced = self.referenced_media(index);
         let recovery_dir = self.root.join(RECOVERY_DIR);
 
         let directories = [
@@ -656,19 +658,14 @@ impl Storage {
         report
     }
 
-    fn referenced_media(&self) -> HashSet<PathBuf> {
-        let mut referenced = HashSet::new();
-        let Ok(read_dir) = fs::read_dir(&self.root) else {
-            return referenced;
-        };
-        for path in read_dir
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension().and_then(|value| value.to_str()) == Some(SIDECAR_EXTENSION)
-            })
-        {
-            let Ok(text) = fs::read_to_string(&path) else {
+    fn referenced_media(&self, index: &LibraryIndex) -> HashSet<PathBuf> {
+        let mut referenced: HashSet<PathBuf> = index
+            .entries
+            .iter()
+            .map(|entry| entry.media_path.clone())
+            .collect();
+        for skipped in &index.skipped {
+            let Ok(text) = fs::read_to_string(&skipped.sidecar_path) else {
                 continue;
             };
             // A sidecar the scanner rejects can still own its media, so the
@@ -681,7 +678,7 @@ impl Storage {
                     referenced.insert(self.root.join(media_file));
                 }
                 None => {
-                    referenced.insert(path.with_extension(MEDIA_EXTENSION));
+                    referenced.insert(skipped.sidecar_path.with_extension(MEDIA_EXTENSION));
                 }
             }
         }
@@ -2286,7 +2283,7 @@ mod tests {
         let staging = tree.capture_root().join("staging/replay-trim-1.mkv");
         fs::write(&staging, "trim").expect("staging");
 
-        let report = storage.sweep_orphans();
+        let report = storage.sweep_orphans(&storage.scan());
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(report.quarantined.len(), 5);
         for original in [&orphan_media, &orphan_temp, &replay, &regular, &staging] {
@@ -2862,7 +2859,7 @@ mod tests {
         tree.write("lost.mp4", "media");
         let orphan = tree.write("orphan.mp4", "unreferenced media");
 
-        let report = storage.sweep_orphans();
+        let report = storage.sweep_orphans(&storage.scan());
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(report.quarantined.len(), 2);
         for moved in &report.quarantined {

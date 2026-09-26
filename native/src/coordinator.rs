@@ -400,7 +400,7 @@ impl Coordinator {
         }
     }
 
-    /// Sweep interrupted artifacts, scan the library, validate, and arm.
+    /// Validate, scan the library, sweep interrupted artifacts, and arm.
     pub fn startup(&mut self) {
         self.recorder = Recorder::with_timeouts(self.setup.recorder_timeouts);
         self.setup_problems = self.config.validate();
@@ -417,7 +417,9 @@ impl Coordinator {
             self.dirty = true;
             return;
         }
-        let report = self.storage.sweep_orphans();
+        // One scan serves both the library and the sweep's references.
+        self.rescan();
+        let report = self.storage.sweep_orphans(&self.index);
         if !report.failures.is_empty() {
             self.push_problem(
                 "Some interrupted recordings could not be moved to Recovery.",
@@ -425,7 +427,6 @@ impl Coordinator {
                 Some(RecoveryAction::OpenLogs),
             );
         }
-        self.rescan();
         self.enforce_limit();
         self.dirty = true;
         // Show the library before arming: spawning gpu-screen-recorder waits
@@ -655,7 +656,7 @@ impl Coordinator {
                     if let Some(active) = self.active.take() {
                         self.pending_test_end = None;
                         self.drop_activity(&active.draft.flavor);
-                        let report = self.storage.sweep_orphans();
+                        let report = self.storage.sweep_orphans(&self.storage.scan());
                         if !report.failures.is_empty() {
                             tracing::warn!(failures = ?report.failures, "capture failure sweep failed");
                         }
@@ -1023,7 +1024,7 @@ impl Coordinator {
             Ok(()) => self.ending = Some(EndingCapture::Finalize(Box::new(active.draft))),
             Err(error) => {
                 self.push_recorder_problem(&error);
-                let report = self.storage.sweep_orphans();
+                let report = self.storage.sweep_orphans(&self.storage.scan());
                 tracing::info!(quarantined = report.quarantined.len(), "capture end failed");
             }
         }
@@ -1048,11 +1049,11 @@ impl Coordinator {
             }
             (Some(EndingCapture::Finalize(_)), None) => {
                 self.push_recorder_problem(&RecorderError::MissingRegularArtifact);
-                let report = self.storage.sweep_orphans();
+                let report = self.storage.sweep_orphans(&self.storage.scan());
                 tracing::info!(quarantined = report.quarantined.len(), "capture end failed");
             }
             (Some(EndingCapture::Discard), _) => {
-                let report = self.storage.sweep_orphans();
+                let report = self.storage.sweep_orphans(&self.storage.scan());
                 if !report.failures.is_empty() {
                     tracing::warn!(failures = ?report.failures, "discard sweep failed");
                 }
@@ -1097,7 +1098,7 @@ impl Coordinator {
 
     fn queue_finalization(&mut self, draft: Box<RecordingDraft>, artifacts: CaptureArtifacts) {
         if self.finalize_queue.len() >= MAX_MEDIA_QUEUE {
-            let report = self.storage.sweep_orphans();
+            let report = self.storage.sweep_orphans(&self.storage.scan());
             if !report.failures.is_empty() {
                 tracing::warn!(failures = ?report.failures, "finalization queue overflow sweep failed");
             }
@@ -1701,7 +1702,7 @@ impl Coordinator {
         if let Some(join) = self.media_join.take() {
             let _ = join.join();
         }
-        let report = self.storage.sweep_orphans();
+        let report = self.storage.sweep_orphans(&self.storage.scan());
         if !report.failures.is_empty() {
             tracing::warn!(failures = ?report.failures, "shutdown sweep failed");
         }
