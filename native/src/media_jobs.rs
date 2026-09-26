@@ -27,8 +27,6 @@ use crate::process;
 use crate::recorder::CaptureArtifacts;
 use crate::storage::{CombinedMedia, Storage, now_unix_ms, sanitize_name, unique_stem};
 
-/// Bytes of the per-job stderr log read back for diagnostics.
-const LOG_TAIL_BYTES: u64 = 8 * 1024;
 /// Emitting progress more often is visually indistinguishable but makes every
 /// GTK snapshot repeat work.
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
@@ -496,7 +494,8 @@ impl MediaWorker {
         let outcome = self.poll_child(kind, &mut child, &progress_path, total_ms);
         let status_message = match &outcome {
             FfmpegOutcome::Failed { message } => {
-                let tail = read_log_tail(&log_path);
+                let tail = process::read_log_tail(&log_path);
+                let tail = tail.trim();
                 Some(if tail.is_empty() {
                     message.clone()
                 } else {
@@ -658,24 +657,6 @@ impl ProgressReader {
         }
         latest
     }
-}
-
-fn read_log_tail(path: &Path) -> String {
-    let Ok(mut file) = File::open(path) else {
-        return String::new();
-    };
-    let Ok(size) = file.metadata().map(|meta| meta.len()) else {
-        return String::new();
-    };
-    if file
-        .seek(SeekFrom::Start(size.saturating_sub(LOG_TAIL_BYTES)))
-        .is_err()
-    {
-        return String::new();
-    }
-    let mut tail = Vec::new();
-    let _ = file.read_to_end(&mut tail);
-    String::from_utf8_lossy(&tail).trim().to_owned()
 }
 
 /// Take the final `seconds` of the replay without needing its duration.
