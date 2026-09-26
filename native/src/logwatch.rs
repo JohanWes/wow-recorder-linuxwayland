@@ -83,7 +83,6 @@ pub struct LogTailer {
     line_number: u64,
     base_context: ParseTimeContext,
     time_context: ParseTimeContext,
-    replay: bool,
     checkpoint: Vec<u8>,
     observed_len: u64,
     observed_modified: Option<SystemTime>,
@@ -97,32 +96,14 @@ impl LogTailer {
     /// Open a configured Logs directory (or a concrete log file) for live use.
     /// Existing bytes are deliberately ignored.
     pub fn open(
-        path: PathBuf,
-        flavor: GameFlavor,
-        time_context: ParseTimeContext,
-    ) -> Result<Self, LogError> {
-        Self::open_mode(path, flavor, time_context, false)
-    }
-
-    /// Open a deterministic fixture or replay at byte zero.
-    pub fn open_replay(
-        path: PathBuf,
-        flavor: GameFlavor,
-        time_context: ParseTimeContext,
-    ) -> Result<Self, LogError> {
-        Self::open_mode(path, flavor, time_context, true)
-    }
-
-    fn open_mode(
         source: PathBuf,
         flavor: GameFlavor,
         time_context: ParseTimeContext,
-        replay: bool,
     ) -> Result<Self, LogError> {
         let path = active_path(&source)?;
         let metadata = metadata(&path)?;
         let identity = file_identity(&metadata);
-        let offset = if replay { 0 } else { metadata.len() };
+        let offset = metadata.len();
         let checkpoint = read_checkpoint(&path, offset)?;
         let source_modified = (!source.is_file())
             .then(|| fs::metadata(&source).ok()?.modified().ok())
@@ -139,7 +120,6 @@ impl LogTailer {
             line_number: 0,
             base_context: time_context,
             time_context: seeded_context,
-            replay,
             checkpoint,
             observed_len: metadata.len(),
             observed_modified: metadata.modified().ok(),
@@ -148,10 +128,6 @@ impl LogTailer {
             discarding_long_line: false,
             diagnostics: VecDeque::new(),
         })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     pub fn poll(&mut self) -> Result<Vec<ParsedEvent>, LogError> {
@@ -202,7 +178,7 @@ impl LogTailer {
     }
 
     fn refresh_active_file(&mut self) -> Result<(), LogError> {
-        if self.source.is_file() || self.replay {
+        if self.source.is_file() {
             return Ok(());
         }
         let source_metadata = metadata(&self.source)?;
@@ -517,14 +493,22 @@ mod tests {
         path
     }
 
+    /// A live tailer that sees `bytes` from the start: it opens on an empty
+    /// file, which then receives them.
+    fn tailer_with(path: &Path, bytes: &[u8]) -> LogTailer {
+        fs::write(path, b"").unwrap();
+        let tailer = LogTailer::open(path.to_path_buf(), GameFlavor::Retail, CONTEXT).unwrap();
+        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(bytes).unwrap();
+        tailer
+    }
+
     #[test]
     fn retained_event_split_at_every_byte_is_emitted_once() {
         for split in 0..=EVENT.len() {
             let directory = test_directory();
             let path = directory.join("WoWCombatLog.txt");
-            fs::write(&path, &EVENT.as_bytes()[..split]).unwrap();
-            let mut tailer =
-                LogTailer::open_replay(path.clone(), GameFlavor::Retail, CONTEXT).unwrap();
+            let mut tailer = tailer_with(&path, &EVENT.as_bytes()[..split]);
             let mut events = tailer.poll().unwrap();
             let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
             file.write_all(&EVENT.as_bytes()[split..]).unwrap();
@@ -539,22 +523,21 @@ mod tests {
         let directory = test_directory();
         let path = directory.join("WoWCombatLog.txt");
         let event_count = READ_CHUNK_BYTES / EVENT.len() + 2;
-        fs::write(&path, EVENT.repeat(event_count)).unwrap();
-        let mut tailer = LogTailer::open_replay(path, GameFlavor::Retail, CONTEXT).unwrap();
+        let mut tailer = tailer_with(&path, EVENT.repeat(event_count).as_bytes());
 
         assert_eq!(tailer.poll().unwrap().len(), event_count);
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn live_starts_at_eof_replay_starts_at_zero_and_crlf_is_accepted() {
+    fn live_starts_at_eof_and_crlf_is_accepted() {
         let directory = test_directory();
         let path = directory.join("WoWCombatLog.txt");
-        fs::write(&path, EVENT.replace('\n', "\r\n")).unwrap();
+        fs::write(&path, EVENT).unwrap();
         let mut live = LogTailer::open(path.clone(), GameFlavor::Retail, CONTEXT).unwrap();
         assert!(live.poll().unwrap().is_empty());
-        let mut replay = LogTailer::open_replay(path, GameFlavor::Retail, CONTEXT).unwrap();
-        assert_eq!(replay.poll().unwrap().len(), 1);
+        let mut crlf = tailer_with(&path, EVENT.replace('\n', "\r\n").as_bytes());
+        assert_eq!(crlf.poll().unwrap().len(), 1);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -570,7 +553,7 @@ mod tests {
         let second = directory.join("WoWCombatLog-2.txt");
         fs::write(&second, EVENT).unwrap();
         assert_eq!(tailer.poll().unwrap().len(), 1);
-        assert_eq!(tailer.path(), second);
+        assert_eq!(tailer.path, second);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -617,12 +600,10 @@ mod tests {
     fn diagnostics_are_bounded_and_never_retain_line_contents() {
         let directory = test_directory();
         let path = directory.join("WoWCombatLog.txt");
-        fs::write(
+        let mut tailer = tailer_with(
             &path,
             b"4/9 19:27:13.200  UNIT_DIED,secret\n4/9 19:27:13.200  UNIT_DIED,\xff\n",
-        )
-        .unwrap();
-        let mut tailer = LogTailer::open_replay(path.clone(), GameFlavor::Retail, CONTEXT).unwrap();
+        );
         assert!(tailer.poll().unwrap().is_empty());
         let diagnostics = tailer.take_diagnostics();
         assert_eq!(diagnostics.len(), 2);
@@ -656,8 +637,7 @@ mod tests {
         let directory = test_directory();
         let path = directory.join("WoWCombatLog.txt");
         let overlong_size = MAX_LINE_BYTES * 2 + 10;
-        fs::write(&path, vec![b'x'; overlong_size]).unwrap();
-        let mut tailer = LogTailer::open_replay(path.clone(), GameFlavor::Retail, CONTEXT).unwrap();
+        let mut tailer = tailer_with(&path, &vec![b'x'; overlong_size]);
         for _ in 0..=overlong_size / READ_CHUNK_BYTES + 1 {
             assert!(tailer.poll().unwrap().is_empty());
         }
@@ -685,8 +665,7 @@ mod tests {
         let mut bytes = vec![b'x'; MAX_LINE_BYTES + 10];
         bytes.push(b'\n');
         bytes.extend_from_slice(EVENT.as_bytes());
-        fs::write(&path, bytes).unwrap();
-        let mut tailer = LogTailer::open_replay(path, GameFlavor::Retail, CONTEXT).unwrap();
+        let mut tailer = tailer_with(&path, &bytes);
         let mut events = Vec::new();
         for _ in 0..=MAX_LINE_BYTES / READ_CHUNK_BYTES + 1 {
             events.extend(tailer.poll().unwrap());
@@ -703,11 +682,10 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]
-    fn version_22_header_seeds_the_wider_layout_under_replay() {
+    fn version_22_header_seeds_the_wider_layout() {
         let directory = test_directory();
         let path = directory.join("WoWCombatLog.txt");
-        fs::write(&path, format!("{V22_HEADER}{V22_DAMAGE}")).unwrap();
-        let mut tailer = LogTailer::open_replay(path.clone(), GameFlavor::Retail, CONTEXT).unwrap();
+        let mut tailer = tailer_with(&path, format!("{V22_HEADER}{V22_DAMAGE}").as_bytes());
         let events = tailer.poll().unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(
@@ -762,7 +740,7 @@ mod tests {
             &events[0].event,
             CombatEvent::Damage { amount: 46, .. }
         ));
-        assert_eq!(tailer.path(), second);
+        assert_eq!(tailer.path, second);
 
         // A new file with its own header reseeds the wider layout.
         let third = directory.join("WoWCombatLog-3.txt");
@@ -773,7 +751,7 @@ mod tests {
             &events[0].event,
             CombatEvent::Damage { amount: 46, .. }
         ));
-        assert_eq!(tailer.path(), third);
+        assert_eq!(tailer.path, third);
         assert!(tailer.take_diagnostics().is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
@@ -782,8 +760,7 @@ mod tests {
     fn headerless_and_unreadable_headers_keep_the_legacy_layout_silently() {
         let directory = test_directory();
         let path = directory.join("WoWCombatLog.txt");
-        fs::write(&path, LEGACY_DAMAGE).unwrap();
-        let mut tailer = LogTailer::open_replay(path.clone(), GameFlavor::Retail, CONTEXT).unwrap();
+        let mut tailer = tailer_with(&path, LEGACY_DAMAGE.as_bytes());
         let events = tailer.poll().unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(
@@ -793,12 +770,10 @@ mod tests {
         assert!(tailer.take_diagnostics().is_empty());
 
         let path = directory.join("WoWCombatLog-bad-header.txt");
-        fs::write(
+        let mut tailer = tailer_with(
             &path,
-            format!("8/11/2026 18:28:29.3992  COMBAT_LOG_VERSION,garbage,ADVANCED_LOG_ENABLED,1\n{LEGACY_DAMAGE}"),
-        )
-        .unwrap();
-        let mut tailer = LogTailer::open_replay(path.clone(), GameFlavor::Retail, CONTEXT).unwrap();
+            format!("8/11/2026 18:28:29.3992  COMBAT_LOG_VERSION,garbage,ADVANCED_LOG_ENABLED,1\n{LEGACY_DAMAGE}").as_bytes(),
+        );
         let events = tailer.poll().unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(
