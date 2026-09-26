@@ -71,6 +71,7 @@ fn family_of(category: &Category) -> Family {
 
 /// Everything one table row displays, precomputed off the GTK thread's hot
 /// path so factory bind callbacks are pure field reads.
+#[derive(PartialEq)]
 struct RowModel {
     id: RecordingId,
     media_path: PathBuf,
@@ -396,7 +397,6 @@ struct State {
     suggestions_active: Cell<bool>,
     rebuilding_store: Cell<bool>,
     category: RefCell<Option<Category>>,
-    signature: Cell<u64>,
     /// A protect/tag/delete is in flight; the bulk bar stays disabled until the
     /// authoritative snapshot arrives.
     mutation_pending: Cell<bool>,
@@ -597,7 +597,6 @@ impl Library {
                 suggestions_active: Cell::new(false),
                 rebuilding_store: Cell::new(false),
                 category: RefCell::new(None),
-                signature: Cell::new(0),
                 mutation_pending: Cell::new(false),
                 menu_target: RefCell::new(None),
                 entries: RefCell::new(None),
@@ -616,7 +615,8 @@ impl Library {
     }
 
     /// Rebuild from the authoritative snapshot. Cheap when nothing relevant
-    /// changed: a signature guards the store rebuild.
+    /// changed: unchanged rows keep their objects, and an unchanged table
+    /// skips the store update.
     pub fn apply(&self, snapshot: &AppSnapshot) {
         self.inner.apply(snapshot);
     }
@@ -1065,14 +1065,31 @@ impl Inner {
         *self.state.entries.borrow_mut() = Some(Arc::clone(&snapshot.entries));
         *self.state.correlations.borrow_mut() = Some(Arc::clone(&snapshot.correlations));
 
-        let rows = build_rows(snapshot, &category);
-        let signature = rows_signature(&rows);
-        if !category_changed && signature == self.state.signature.get() {
+        // Unchanged rows keep their row object, so GTK sees them as the same
+        // items: their widgets, focus, scroll anchor, and selection survive.
+        let previous: HashMap<RecordingId, BoxedAnyObject> = self
+            .store
+            .iter::<BoxedAnyObject>()
+            .filter_map(Result::ok)
+            .map(|object| (row_of(object.upcast_ref()).id.clone(), object))
+            .collect();
+        let rows: Vec<BoxedAnyObject> = build_rows(snapshot, &category)
+            .into_iter()
+            .map(|row| match previous.get(&row.id) {
+                Some(object) if *object.borrow::<Rc<RowModel>>() == row => object.clone(),
+                _ => BoxedAnyObject::new(row),
+            })
+            .collect();
+        let unchanged = rows.len() == previous.len()
+            && rows
+                .iter()
+                .zip(self.store.iter::<BoxedAnyObject>())
+                .all(|(row, current)| current.is_ok_and(|current| &current == row));
+        if !category_changed && unchanged {
             // Nothing the table shows changed; re-enable the bulk bar only.
             self.update_bulk_bar(&self.selected_rows());
             return;
         }
-        self.state.signature.set(signature);
 
         // Remember the selection so a snapshot-driven rebuild (tag/protect/new
         // finalize) does not silently jump the player to a different recording.
@@ -1082,34 +1099,34 @@ impl Inner {
             .map(|row| row.id.clone())
             .collect();
 
-        let rows: Vec<BoxedAnyObject> = rows.into_iter().map(BoxedAnyObject::new).collect();
         self.state.rebuilding_store.set(true);
         self.store.splice(0, self.store.n_items(), &rows);
         self.state.rebuilding_store.set(false);
         self.after_filter_change();
 
-        // Re-select the surviving rows. If none survive (a fresh category, or
-        // the selection was deleted/filtered out) open the newest by default,
-        // matching the current app.
-        let mut reselected = false;
-        if !previously.is_empty() {
-            for index in 0..self.selection.n_items() {
-                if let Some(item) = self.selection.item(index)
-                    && previously.contains(&row_of(&item).id)
-                {
-                    self.selection.select_item(index, !reselected);
-                    reselected = true;
-                }
+        // Re-select the surviving rows in one change; rows that kept their
+        // object are still selected, so an unchanged selection emits nothing.
+        // If none survive (a fresh category, or the selection was deleted or
+        // filtered out) open the newest by default.
+        let visible = self.selection.n_items();
+        let wanted = gtk4::Bitset::new_empty();
+        for index in 0..visible {
+            if let Some(item) = self.selection.item(index)
+                && previously.contains(&row_of(&item).id)
+            {
+                wanted.add(index);
             }
         }
-        if !reselected {
-            if self.selection.n_items() > 0 {
-                self.selection.select_item(0, true);
-            } else {
-                // Removing rows does not emit `selection-changed`, so unload
-                // a recording that just left the table.
-                (self.on_select)(None);
-            }
+        if wanted.is_empty() && visible > 0 {
+            wanted.add(0);
+        }
+        if wanted.is_empty() {
+            // Removing rows does not emit `selection-changed`, so unload a
+            // recording that just left the table.
+            (self.on_select)(None);
+        } else {
+            self.selection
+                .set_selection(&wanted, &gtk4::Bitset::new_range(0, visible));
         }
         self.update_bulk_bar(&self.selected_rows());
     }
@@ -1509,24 +1526,6 @@ fn day_start_ms(date: &glib::DateTime) -> i64 {
     )
     .map(|start| start.to_unix() * 1000)
     .unwrap_or(0)
-}
-
-/// A cheap fingerprint of what the table displays, to skip no-op rebuilds while
-/// still reacting to protect/tag/delete/finalize changes.
-fn rows_signature(rows: &[Rc<RowModel>]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    rows.len().hash(&mut hasher);
-    for row in rows {
-        row.id.as_str().hash(&mut hasher);
-        row.protected.hash(&mut hasher);
-        row.all_protected.hash(&mut hasher);
-        row.tag.hash(&mut hasher);
-        // Correlated-POV changes still refresh the player's viewpoint selector.
-        row.correlated_ids.len().hash(&mut hasher);
-        row.date_ms.hash(&mut hasher);
-    }
-    hasher.finish()
 }
 
 fn sort_by<K: Ord + 'static>(key: impl Fn(&RowModel) -> K + 'static) -> gtk4::CustomSorter {
