@@ -93,6 +93,8 @@ struct Inner {
     povs: RefCell<Vec<multipov::Pov>>,
     active_id: RefCell<Option<RecordingId>>,
     preferred_player: RefCell<Option<String>>,
+    /// The newest selection made while the player was not on screen.
+    deferred_selection: RefCell<Option<Selection>>,
 
     media_usable: Cell<bool>,
     playing: Cell<bool>,
@@ -280,6 +282,7 @@ impl Player {
             povs: RefCell::new(Vec::new()),
             active_id: RefCell::new(None),
             preferred_player: RefCell::new(None),
+            deferred_selection: RefCell::new(None),
             media_usable: Cell::new(false),
             playing: Cell::new(false),
             speed_index: Cell::new(2),
@@ -345,6 +348,16 @@ impl Player {
             let this = Rc::clone(&inner);
             inner.meter.connect_seek(move |at_ms| {
                 this.request_seek(at_ms as f64 / 1_000.0, SeekMode::Settle);
+            });
+        }
+        // Selections made while hidden load once the player is shown.
+        {
+            let this = Rc::clone(&inner);
+            inner.stack.connect_map(move |_| {
+                let deferred = this.deferred_selection.take();
+                if let Some(selection) = deferred {
+                    this.set_selection(Some(&selection));
+                }
             });
         }
         // The drag position is pixel margins: any relayout (window resize,
@@ -570,9 +583,17 @@ impl Inner {
 
     fn set_selection(self: &Rc<Self>, selection: Option<&Selection>) {
         let Some(selection) = selection else {
+            self.deferred_selection.take();
             self.unload();
             return;
         };
+        // Nothing loads or plays behind a hidden window, such as a session
+        // started in the tray: the newest selection waits for the player to
+        // be shown, which also keeps Clapper unloaded until then.
+        if !self.stack.is_mapped() {
+            *self.deferred_selection.borrow_mut() = Some(selection.clone());
+            return;
+        }
         let povs = {
             let entries = self.entries.borrow();
             let resolved: Vec<&LibraryEntry> = selection
