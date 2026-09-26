@@ -168,6 +168,9 @@ impl Player {
         stack.add_named(&video_page, Some("video"));
         stack.set_visible_child_name("placeholder");
         stack.set_vexpand(true);
+        // Softens the swaps and Clapper's black first frame.
+        stack.set_transition_type(gtk4::StackTransitionType::Crossfade);
+        stack.set_transition_duration(180);
 
         let timeline = Timeline::new();
         let controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
