@@ -9,9 +9,10 @@
 //! configured replay/regular directories.
 //!
 //! - The hook receives `$1 = saved artifact path, $2 = event kind`.
-//! - Restart delays are 2, 4, 8, 16, then capped 30 seconds indefinitely. A
-//!   successful automatic respawn does not reset the attempt counter; only a
-//!   deliberate `arm` does.
+//! - Restart delays are 2, 4, 8, 16, then capped 30 seconds indefinitely. The
+//!   attempt counter resets on a deliberate `arm`, or when the child that
+//!   exited had stayed up for `STABLE_CHILD`: a crash loop keeps backing off,
+//!   an occasional exit during a long session starts over at 2 seconds.
 //! - Crash recovery of interrupted recordings is not Recorder's job; the only
 //!   persistent state is the truncate-on-arm events file.
 
@@ -176,6 +177,8 @@ impl Default for Timeouts {
 const GSR_EXIT_SELECTION_DENIED: i32 = 60;
 const LOG_TAIL_BYTES: u64 = 8 * 1024;
 const MAX_RESTART_DELAY_SECONDS: u64 = 30;
+/// A child that ran this long before exiting was not crash-looping.
+const STABLE_CHILD: Duration = Duration::from_secs(60);
 
 struct GsrEvent {
     timestamp_ms: i64,
@@ -204,6 +207,7 @@ struct PendingEnd {
 pub struct Recorder {
     config: Option<CaptureConfig>,
     child: Option<Child>,
+    spawned_at: Option<Instant>,
     desired_running: bool,
     restart_attempts: u32,
     restart_at_ms: Option<i64>,
@@ -239,6 +243,7 @@ impl Recorder {
         Self {
             config: None,
             child: None,
+            spawned_at: None,
             desired_running: false,
             restart_attempts: 0,
             restart_at_ms: None,
@@ -391,6 +396,7 @@ impl Recorder {
             });
         }
         self.child = Some(child);
+        self.spawned_at = Some(Instant::now());
         Ok(())
     }
 
@@ -716,6 +722,12 @@ impl Recorder {
                     events.push(RecorderEvent::ChildExited {
                         code: status.code(),
                     });
+                    if self
+                        .spawned_at
+                        .is_some_and(|spawned_at| spawned_at.elapsed() >= STABLE_CHILD)
+                    {
+                        self.restart_attempts = 0;
+                    }
                     if self.desired_running {
                         self.schedule_restart(now_ms, &mut events);
                     }
@@ -735,8 +747,8 @@ impl Recorder {
             self.restart_at_ms = None;
             let config = self.config.clone().expect("desired_running implies config");
             match self.spawn_child(&config) {
-                // The attempt counter survives an automatic respawn; only a
-                // deliberate arm resets it.
+                // The attempt counter survives the respawn itself; it resets
+                // once this child proves stable (see the exit branch above).
                 Ok(()) => events.push(RecorderEvent::Restarted),
                 Err(error) => {
                     events.push(RecorderEvent::RestartFailed {
@@ -1438,6 +1450,22 @@ mod tests {
         assert!(
             recorder
                 .poll(retry_at.unwrap())
+                .contains(&RecorderEvent::Restarted)
+        );
+
+        // A child that stayed up long enough starts the backoff over.
+        let now_ms = retry_at.unwrap();
+        recorder.spawned_at = Instant::now().checked_sub(STABLE_CHILD);
+        process::send_signal(recorder.child.as_ref().unwrap(), libc::SIGKILL).unwrap();
+        recorder.child.as_mut().unwrap().wait().unwrap();
+        let events = recorder.poll(now_ms);
+        assert!(events.contains(&RecorderEvent::RestartScheduled {
+            attempt: 1,
+            at_ms: now_ms + 2_000,
+        }));
+        assert!(
+            recorder
+                .poll(now_ms + 2_000)
                 .contains(&RecorderEvent::Restarted)
         );
 
