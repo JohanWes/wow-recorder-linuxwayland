@@ -373,15 +373,15 @@ impl Player {
         Self { widget, inner }
     }
 
-    /// Route key presses that are not for an editable widget. Installed once on
-    /// the window by the shell.
+    /// Route key presses meant for the window itself; see `window_owns_keys`.
+    /// Installed once on the window by the shell.
     pub fn install_shortcuts(&self, window: &gtk4::Window) {
         let inner = Rc::clone(&self.inner);
         let key = gtk4::EventControllerKey::new();
         key.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let key_window = window.clone();
-        key.connect_key_pressed(move |_, keyval, _, _| {
-            if focus_is_editable(&key_window) || inner.active_id.borrow().is_none() {
+        key.connect_key_pressed(move |controller, keyval, _, _| {
+            if !window_owns_keys(&key_window, controller) || inner.active_id.borrow().is_none() {
                 return gtk4::glib::Propagation::Proceed;
             }
             inner.handle_key(keyval)
@@ -1284,12 +1284,25 @@ fn icon_button(icon: &str, label: &str) -> gtk4::Button {
     button
 }
 
-/// Player shortcuts are ignored while an editable widget has focus.
-fn focus_is_editable(window: &gtk4::Window) -> bool {
-    let Some(focus): Option<gtk4::Widget> = gtk4::prelude::GtkWindowExt::focus(window) else {
+/// Player shortcuts belong to the window's own content. The capture-phase
+/// controller also sees keys for editable widgets, dialogs (which live inside
+/// the window), and popovers (parented into it), where Space must press the
+/// focused button and arrows must move within the calendar or list.
+fn window_owns_keys(window: &gtk4::Window, controller: &gtk4::EventControllerKey) -> bool {
+    let surface = controller.current_event().and_then(|event| event.surface());
+    if surface != window.surface() {
         return false;
+    }
+    let Some(focus): Option<gtk4::Widget> = gtk4::prelude::GtkWindowExt::focus(window) else {
+        return true;
     };
-    focus.is::<gtk4::Text>()
+    !(focus.is::<gtk4::Text>()
         || focus.is::<gtk4::TextView>()
-        || focus.ancestor(gtk4::Editable::static_type()).is_some()
+        || [
+            gtk4::Editable::static_type(),
+            adw::Dialog::static_type(),
+            gtk4::Popover::static_type(),
+        ]
+        .into_iter()
+        .any(|kind| focus.ancestor(kind).is_some()))
 }
