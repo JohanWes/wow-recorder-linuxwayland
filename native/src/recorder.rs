@@ -9,9 +9,10 @@
 //! configured replay/regular directories.
 //!
 //! - The hook receives `$1 = saved artifact path, $2 = event kind`.
-//! - Restart delays are 2, 4, 8, 16, then capped 30 seconds indefinitely. A
-//!   successful automatic respawn does not reset the attempt counter; only a
-//!   deliberate `arm` does.
+//! - Restart delays are 2, 4, 8, 16, then capped 30 seconds indefinitely. The
+//!   attempt counter resets on a deliberate `arm`, or when the child that
+//!   exited had stayed up for `STABLE_CHILD`: a crash loop keeps backing off,
+//!   an occasional exit during a long session starts over at 2 seconds.
 //! - Crash recovery of interrupted recordings is not Recorder's job; the only
 //!   persistent state is the truncate-on-arm events file.
 
@@ -21,11 +22,12 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use crate::config::CaptureSettings;
 use crate::domain::{Category, Codec, RecordingId, ReplayStorage};
 use crate::process;
+use crate::storage::now_unix_ms;
 
 /// Everything Recorder needs to arm a capture session, assembled by the
 /// coordinator from validated configuration.
@@ -54,14 +56,6 @@ pub struct StartRequest {
     pub id: RecordingId,
     /// Detection delay plus lead-in, already clamped by the coordinator.
     pub requested_replay_ms: u64,
-    pub mode: RecordingMode,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CaptureStarted {
-    pub id: RecordingId,
-    pub requested_replay_ms: u64,
-    pub regular_started_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,7 +122,6 @@ pub enum RecorderEvent {
     },
     RestartScheduled {
         attempt: u32,
-        at_ms: i64,
     },
     Restarted,
     /// A requested end resolved: `None` means the bounded wait produced no
@@ -174,8 +167,9 @@ impl Default for Timeouts {
 }
 
 const GSR_EXIT_SELECTION_DENIED: i32 = 60;
-const LOG_TAIL_BYTES: u64 = 8 * 1024;
 const MAX_RESTART_DELAY_SECONDS: u64 = 30;
+/// A child that ran this long before exiting was not crash-looping.
+const STABLE_CHILD: Duration = Duration::from_secs(60);
 
 struct GsrEvent {
     timestamp_ms: i64,
@@ -204,6 +198,7 @@ struct PendingEnd {
 pub struct Recorder {
     config: Option<CaptureConfig>,
     child: Option<Child>,
+    spawned_at: Option<Instant>,
     desired_running: bool,
     restart_attempts: u32,
     restart_at_ms: Option<i64>,
@@ -223,13 +218,6 @@ impl Default for Recorder {
     }
 }
 
-fn now_wall_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 impl Recorder {
     pub fn new() -> Self {
         Self::with_timeouts(Timeouts::default())
@@ -239,6 +227,7 @@ impl Recorder {
         Self {
             config: None,
             child: None,
+            spawned_at: None,
             desired_running: false,
             restart_attempts: 0,
             restart_at_ms: None,
@@ -381,7 +370,7 @@ impl Recorder {
 
         std::thread::sleep(self.timeouts.arm_stability);
         if let Some(status) = child.try_wait()? {
-            let log_tail = read_log_tail(&Self::log_path(config));
+            let log_tail = process::read_log_tail(&Self::log_path(config));
             if status.code() == Some(GSR_EXIT_SELECTION_DENIED) {
                 return Err(RecorderError::SelectionDenied { log_tail });
             }
@@ -391,12 +380,14 @@ impl Recorder {
             });
         }
         self.child = Some(child);
+        self.spawned_at = Some(Instant::now());
         Ok(())
     }
 
     /// Register the replay wait, save the pre-roll (SIGUSR1), and start the
-    /// regular recording (SIGRTMIN). Never waits for media.
-    pub fn begin(&mut self, request: StartRequest) -> Result<CaptureStarted, RecorderError> {
+    /// regular recording (SIGRTMIN). Never waits for media. Returns the
+    /// regular recording's wall-clock start.
+    pub fn begin(&mut self, request: StartRequest) -> Result<i64, RecorderError> {
         // A pending end still owns the hook events GSR has yet to write, and
         // `resolve_end` clears whatever is left over. Starting here would let
         // it swallow the new capture's replay event, costing it the entire
@@ -406,21 +397,17 @@ impl Recorder {
             return Err(RecorderError::Busy);
         }
         let child = self.live_child()?;
-        let started = CaptureStarted {
-            id: request.id.clone(),
-            requested_replay_ms: request.requested_replay_ms,
-            regular_started_at_ms: now_wall_ms(),
-        };
+        let regular_started_at_ms = now_unix_ms();
         process::send_signal(child, libc::SIGUSR1)?;
         process::send_signal(child, process::sigrtmin())?;
         self.last_toggle_at = Some(Instant::now());
         self.active = Some(ActiveCapture {
             id: request.id,
             requested_replay_ms: request.requested_replay_ms,
-            regular_started_at_ms: started.regular_started_at_ms,
+            regular_started_at_ms,
             replay_deadline: Instant::now() + self.timeouts.replay_event,
         });
-        Ok(started)
+        Ok(regular_started_at_ms)
     }
 
     /// Stop the regular recording and resolve its artifacts through `poll`.
@@ -454,7 +441,7 @@ impl Recorder {
         // The stop timestamp is sampled before the signal: the hook event
         // that arrives later is admitted against this bound, never a clock
         // read taken while the end resolves.
-        let regular_stopped_at_ms = now_wall_ms();
+        let regular_stopped_at_ms = now_unix_ms();
         process::send_signal(child, process::sigrtmin())?;
         self.last_toggle_at = Some(Instant::now());
         let config = self.config.clone().expect("armed with config");
@@ -716,6 +703,12 @@ impl Recorder {
                     events.push(RecorderEvent::ChildExited {
                         code: status.code(),
                     });
+                    if self
+                        .spawned_at
+                        .is_some_and(|spawned_at| spawned_at.elapsed() >= STABLE_CHILD)
+                    {
+                        self.restart_attempts = 0;
+                    }
                     if self.desired_running {
                         self.schedule_restart(now_ms, &mut events);
                     }
@@ -735,8 +728,8 @@ impl Recorder {
             self.restart_at_ms = None;
             let config = self.config.clone().expect("desired_running implies config");
             match self.spawn_child(&config) {
-                // The attempt counter survives an automatic respawn; only a
-                // deliberate arm resets it.
+                // The attempt counter survives the respawn itself; it resets
+                // once this child proves stable (see the exit branch above).
                 Ok(()) => events.push(RecorderEvent::Restarted),
                 Err(error) => {
                     events.push(RecorderEvent::RestartFailed {
@@ -770,11 +763,9 @@ impl Recorder {
     fn schedule_restart(&mut self, now_ms: i64, events: &mut Vec<RecorderEvent>) {
         self.restart_attempts += 1;
         let delay_seconds = MAX_RESTART_DELAY_SECONDS.min(1u64 << self.restart_attempts.min(63));
-        let at_ms = now_ms + (delay_seconds * 1_000) as i64;
-        self.restart_at_ms = Some(at_ms);
+        self.restart_at_ms = Some(now_ms + (delay_seconds * 1_000) as i64);
         events.push(RecorderEvent::RestartScheduled {
             attempt: self.restart_attempts,
-            at_ms,
         });
     }
 
@@ -949,26 +940,10 @@ fn read_token(path: &Path) -> Option<String> {
     if token.is_empty() { None } else { Some(token) }
 }
 
-fn read_log_tail(path: &Path) -> String {
-    let Ok(mut file) = fs::File::open(path) else {
-        return String::new();
-    };
-    let Ok(size) = file.metadata().map(|meta| meta.len()) else {
-        return String::new();
-    };
-    let start = size.saturating_sub(LOG_TAIL_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
-    }
-    let mut tail = Vec::new();
-    let _ = file.read_to_end(&mut tail);
-    String::from_utf8_lossy(&tail).into_owned()
-}
-
 fn text_tail(text: &str) -> String {
     let start = text
         .len()
-        .saturating_sub(usize::try_from(LOG_TAIL_BYTES).unwrap_or(usize::MAX));
+        .saturating_sub(usize::try_from(process::LOG_TAIL_BYTES).unwrap_or(usize::MAX));
     String::from_utf8_lossy(&text.as_bytes()[start..]).into_owned()
 }
 
@@ -1120,7 +1095,7 @@ mod tests {
 
     /// Append an event stamped with the current wall clock.
     fn append_event(config: &CaptureConfig, kind: &str, path: &Path) {
-        append_event_at(config, now_wall_ms(), kind, path);
+        append_event_at(config, now_unix_ms(), kind, path);
     }
 
     fn touch(path: &Path) {
@@ -1205,20 +1180,17 @@ mod tests {
         assert_eq!(fs::read(Recorder::events_path(&config)).unwrap(), b"");
 
         let id = RecordingId::new();
-        let started = recorder
+        recorder
             .begin(StartRequest {
                 id: id.clone(),
                 requested_replay_ms: 12_000,
-                mode: RecordingMode::Automatic,
             })
             .unwrap();
-        assert_eq!(started.requested_replay_ms, 12_000);
         // A second begin cannot disturb the active session.
         assert!(matches!(
             recorder.begin(StartRequest {
                 id: RecordingId::new(),
                 requested_replay_ms: 0,
-                mode: RecordingMode::Manual,
             }),
             Err(RecorderError::Busy)
         ));
@@ -1247,9 +1219,10 @@ mod tests {
         let artifacts = artifacts.expect("regular artifact");
         assert_eq!(artifacts.replay.as_deref(), Some(replay.as_path()));
         assert_eq!(artifacts.regular, regular);
+        assert_eq!(artifacts.requested_replay_ms, 12_000);
         assert!(artifacts.regular_stopped_at_ms >= artifacts.regular_started_at_ms);
         // The ignored events surface as one bounded diagnostic.
-        let events = recorder.poll(now_wall_ms());
+        let events = recorder.poll(now_unix_ms());
         assert!(
             events
                 .iter()
@@ -1270,7 +1243,6 @@ mod tests {
             .begin(StartRequest {
                 id: id.clone(),
                 requested_replay_ms: 5_000,
-                mode: RecordingMode::Automatic,
             })
             .unwrap();
         let regular = Recorder::regular_dir(&config).join("Video_1.mkv");
@@ -1289,7 +1261,6 @@ mod tests {
             .begin(StartRequest {
                 id: id.clone(),
                 requested_replay_ms: 0,
-                mode: RecordingMode::Test(Category::Raids),
             })
             .unwrap();
         recorder.request_end(&id).unwrap();
@@ -1302,7 +1273,6 @@ mod tests {
             recorder.begin(StartRequest {
                 id: RecordingId::new(),
                 requested_replay_ms: 0,
-                mode: RecordingMode::Manual,
             }),
             Err(RecorderError::NotArmed)
         ));
@@ -1321,7 +1291,6 @@ mod tests {
             .begin(StartRequest {
                 id: id.clone(),
                 requested_replay_ms: 0,
-                mode: RecordingMode::Automatic,
             })
             .unwrap();
         let started = Instant::now();
@@ -1337,11 +1306,10 @@ mod tests {
         recorder.arm(&config).unwrap();
 
         let id = RecordingId::new();
-        let started = recorder
+        let started_at_ms = recorder
             .begin(StartRequest {
                 id: id.clone(),
                 requested_replay_ms: 12_000,
-                mode: RecordingMode::Automatic,
             })
             .unwrap();
         let stale_regular = Recorder::regular_dir(&config).join("Video_stale.mkv");
@@ -1354,7 +1322,7 @@ mod tests {
         // regular directory, so only its timestamp distinguishes it.
         append_event_at(&config, 0, "regular", &stale_regular);
         // The pre-roll event arrives exactly when the recording began.
-        append_event_at(&config, started.regular_started_at_ms, "replay", &replay);
+        append_event_at(&config, started_at_ms, "replay", &replay);
 
         recorder.request_end(&id).unwrap();
         let stopped_at_ms = recorder.ending.as_ref().unwrap().regular_stopped_at_ms;
@@ -1367,7 +1335,7 @@ mod tests {
         assert_eq!(artifacts.replay.as_deref(), Some(replay.as_path()));
         assert_eq!(artifacts.regular_stopped_at_ms, stopped_at_ms);
         // The stale regular event is noise, reported by the next normal poll.
-        let events = recorder.poll(now_wall_ms());
+        let events = recorder.poll(now_unix_ms());
         assert!(
             events
                 .iter()
@@ -1390,16 +1358,17 @@ mod tests {
             process::send_signal(recorder.child.as_ref().unwrap(), libc::SIGKILL).unwrap();
             recorder.child.as_mut().unwrap().wait().unwrap();
             let events = recorder.poll(now_ms);
-            let scheduled = events.iter().find_map(|event| match event {
-                RecorderEvent::RestartScheduled { at_ms, .. } => Some(at_ms - now_ms),
-                _ => None,
-            });
             assert!(
                 events
                     .iter()
                     .any(|event| matches!(event, RecorderEvent::ChildExited { .. }))
             );
-            let delay = scheduled.expect("restart scheduled");
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, RecorderEvent::RestartScheduled { .. }))
+            );
+            let delay = recorder.restart_at_ms.expect("restart scheduled") - now_ms;
             delays.push(delay);
             // Nothing happens before the deadline.
             assert!(recorder.poll(now_ms + delay - 1).is_empty());
@@ -1419,20 +1388,16 @@ mod tests {
         process::send_signal(recorder.child.as_ref().unwrap(), libc::SIGKILL).unwrap();
         recorder.child.as_mut().unwrap().wait().unwrap();
         let events = recorder.poll(now_ms);
-        assert!(events.contains(&RecorderEvent::RestartScheduled {
-            attempt: 7,
-            at_ms: now_ms + 30_000,
-        }));
+        assert!(events.contains(&RecorderEvent::RestartScheduled { attempt: 7 }));
+        assert_eq!(recorder.restart_at_ms, Some(now_ms + 30_000));
         let events = recorder.poll(now_ms + 30_000);
         assert!(
             events
                 .iter()
                 .any(|event| matches!(event, RecorderEvent::RestartFailed { .. }))
         );
-        let retry_at = events.iter().find_map(|event| match event {
-            RecorderEvent::RestartScheduled { at_ms, .. } => Some(*at_ms),
-            _ => None,
-        });
+        assert!(events.contains(&RecorderEvent::RestartScheduled { attempt: 8 }));
+        let retry_at = recorder.restart_at_ms;
         assert_eq!(retry_at, Some(now_ms + 60_000));
         fs::remove_file(config.data_dir.join("fake-exit")).unwrap();
         assert!(
@@ -1441,15 +1406,27 @@ mod tests {
                 .contains(&RecorderEvent::Restarted)
         );
 
+        // A child that stayed up long enough starts the backoff over.
+        let now_ms = retry_at.unwrap();
+        recorder.spawned_at = Instant::now().checked_sub(STABLE_CHILD);
+        process::send_signal(recorder.child.as_ref().unwrap(), libc::SIGKILL).unwrap();
+        recorder.child.as_mut().unwrap().wait().unwrap();
+        let events = recorder.poll(now_ms);
+        assert!(events.contains(&RecorderEvent::RestartScheduled { attempt: 1 }));
+        assert_eq!(recorder.restart_at_ms, Some(now_ms + 2_000));
+        assert!(
+            recorder
+                .poll(now_ms + 2_000)
+                .contains(&RecorderEvent::Restarted)
+        );
+
         // A deliberate arm resets the attempt counter.
         recorder.arm(&config).unwrap();
         process::send_signal(recorder.child.as_ref().unwrap(), libc::SIGKILL).unwrap();
         recorder.child.as_mut().unwrap().wait().unwrap();
         let events = recorder.poll(now_ms);
-        assert!(events.contains(&RecorderEvent::RestartScheduled {
-            attempt: 1,
-            at_ms: now_ms + 2_000,
-        }));
+        assert!(events.contains(&RecorderEvent::RestartScheduled { attempt: 1 }));
+        assert_eq!(recorder.restart_at_ms, Some(now_ms + 2_000));
 
         // Shutdown cancels the pending restart and leaves no child.
         recorder.shutdown().unwrap();
@@ -1466,7 +1443,7 @@ mod tests {
         let token_path = Recorder::token_path(&config);
         fs::write(&token_path, "old-token").unwrap();
         // Make poll adopt the current token first.
-        recorder.poll(now_wall_ms());
+        recorder.poll(now_unix_ms());
 
         let selection = recorder.reselect_target(&config).unwrap();
         assert!(recorder.is_running());
@@ -1475,7 +1452,7 @@ mod tests {
         assert!(!token_path.exists());
         // The portal writes the new token later; poll reports it.
         fs::write(&token_path, "new-token").unwrap();
-        let events = recorder.poll(now_wall_ms());
+        let events = recorder.poll(now_unix_ms());
         assert!(events.contains(&RecorderEvent::TargetTokenAvailable(
             "new-token".to_string()
         )));
@@ -1564,7 +1541,6 @@ mod tests {
             recorder.begin(StartRequest {
                 id: RecordingId::new(),
                 requested_replay_ms: 0,
-                mode: RecordingMode::Automatic,
             }),
             Err(RecorderError::NotArmed)
         ));
@@ -1602,7 +1578,6 @@ mod tests {
             .begin(StartRequest {
                 id: RecordingId::new(),
                 requested_replay_ms: 0,
-                mode: RecordingMode::Test(Category::Raids),
             })
             .unwrap();
         recorder.shutdown().unwrap();

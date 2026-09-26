@@ -25,7 +25,6 @@ pub enum Tone {
     Overrunning,
     Finalizing,
     Invalid,
-    Error,
 }
 
 impl Tone {
@@ -37,7 +36,6 @@ impl Tone {
             Self::Overrunning => "tone-overrunning",
             Self::Finalizing => "tone-finalizing",
             Self::Invalid => "tone-invalid",
-            Self::Error => "tone-error",
         }
     }
 }
@@ -121,14 +119,6 @@ pub fn view(snapshot: &AppSnapshot) -> StatusView {
             show_force_end: false,
             show_spinner: false,
         },
-        RecorderStatus::Reconfiguring => StatusView {
-            title: "Reconfiguring".to_owned(),
-            detail: "Applying new capture settings.".to_owned(),
-            tone: Tone::Waiting,
-            elapsed_anchor_ms: None,
-            show_force_end: false,
-            show_spinner: true,
-        },
         RecorderStatus::Ready => StatusView {
             title: "Ready".to_owned(),
             detail: format!(
@@ -139,14 +129,6 @@ pub fn view(snapshot: &AppSnapshot) -> StatusView {
             elapsed_anchor_ms: None,
             show_force_end: false,
             show_spinner: false,
-        },
-        RecorderStatus::Buffering => StatusView {
-            title: "Arming capture".to_owned(),
-            detail: "The replay buffer is starting.".to_owned(),
-            tone: Tone::Waiting,
-            elapsed_anchor_ms: None,
-            show_force_end: false,
-            show_spinner: true,
         },
         RecorderStatus::Recording {
             title,
@@ -195,14 +177,6 @@ pub fn view(snapshot: &AppSnapshot) -> StatusView {
             elapsed_anchor_ms: None,
             show_force_end: false,
             show_spinner: true,
-        },
-        RecorderStatus::Fatal { problem } => StatusView {
-            title: "Error".to_owned(),
-            detail: problem.summary.clone(),
-            tone: Tone::Error,
-            elapsed_anchor_ms: None,
-            show_force_end: false,
-            show_spinner: false,
         },
     }
 }
@@ -388,7 +362,6 @@ impl StatusCard {
                 "tone-overrunning",
                 "tone-finalizing",
                 "tone-invalid",
-                "tone-error",
             ] {
                 self.light.remove_css_class(class);
             }

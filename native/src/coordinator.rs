@@ -214,12 +214,13 @@ pub struct Setup {
 impl Setup {
     pub fn from_environment() -> Result<Self, ConfigError> {
         let (year, utc_offset_minutes) = local_clock();
+        let config_path = crate::config::config_path_from_environment()?;
         Ok(Self {
-            config_path: crate::config::config_path_from_environment()?,
-            data_dir: crate::config::config_path_from_environment()?
+            data_dir: config_path
                 .parent()
                 .unwrap_or(Path::new("."))
                 .join("recorder"),
+            config_path,
             gsr_binary: PathBuf::from("gpu-screen-recorder"),
             media: MediaConfig {
                 utc_offset_minutes,
@@ -733,17 +734,7 @@ impl Coordinator {
     fn apply(&mut self, action: ActivityAction) {
         self.dirty = true;
         match action {
-            ActivityAction::Begin {
-                draft,
-                detected_at_ms,
-            } => self.begin(*draft, detected_at_ms),
-            ActivityAction::Update { id, item } => {
-                if let Some(active) = self.active.as_mut()
-                    && active.draft.id == id
-                {
-                    active.draft.timeline.push(item);
-                }
-            }
+            ActivityAction::Begin { draft } => self.begin(*draft, 0),
             ActivityAction::Complete { id, .. } | ActivityAction::Abandon { id, .. } => {
                 let Some(draft) = self.engine.take_finished(&id) else {
                     return;
@@ -794,7 +785,20 @@ impl Coordinator {
         }
     }
 
-    fn begin(&mut self, draft: RecordingDraft, detected_at_ms: i64) {
+    /// `late_by_ms` is how long after the activity's start its capture begins:
+    /// zero live, the flush wait for a deferred activity. The pre-roll covers
+    /// it on top of the configured lead-in.
+    fn begin(&mut self, draft: RecordingDraft, late_by_ms: i64) {
+        // The previous activity already ended (or was just superseded by this
+        // one) and is only running out its overrun: cut the overrun short so
+        // the new activity takes the deferred path instead of being dropped.
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.stop_at_ms.is_some())
+        {
+            self.end_capture();
+        }
         if self.active.is_some() {
             self.drop_activity(&draft.flavor);
             return;
@@ -815,8 +819,7 @@ impl Coordinator {
         }
         let capacity_ms = u64::from(self.config.capture.replay_buffer_seconds) * 1_000;
         let lead_in_ms = i64::from(self.config.capture.extra_lead_in_seconds) * 1_000;
-        let requested_replay_ms =
-            (detected_at_ms - draft.started_at_ms + lead_in_ms).clamp(0, capacity_ms as i64) as u64;
+        let requested_replay_ms = (late_by_ms + lead_in_ms).clamp(0, capacity_ms as i64) as u64;
         self.start_capture(draft, requested_replay_ms, RecordingMode::Automatic);
     }
 
@@ -831,14 +834,13 @@ impl Coordinator {
         let request = StartRequest {
             id: draft.id.clone(),
             requested_replay_ms,
-            mode: mode.clone(),
         };
         match self.recorder.begin(request) {
-            Ok(started) => {
+            Ok(started_unix_ms) => {
                 self.active = Some(ActiveRecording {
                     draft,
                     mode,
-                    started_unix_ms: started.regular_started_at_ms,
+                    started_unix_ms,
                     requested_replay_ms,
                     stop_at_ms: None,
                 });
@@ -987,7 +989,9 @@ impl Coordinator {
         for event in start_events {
             self.feed(event);
         }
-        if self.active.is_some() {
+        // Nothing was in flight, so any capture now running is this test's.
+        if let Some(active) = self.active.as_mut() {
+            active.mode = RecordingMode::Test(category.clone());
             self.pending_test_end = Some((end_ms, end_event));
         }
     }
@@ -1082,10 +1086,10 @@ impl Coordinator {
         }
         let overrun_ms = deferred.draft.overrun_ms as i64;
         let ended_at_ms = deferred.draft.ended_at_ms;
-        // The activity started while the previous capture was flushing; treat
-        // now as the detection time so the requested pre-roll still reaches
-        // back to the real activity start.
-        self.begin(*deferred.draft, now_unix_ms());
+        // The activity started while the previous capture was flushing; the
+        // requested pre-roll still reaches back to the real activity start.
+        let late_by_ms = now_unix_ms() - deferred.draft.started_at_ms;
+        self.begin(*deferred.draft, late_by_ms);
         // It already ended too. The capture had to start anyway so the replay
         // buffer is written; stop it on the overrun the live path would have
         // used, anchored to when the activity actually ended. A deadline
@@ -1926,66 +1930,39 @@ fn test_events(
     let (start, end) = match category {
         Category::TwoVTwo => (
             arena(2547, "2v2"),
-            CombatEvent::ArenaEnded {
-                winning_team_id: 0,
-                team_0_mmr: 1673,
-                team_1_mmr: 1668,
-            },
+            CombatEvent::ArenaEnded { winning_team_id: 0 },
         ),
         Category::ThreeVThree => (
             arena(980, "3v3"),
-            CombatEvent::ArenaEnded {
-                winning_team_id: 0,
-                team_0_mmr: 1673,
-                team_1_mmr: 1668,
-            },
+            CombatEvent::ArenaEnded { winning_team_id: 0 },
         ),
         Category::SoloShuffle => (
             arena(2547, "Rated Solo Shuffle"),
-            CombatEvent::ArenaEnded {
-                winning_team_id: 0,
-                team_0_mmr: 1673,
-                team_1_mmr: 1668,
-            },
+            CombatEvent::ArenaEnded { winning_team_id: 0 },
         ),
         Category::Raids => (
             CombatEvent::EncounterStarted {
                 encounter_id: 2820,
                 name: "Test Encounter".to_owned(),
                 difficulty_id: 16,
-                group_size: 20,
-                instance_id: 2549,
             },
             CombatEvent::EncounterEnded {
-                encounter_id: 2820,
-                name: "Test Encounter".to_owned(),
                 difficulty_id: 16,
-                group_size: 20,
                 success: true,
             },
         ),
         Category::Battlegrounds => (
-            CombatEvent::ZoneChanged {
-                zone_id: 30,
-                name: "Alterac Valley".to_owned(),
-                instance_id: 30,
-            },
-            CombatEvent::ZoneChanged {
-                zone_id: 0,
-                name: String::new(),
-                instance_id: 0,
-            },
+            CombatEvent::ZoneChanged { zone_id: 30 },
+            CombatEvent::ZoneChanged { zone_id: 0 },
         ),
         Category::MythicPlus => (
             CombatEvent::ChallengeStarted {
-                name: "Test Dungeon".to_owned(),
                 zone_id: 2286,
                 map_id: 377,
                 level: 10,
                 affixes: vec![9, 6, 3],
             },
             CombatEvent::ChallengeEnded {
-                zone_id: 2286,
                 success: true,
                 duration_ms: (end_ms - start_ms).max(0) as u64,
             },

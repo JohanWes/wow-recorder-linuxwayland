@@ -15,32 +15,23 @@ pub struct ParsedEvent {
 pub enum CombatEvent {
     ZoneChanged {
         zone_id: u32,
-        name: String,
-        instance_id: u32,
     },
     EncounterStarted {
         encounter_id: u32,
         name: String,
         difficulty_id: u32,
-        group_size: u32,
-        instance_id: u32,
     },
     EncounterEnded {
-        encounter_id: u32,
-        name: String,
         difficulty_id: u32,
-        group_size: u32,
         success: bool,
     },
     ChallengeStarted {
-        name: String,
         zone_id: u32,
         map_id: u32,
         level: u32,
         affixes: Vec<u32>,
     },
     ChallengeEnded {
-        zone_id: u32,
         success: bool,
         duration_ms: u64,
     },
@@ -50,8 +41,6 @@ pub enum CombatEvent {
     },
     ArenaEnded {
         winning_team_id: u32,
-        team_0_mmr: u32,
-        team_1_mmr: u32,
     },
     Combatant {
         guid: String,
@@ -129,7 +118,6 @@ pub enum CombatEvent {
         source_name: String,
         source_flags: u64,
         dest_name: String,
-        dest_flags: u64,
         dest_raid_marker: u8,
         /// The interrupted spell name.
         spell_name: String,
@@ -139,7 +127,6 @@ pub enum CombatEvent {
         source_name: String,
         source_flags: u64,
         dest_name: String,
-        dest_flags: u64,
         dest_raid_marker: u8,
         /// The dispelled or stolen spell name.
         spell_name: String,
@@ -150,8 +137,8 @@ pub enum CombatEvent {
         source_flags: u64,
         pet_guid: String,
     },
+    /// A `SPELL_CAST_START`.
     BossCast {
-        started: bool,
         source_name: String,
         spell_name: String,
     },
@@ -234,32 +221,23 @@ pub fn parse_line(
     let event = match event_name {
         "ZONE_CHANGE" => CombatEvent::ZoneChanged {
             zone_id: number(&fields, 1)?,
-            name: text(&fields, 2)?.to_owned(),
-            instance_id: number(&fields, 3)?,
         },
         "ENCOUNTER_START" => CombatEvent::EncounterStarted {
             encounter_id: number(&fields, 1)?,
             name: text(&fields, 2)?.to_owned(),
             difficulty_id: number(&fields, 3)?,
-            group_size: number(&fields, 4)?,
-            instance_id: number(&fields, 5)?,
         },
         "ENCOUNTER_END" => CombatEvent::EncounterEnded {
-            encounter_id: number(&fields, 1)?,
-            name: text(&fields, 2)?.to_owned(),
             difficulty_id: number(&fields, 3)?,
-            group_size: number(&fields, 4)?,
             success: number::<u8>(&fields, 5)? != 0,
         },
         "CHALLENGE_MODE_START" => CombatEvent::ChallengeStarted {
-            name: text(&fields, 1)?.to_owned(),
             zone_id: number(&fields, 2)?,
             map_id: number(&fields, 3)?,
             level: number(&fields, 4)?,
             affixes: integer_list(text(&fields, 5)?)?,
         },
         "CHALLENGE_MODE_END" => CombatEvent::ChallengeEnded {
-            zone_id: number(&fields, 1)?,
             success: number::<u8>(&fields, 2)? != 0,
             duration_ms: number(&fields, 4)?,
         },
@@ -269,8 +247,6 @@ pub fn parse_line(
         },
         "ARENA_MATCH_END" => CombatEvent::ArenaEnded {
             winning_team_id: number(&fields, 1)?,
-            team_0_mmr: number(&fields, 3)?,
-            team_1_mmr: number(&fields, 4)?,
         },
         "COMBATANT_INFO" => {
             let (team_id, spec_id) = if matches!(flavor, GameFlavor::Retail) {
@@ -352,13 +328,7 @@ pub fn parse_line(
             };
             event
         }
-        "SPELL_INTERRUPT" => {
-            let Some(event) = parse_utility(&fields, event_name, context) else {
-                return Ok(None);
-            };
-            event
-        }
-        "SPELL_DISPEL" | "SPELL_STOLEN" => {
+        "SPELL_INTERRUPT" | "SPELL_DISPEL" | "SPELL_STOLEN" => {
             let Some(event) = parse_utility(&fields, event_name, context) else {
                 return Ok(None);
             };
@@ -371,7 +341,6 @@ pub fn parse_line(
             event
         }
         "SPELL_CAST_START" => CombatEvent::BossCast {
-            started: true,
             source_name: text(&fields, 2)?.to_owned(),
             spell_name: text(&fields, 10)?.to_owned(),
         },
@@ -390,7 +359,7 @@ const BASE_UNIT_FIELDS: usize = 8;
 const LEGACY_ADVANCED_BLOCK_FIELDS: usize = 17;
 /// COMBAT_LOG_VERSION 22 (Midnight) widened the advanced block by two fields.
 const V22_ADVANCED_BLOCK_FIELDS: usize = 19;
-const EMPTY_GUID: &str = "0000000000000000";
+pub(crate) const EMPTY_GUID: &str = "0000000000000000";
 
 /// A located advanced block: where it starts, whether the infoGUID rule
 /// found one, and where the event suffix begins.
@@ -440,6 +409,11 @@ fn lenient_hex(fields: &[String], index: usize) -> Option<u64> {
     fields
         .get(index)
         .and_then(|value| u64::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).ok())
+}
+
+/// The raid-target marker in the low byte of the destination raid flags.
+fn dest_raid_marker(fields: &[String]) -> u8 {
+    (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8
 }
 
 /// Destination HP from the advanced block, trusted only when its infoGUID
@@ -502,7 +476,7 @@ fn parse_damage(
             dest_guid: dest_guid.to_owned(),
             dest_name: fields.get(6)?.as_str().to_owned(),
             dest_flags: lenient_hex(fields, 7)?,
-            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            dest_raid_marker: dest_raid_marker(fields),
             spell_name: if event_name == "SWING_DAMAGE" {
                 "Melee".to_owned()
             } else {
@@ -544,7 +518,7 @@ fn parse_heal(
             dest_guid: fields.get(5)?.as_str().to_owned(),
             dest_name: fields.get(6)?.as_str().to_owned(),
             dest_flags: lenient_hex(fields, 7)?,
-            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            dest_raid_marker: dest_raid_marker(fields),
             spell_name: fields.get(10)?.as_str().to_owned(),
             amount,
             overheal,
@@ -573,8 +547,7 @@ fn parse_utility(
             source_name: fields.get(2)?.as_str().to_owned(),
             source_flags: lenient_hex(fields, 3)?,
             dest_name: fields.get(6)?.as_str().to_owned(),
-            dest_flags: lenient_hex(fields, 7)?,
-            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            dest_raid_marker: dest_raid_marker(fields),
             spell_name,
         }
     } else {
@@ -583,8 +556,7 @@ fn parse_utility(
             source_name: fields.get(2)?.as_str().to_owned(),
             source_flags: lenient_hex(fields, 3)?,
             dest_name: fields.get(6)?.as_str().to_owned(),
-            dest_flags: lenient_hex(fields, 7)?,
-            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            dest_raid_marker: dest_raid_marker(fields),
             spell_name,
         }
     })
@@ -625,7 +597,7 @@ fn parse_support(
             supporter_guid: guid_or_none(fields.last()?)?.to_owned(),
             source_guid: fields.get(1)?.as_str().to_owned(),
             dest_name: fields.get(6)?.as_str().to_owned(),
-            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            dest_raid_marker: dest_raid_marker(fields),
             spell_name: fields.get(10)?.as_str().to_owned(),
             amount,
             overheal,
@@ -927,13 +899,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let golden = vec![
-            CombatEvent::ZoneChanged {
-                zone_id: 2652,
-                name: "The Stonevault".into(),
-                instance_id: 23,
-            },
+            CombatEvent::ZoneChanged { zone_id: 2652 },
             CombatEvent::ChallengeStarted {
-                name: "The Stonevault".into(),
                 zone_id: 2652,
                 map_id: 501,
                 level: 10,
@@ -943,18 +910,12 @@ mod tests {
                 encounter_id: 9999,
                 name: "Training Construct".into(),
                 difficulty_id: 8,
-                group_size: 5,
-                instance_id: 2652,
             },
             CombatEvent::EncounterEnded {
-                encounter_id: 9999,
-                name: "Training Construct".into(),
                 difficulty_id: 8,
-                group_size: 5,
                 success: true,
             },
             CombatEvent::ChallengeEnded {
-                zone_id: 2652,
                 success: true,
                 duration_ms: 123_456,
             },
@@ -962,11 +923,7 @@ mod tests {
                 zone_id: 1134,
                 match_type: "Rated, Solo Shuffle".into(),
             },
-            CombatEvent::ArenaEnded {
-                winning_team_id: 1,
-                team_0_mmr: 1600,
-                team_1_mmr: 1700,
-            },
+            CombatEvent::ArenaEnded { winning_team_id: 1 },
             CombatEvent::UnitDied {
                 guid: "Player-0-AAAA".into(),
                 name: "Player One".into(),
@@ -1006,7 +963,6 @@ mod tests {
                 dest_max_hp: Some(152),
             },
             CombatEvent::BossCast {
-                started: true,
                 source_name: "Training Boss".into(),
                 spell_name: "Rebirth".into(),
             },
@@ -1063,11 +1019,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let golden = vec![
-            CombatEvent::ZoneChanged {
-                zone_id: 562,
-                name: "Blade's Edge Arena".into(),
-                instance_id: 0,
-            },
+            CombatEvent::ZoneChanged { zone_id: 562 },
             CombatEvent::Combatant {
                 guid: "Player-0-CLASSIC".into(),
                 team_id: None,
@@ -1092,11 +1044,7 @@ mod tests {
                 flags: 0x548,
                 unconscious: false,
             },
-            CombatEvent::ZoneChanged {
-                zone_id: 571,
-                name: "Dalaran".into(),
-                instance_id: 0,
-            },
+            CombatEvent::ZoneChanged { zone_id: 571 },
         ];
         let golden = golden
             .into_iter()
@@ -1133,8 +1081,6 @@ mod tests {
                 encounter_id: 2940,
                 name: "Clockwork Keeper".into(),
                 difficulty_id: 198,
-                group_size: 10,
-                instance_id: 90,
             },
             CombatEvent::Combatant {
                 guid: "Player-0-ERA".into(),
@@ -1161,10 +1107,7 @@ mod tests {
                 unconscious: false,
             },
             CombatEvent::EncounterEnded {
-                encounter_id: 2940,
-                name: "Clockwork Keeper".into(),
                 difficulty_id: 198,
-                group_size: 10,
                 success: true,
             },
         ];
@@ -1507,7 +1450,6 @@ mod tests {
                 source_name: "Rogue".into(),
                 source_flags: 0x511,
                 dest_name: "Caster".into(),
-                dest_flags: 0x10a48,
                 dest_raid_marker: 0,
                 spell_name: "Fireball".into(),
             }
@@ -1524,7 +1466,6 @@ mod tests {
                 source_name: "Priest".into(),
                 source_flags: 0x511,
                 dest_name: "Victim".into(),
-                dest_flags: 0x548,
                 dest_raid_marker: 0,
                 spell_name: "Power Word: Fortitude".into(),
             }
