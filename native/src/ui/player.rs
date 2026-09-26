@@ -10,7 +10,7 @@
 //! the product by maintainer decision (2026-07-22); the viewpoint selector
 //! and individual local recordings remain.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -73,7 +73,8 @@ struct Inner {
     /// Collapsing the control row in fullscreen gives the video the whole
     /// surface, which is what closes the letterbox bars.
     bottom_bar: gtk4::Revealer,
-    fullscreen: Cell<bool>,
+    /// Bumped on every fullscreen change; only the newest idle tick runs.
+    fullscreen_generation: Cell<u64>,
     last_motion: Cell<Instant>,
     last_pointer: Cell<(f64, f64)>,
 
@@ -81,8 +82,10 @@ struct Inner {
     /// ratio without making the player own window layout.
     video_dimensions_handler: RefCell<Option<VideoDimensionsHandler>>,
 
-    /// The one Clapper backend; `None` only when Clapper failed to start.
-    backend: Option<PlayerBackend>,
+    /// The one Clapper backend, created on the first load so a session that
+    /// never plays anything (such as one started in the tray) does not pay
+    /// for GStreamer. Holds `None` once Clapper has failed to start.
+    backend: OnceCell<Option<PlayerBackend>>,
 
     entries: RefCell<Arc<Vec<LibraryEntry>>>,
     prefs: Cell<MarkerPrefs>,
@@ -90,6 +93,8 @@ struct Inner {
     povs: RefCell<Vec<multipov::Pov>>,
     active_id: RefCell<Option<RecordingId>>,
     preferred_player: RefCell<Option<String>>,
+    /// The newest selection made while the player was not on screen.
+    deferred_selection: RefCell<Option<Selection>>,
 
     media_usable: Cell<bool>,
     playing: Cell<bool>,
@@ -126,14 +131,7 @@ impl Player {
         empty_reveal.set_visible(false);
         placeholder.set_child(Some(&empty_reveal));
 
-        let backend = PlayerBackend::new()
-            .map_err(|error| tracing::warn!(error, "player backend unavailable"))
-            .ok();
-
         let video_overlay = gtk4::Overlay::new();
-        if let Some(backend) = &backend {
-            video_overlay.set_child(Some(backend.widget()));
-        }
         video_overlay.set_vexpand(true);
         // GTK4 gives plain widgets no allocation signal, so this
         // always-allocated probe tells the shell when the video viewport was
@@ -167,6 +165,9 @@ impl Player {
         stack.add_named(&video_page, Some("video"));
         stack.set_visible_child_name("placeholder");
         stack.set_vexpand(true);
+        // Softens the swaps and Clapper's black first frame.
+        stack.set_transition_type(gtk4::StackTransitionType::Crossfade);
+        stack.set_transition_duration(180);
 
         let timeline = Timeline::new();
         let controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
@@ -267,11 +268,11 @@ impl Player {
             meter,
             reveal_button,
             bottom_bar,
-            fullscreen: Cell::new(false),
+            fullscreen_generation: Cell::new(0),
             last_motion: Cell::new(Instant::now()),
             last_pointer: Cell::new((f64::NAN, f64::NAN)),
             video_dimensions_handler: RefCell::new(None),
-            backend,
+            backend: OnceCell::new(),
             entries: RefCell::new(Arc::new(Vec::new())),
             prefs: Cell::new(MarkerPrefs {
                 deaths: DeathMarkerVisibility::Own,
@@ -281,6 +282,7 @@ impl Player {
             povs: RefCell::new(Vec::new()),
             active_id: RefCell::new(None),
             preferred_player: RefCell::new(None),
+            deferred_selection: RefCell::new(None),
             media_usable: Cell::new(false),
             playing: Cell::new(false),
             speed_index: Cell::new(2),
@@ -348,6 +350,16 @@ impl Player {
                 this.request_seek(at_ms as f64 / 1_000.0, SeekMode::Settle);
             });
         }
+        // Selections made while hidden load once the player is shown.
+        {
+            let this = Rc::clone(&inner);
+            inner.stack.connect_map(move |_| {
+                let deferred = this.deferred_selection.take();
+                if let Some(selection) = deferred {
+                    this.set_selection(Some(&selection));
+                }
+            });
+        }
         // The drag position is pixel margins: any relayout (window resize,
         // fullscreen transitions) re-clamps them to the overlay allocation.
         {
@@ -358,7 +370,6 @@ impl Player {
         }
         video_overlay.add_controller(video_click);
 
-        inner.connect_backend();
         inner.connect_controls(
             &clip_create,
             &clip_cancel,
@@ -373,15 +384,15 @@ impl Player {
         Self { widget, inner }
     }
 
-    /// Route key presses that are not for an editable widget. Installed once on
-    /// the window by the shell.
+    /// Route key presses meant for the window itself; see `window_owns_keys`.
+    /// Installed once on the window by the shell.
     pub fn install_shortcuts(&self, window: &gtk4::Window) {
         let inner = Rc::clone(&self.inner);
         let key = gtk4::EventControllerKey::new();
         key.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let key_window = window.clone();
-        key.connect_key_pressed(move |_, keyval, _, _| {
-            if focus_is_editable(&key_window) || inner.active_id.borrow().is_none() {
+        key.connect_key_pressed(move |controller, keyval, _, _| {
+            if !window_owns_keys(&key_window, controller) || inner.active_id.borrow().is_none() {
                 return gtk4::glib::Propagation::Proceed;
             }
             inner.handle_key(keyval)
@@ -459,8 +470,27 @@ impl Player {
 impl Inner {
     // -- construction helpers -----------------------------------------------
 
+    fn backend(&self) -> Option<&PlayerBackend> {
+        self.backend.get()?.as_ref()
+    }
+
+    /// Create the backend on first use and put its video into the overlay.
+    fn ensure_backend(self: &Rc<Self>) -> Option<&PlayerBackend> {
+        if self.backend.get().is_none() {
+            let backend = PlayerBackend::new()
+                .map_err(|error| tracing::warn!(error, "player backend unavailable"))
+                .ok();
+            if let Some(backend) = &backend {
+                self.video_overlay.set_child(Some(backend.widget()));
+            }
+            let _ = self.backend.set(backend);
+            self.connect_backend();
+        }
+        self.backend()
+    }
+
     fn connect_backend(self: &Rc<Self>) {
-        let Some(backend) = &self.backend else {
+        let Some(backend) = self.backend() else {
             return;
         };
         let this = Rc::clone(self);
@@ -493,7 +523,7 @@ impl Inner {
         let this = Rc::clone(self);
         self.volume_scale.connect_value_changed(move |scale| {
             this.set_muted(false);
-            if let Some(backend) = &this.backend {
+            if let Some(backend) = this.backend() {
                 backend.set_volume(scale.value());
             }
         });
@@ -553,36 +583,49 @@ impl Inner {
 
     fn set_selection(self: &Rc<Self>, selection: Option<&Selection>) {
         let Some(selection) = selection else {
+            self.deferred_selection.take();
             self.unload();
             return;
         };
-        // Same activity (e.g. snapshot-driven reselect): keep everything.
+        // Nothing loads or plays behind a hidden window, such as a session
+        // started in the tray: the newest selection waits for the player to
+        // be shown, which also keeps Clapper unloaded until then.
+        if !self.stack.is_mapped() {
+            *self.deferred_selection.borrow_mut() = Some(selection.clone());
+            return;
+        }
+        let povs = {
+            let entries = self.entries.borrow();
+            let resolved: Vec<&LibraryEntry> = selection
+                .viewpoints
+                .iter()
+                .filter_map(|id| entries.iter().find(|entry| &entry.id == id))
+                .collect();
+            multipov::povs(&resolved)
+        };
+        // Same activity (e.g. snapshot-driven reselect): keep playback, but
+        // pick up viewpoints that were correlated or removed since.
         let same_activity = self
             .active_id
             .borrow()
             .as_ref()
             .is_some_and(|active| selection.viewpoints.contains(active));
         if same_activity {
+            if *self.povs.borrow() != povs {
+                *self.povs.borrow_mut() = povs;
+                self.rebuild_pov_selector();
+            }
             self.refresh_timeline();
             return;
         }
-        let entries = self.entries.borrow();
-        let resolved: Vec<&LibraryEntry> = selection
-            .viewpoints
-            .iter()
-            .filter_map(|id| entries.iter().find(|entry| &entry.id == id))
-            .collect();
-        if resolved.is_empty() {
-            drop(entries);
+        if povs.is_empty() {
             self.unload();
             return;
         }
-        let povs = multipov::povs(&resolved);
         let preferred = self.preferred_player.borrow().clone();
         let chosen = multipov::choose(&povs, preferred.as_deref())
             .map(|pov| pov.id.clone())
             .unwrap_or_else(|| selection.id.clone());
-        drop(entries);
 
         // New activity: stop, leave clip mode, and seek to zero.
         *self.povs.borrow_mut() = povs;
@@ -624,7 +667,7 @@ impl Inner {
         self.empty_reveal.set_visible(false);
         self.set_media_usable(false, is_clip);
         if !has_content {
-            if replacing_media && let Some(backend) = &self.backend {
+            if replacing_media && let Some(backend) = self.backend() {
                 backend.stop();
             }
             self.playing.set(false);
@@ -640,7 +683,7 @@ impl Inner {
             self.refresh_timeline();
             return;
         }
-        let Some(backend) = &self.backend else {
+        let Some(backend) = self.ensure_backend() else {
             self.error_bar.set_visible(true);
             return;
         };
@@ -726,7 +769,7 @@ impl Inner {
             if this.active_id.borrow().as_ref() != Some(&id) {
                 return gtk4::glib::ControlFlow::Break;
             }
-            if this.report_video_dimensions(this.backend.as_ref().and_then(|backend| {
+            if this.report_video_dimensions(this.backend().and_then(|backend| {
                 backend.video_dimensions(&expected_uri, previous_stream.as_ref())
             })) {
                 return gtk4::glib::ControlFlow::Break;
@@ -752,7 +795,7 @@ impl Inner {
             if this.load_generation.get() != generation {
                 return;
             }
-            let ready = this.backend.as_ref().is_some_and(PlayerBackend::is_ready);
+            let ready = this.backend().is_some_and(PlayerBackend::is_ready);
             if !ready && this.active_id.borrow().is_some() {
                 let is_clip = this.active_entry_is_clip();
                 this.set_media_usable(false, is_clip);
@@ -763,7 +806,7 @@ impl Inner {
 
     fn unload(self: &Rc<Self>) {
         self.exit_clip_mode();
-        if let Some(backend) = &self.backend {
+        if let Some(backend) = self.backend() {
             backend.stop();
         }
         *self.active_id.borrow_mut() = None;
@@ -814,7 +857,7 @@ impl Inner {
         }
         let playing = !self.playing.get();
         self.playing.set(playing);
-        if let Some(backend) = &self.backend {
+        if let Some(backend) = self.backend() {
             if playing {
                 backend.play();
             } else {
@@ -830,7 +873,7 @@ impl Inner {
 
     fn set_muted(&self, muted: bool) {
         self.muted.set(muted);
-        if let Some(backend) = &self.backend {
+        if let Some(backend) = self.backend() {
             backend.set_muted(muted);
         }
         self.mute_button.set_icon_name(if muted {
@@ -843,7 +886,7 @@ impl Inner {
     fn set_speed(&self, index: usize) {
         self.speed_index.set(index);
         let speed = SPEEDS[index];
-        if let Some(backend) = &self.backend {
+        if let Some(backend) = self.backend() {
             backend.set_speed(speed);
         }
         self.speed_button.set_label(&format!("{speed}x"));
@@ -862,7 +905,7 @@ impl Inner {
         }
         let seconds = seconds.clamp(0.0, self.duration_ms.get() as f64 / 1_000.0);
         self.show_position(seconds);
-        let Some(backend) = &self.backend else {
+        let Some(backend) = self.backend() else {
             return;
         };
         if backend.is_ready() {
@@ -890,7 +933,7 @@ impl Inner {
             PlayerState::Playing | PlayerState::Paused => {
                 if let Some((target, mode)) = self.pending_seek.take() {
                     self.seek_in_flight.set(true);
-                    if let Some(backend) = &self.backend {
+                    if let Some(backend) = self.backend() {
                         backend.seek(target, mode);
                     }
                 }
@@ -914,7 +957,7 @@ impl Inner {
         }
         match self.pending_seek.take() {
             Some((target, mode)) => {
-                if let Some(backend) = &self.backend {
+                if let Some(backend) = self.backend() {
                     backend.seek(target, mode);
                 }
             }
@@ -988,7 +1031,7 @@ impl Inner {
             }
             gtk4::gdk::Key::period => {
                 if !self.playing.get()
-                    && let Some(backend) = &self.backend
+                    && let Some(backend) = self.backend()
                 {
                     backend.advance_frame();
                 }
@@ -1008,15 +1051,17 @@ impl Inner {
     // -- fullscreen idle -----------------------------------------------------
 
     fn set_fullscreen(self: &Rc<Self>, fullscreen: bool) {
-        self.fullscreen.set(fullscreen);
         self.last_motion.set(Instant::now());
         self.reveal_bottom_bar();
+        // A quick off/on toggle must not leave the previous tick running.
+        let generation = self.fullscreen_generation.get().wrapping_add(1);
+        self.fullscreen_generation.set(generation);
         if !fullscreen {
             return;
         }
         let this = Rc::clone(self);
         gtk4::glib::timeout_add_local(IDLE_TICK, move || {
-            if !this.fullscreen.get() {
+            if this.fullscreen_generation.get() != generation {
                 return gtk4::glib::ControlFlow::Break;
             }
             if this.last_motion.get().elapsed() >= IDLE_HIDE {
@@ -1053,7 +1098,7 @@ impl Inner {
         // Clapper sets a cursor on its own video widget, and the innermost
         // widget with one wins, so the window alone leaves the pointer visible
         // over the video, which is the whole screen in fullscreen.
-        if let Some(backend) = &self.backend {
+        if let Some(backend) = self.backend() {
             backend.widget().set_cursor_from_name(name);
         }
     }
@@ -1284,12 +1329,25 @@ fn icon_button(icon: &str, label: &str) -> gtk4::Button {
     button
 }
 
-/// Player shortcuts are ignored while an editable widget has focus.
-fn focus_is_editable(window: &gtk4::Window) -> bool {
-    let Some(focus): Option<gtk4::Widget> = gtk4::prelude::GtkWindowExt::focus(window) else {
+/// Player shortcuts belong to the window's own content. The capture-phase
+/// controller also sees keys for editable widgets, dialogs (which live inside
+/// the window), and popovers (parented into it), where Space must press the
+/// focused button and arrows must move within the calendar or list.
+fn window_owns_keys(window: &gtk4::Window, controller: &gtk4::EventControllerKey) -> bool {
+    let surface = controller.current_event().and_then(|event| event.surface());
+    if surface != window.surface() {
         return false;
+    }
+    let Some(focus): Option<gtk4::Widget> = gtk4::prelude::GtkWindowExt::focus(window) else {
+        return true;
     };
-    focus.is::<gtk4::Text>()
+    !(focus.is::<gtk4::Text>()
         || focus.is::<gtk4::TextView>()
-        || focus.ancestor(gtk4::Editable::static_type()).is_some()
+        || [
+            gtk4::Editable::static_type(),
+            adw::Dialog::static_type(),
+            gtk4::Popover::static_type(),
+        ]
+        .into_iter()
+        .any(|kind| focus.ancestor(kind).is_some()))
 }

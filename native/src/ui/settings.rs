@@ -620,10 +620,16 @@ impl Settings {
     ) -> Rc<Self> {
         let draft = Rc::new(RefCell::new(snapshot.config.clone()));
         let registry: Registry = Rc::new(RefCell::new(Vec::new()));
+        // Closures owned by the dialog's widgets hold `Settings`, the
+        // registry, the dialog, or their own row weakly: a strong reference
+        // would cycle through the widget tree and leak the whole dialog.
         let refresh: Rc<dyn Fn()> = {
-            let registry = Rc::clone(&registry);
+            let registry = Rc::downgrade(&registry);
             let draft = Rc::clone(&draft);
             Rc::new(move || {
+                let Some(registry) = registry.upgrade() else {
+                    return;
+                };
                 let draft = draft.borrow();
                 for (field, widget) in registry.borrow().iter() {
                     widget.set_sensitive(row_sensitive(field, &draft));
@@ -940,19 +946,28 @@ impl Settings {
         });
 
         {
-            let dialog = dialog.clone();
+            let dialog = dialog.downgrade();
             cancel.connect_clicked(move |_| {
-                dialog.close();
+                if let Some(dialog) = dialog.upgrade() {
+                    dialog.close();
+                }
             });
         }
         {
-            let settings = Rc::clone(&settings);
-            apply.connect_clicked(move |_| settings.on_apply());
+            let settings = Rc::downgrade(&settings);
+            apply.connect_clicked(move |_| {
+                if let Some(settings) = settings.upgrade() {
+                    settings.on_apply();
+                }
+            });
         }
         {
-            let settings = Rc::clone(&settings);
+            let settings = Rc::downgrade(&settings);
             let refresh = Rc::clone(&refresh);
             input_switch.connect_active_notify(move |switch| {
+                let Some(settings) = settings.upgrade() else {
+                    return;
+                };
                 let mut draft = settings.draft.borrow_mut();
                 if switch.is_active() {
                     if draft.capture.audio_input.is_none() {
@@ -972,8 +987,12 @@ impl Settings {
             });
         }
         {
-            let settings = Rc::clone(&settings);
-            refresh_audio.connect_clicked(move |_| settings.load_audio());
+            let settings = Rc::downgrade(&settings);
+            refresh_audio.connect_clicked(move |_| {
+                if let Some(settings) = settings.upgrade() {
+                    settings.load_audio();
+                }
+            });
         }
 
         refresh();
@@ -1359,11 +1378,13 @@ fn path_row(
     select.set_valign(gtk4::Align::Center);
     {
         let draft = Rc::clone(draft);
-        let row = row.clone();
+        let weak_row = row.downgrade();
         let parent = parent.clone();
-        let button = select.clone();
         let refresh = Rc::clone(refresh);
-        select.connect_clicked(move |_| {
+        select.connect_clicked(move |button| {
+            let Some(row) = weak_row.upgrade() else {
+                return;
+            };
             let chooser = gtk4::FileDialog::new();
             chooser.set_title(&format!("Choose the {} folder", spec.title));
             let current = (spec.get)(&draft.borrow()).path.clone();
@@ -1371,7 +1392,6 @@ fn path_row(
                 chooser.set_initial_folder(Some(&gtk4::gio::File::for_path(&current)));
             }
             let draft = Rc::clone(&draft);
-            let row = row.clone();
             let button = button.clone();
             let refresh = Rc::clone(&refresh);
             chooser.select_folder(

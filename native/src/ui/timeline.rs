@@ -238,6 +238,9 @@ impl SeekGesture {
 struct State {
     duration_ms: Cell<u64>,
     position_ms: Cell<u64>,
+    /// The position the last paint drew, so playback only repaints once the
+    /// playhead has moved a visible distance.
+    painted_position_ms: Cell<u64>,
     items: RefCell<Vec<OwnedItem>>,
     clip: Cell<Option<ClipRangeMs>>,
     grab: Cell<Option<Grab>>,
@@ -270,6 +273,7 @@ impl Timeline {
         let state = Rc::new(State {
             duration_ms: Cell::new(0),
             position_ms: Cell::new(0),
+            painted_position_ms: Cell::new(0),
             items: RefCell::new(Vec::new()),
             clip: Cell::new(None),
             grab: Cell::new(None),
@@ -321,12 +325,18 @@ impl Timeline {
 
     /// Ignored while the pointer owns the playhead: a drag's preview seeks
     /// report back the keyframe they landed on, and letting that through would
-    /// pull the playhead backwards out from under the pointer.
+    /// pull the playhead backwards out from under the pointer. On a long
+    /// recording one pixel spans seconds, so this only repaints once the
+    /// playhead is half a pixel from where it was last painted.
     pub fn set_position(&self, position_ms: u64) {
         if self.state.grab.get() == Some(Grab::Seek) {
             return;
         }
-        if self.state.position_ms.replace(position_ms) != position_ms {
+        self.state.position_ms.set(position_ms);
+        let duration = self.state.duration_ms.get();
+        let width = f64::from(self.widget.width());
+        let painted = ms_to_x(self.state.painted_position_ms.get(), duration, width);
+        if (ms_to_x(position_ms, duration, width) - painted).abs() >= 0.5 {
             self.widget.queue_draw();
         }
     }
@@ -347,6 +357,7 @@ impl Timeline {
             let height = f64::from(height);
             let duration = state.duration_ms.get();
             let mid = height / 2.0;
+            state.painted_position_ms.set(state.position_ms.get());
 
             // Neutral rail keeps red available for actual failure outcomes.
             cr.set_source_rgba(0.18, 0.20, 0.23, 1.0);
