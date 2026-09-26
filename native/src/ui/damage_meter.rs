@@ -7,11 +7,13 @@
 //! the latest completed interval.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use gtk4::gdk::Texture;
 use gtk4::prelude::*;
+use libadwaita as adw;
+use libadwaita::prelude::*;
 
 use warcraft_recorder::domain::{
     LibraryEntry, MeterData, MeterDeath, MeterDeathEventKind, MeterFight, MeterMetric,
@@ -53,10 +55,19 @@ type SeekFn = Box<dyn Fn(u64)>;
 /// plays out on screen instead of having already happened.
 const SEEK_LEAD_MS: u64 = 3_000;
 
+/// Minimum spacing of playhead-driven refreshes, so dragging the timeline
+/// re-projects the meter about ten times a second instead of on every
+/// pointer event.
+const POSITION_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// How long a bar fill eases from its previous on-screen position toward
 /// the new one. Kept under the 500 ms sample cadence so consecutive
 /// updates chain into continuous motion instead of jagged jumps.
-const FILL_ANIMATE_MS: i64 = 400;
+const FILL_ANIMATE_MS: u32 = 400;
+/// Fill changes smaller than this (about a pixel on the default panel) are
+/// applied without an animation, so a settled late-fight meter does not keep
+/// the frame clock running for invisible motion.
+const MIN_ANIMATED_STEP: f64 = 0.004;
 
 /// Pixels between the meter's left edge and the tooltip that opens to its
 /// left.
@@ -289,6 +300,132 @@ fn ranked_spells(actor: &ProjectedActor, view: MeterMetric) -> Vec<&ProjectedEnt
     spells
 }
 
+/// Where activating a keyed row navigates.
+#[derive(Clone)]
+enum Open {
+    /// The actor breakdown for this GUID.
+    Actor(String),
+    /// The spell detail for this spell key.
+    Spell(String),
+}
+
+/// One line of keyed meter content. Refreshes describe the list as data;
+/// [`Inner::set_lines`] applies it onto the row widgets kept by key.
+enum Line {
+    Heading(&'static str),
+    Bar(Bar),
+}
+
+/// A keyed fill row. `key` is unique within the list and stable across
+/// refreshes, and within one view, segment, and target it always means the
+/// same row, so `class` and `open` are only read when the row is created.
+struct Bar {
+    key: String,
+    class: Option<&'static str>,
+    left: String,
+    right: String,
+    fraction: f64,
+    /// Whether `left` is a spell name that gets an icon and tooltip.
+    spell_icon: bool,
+    open: Option<Open>,
+}
+
+impl Line {
+    fn key(&self) -> String {
+        match self {
+            Line::Heading(text) => format!("h:{text}"),
+            Line::Bar(bar) => bar.key.clone(),
+        }
+    }
+}
+
+/// The widgets kept for one keyed line.
+enum RowWidgets {
+    Heading(gtk4::Label),
+    Bar(BarRow),
+}
+
+impl RowWidgets {
+    fn widget(&self) -> gtk4::Widget {
+        match self {
+            RowWidgets::Heading(label) => label.clone().upcast(),
+            RowWidgets::Bar(row) => row.root.clone(),
+        }
+    }
+}
+
+/// A kept fill row: the fill bar and labels are updated in place.
+struct BarRow {
+    /// The row's widget in the content box: a button for clickable rows.
+    root: gtk4::Widget,
+    fill: gtk4::ProgressBar,
+    line: gtk4::Box,
+    left: gtk4::Label,
+    right: gtk4::Label,
+    has_icon: Cell<bool>,
+    /// The fraction the fill is heading to.
+    target: Cell<f64>,
+    /// Eases the fill toward `target`. libadwaita skips straight to the end
+    /// when animations are disabled or the row is unmapped.
+    animation: adw::TimedAnimation,
+}
+
+impl BarRow {
+    fn new(root: gtk4::Widget, widgets: BarWidgets) -> Self {
+        let fill = widgets.fill.clone();
+        let animation = adw::TimedAnimation::new(
+            &widgets.fill,
+            0.0,
+            0.0,
+            FILL_ANIMATE_MS,
+            adw::CallbackAnimationTarget::new(move |value| fill.set_fraction(value)),
+        );
+        // Quick off the old position, settling on the new one.
+        animation.set_easing(adw::Easing::EaseOutCubic);
+        Self {
+            root,
+            fill: widgets.fill,
+            line: widgets.line,
+            left: widgets.left,
+            right: widgets.right,
+            has_icon: Cell::new(false),
+            target: Cell::new(0.0),
+            animation,
+        }
+    }
+
+    fn update(&self, bar: &Bar) {
+        set_text_if_changed(&self.left, &bar.left);
+        set_text_if_changed(&self.right, &bar.right);
+        self.set_fraction(bar.fraction.clamp(0.0, 1.0));
+    }
+
+    /// Ease the fill from its on-screen position toward `target`, so
+    /// consecutive sample updates chain into continuous motion. A sub-pixel
+    /// step from rest is applied directly instead of animating.
+    fn set_fraction(&self, target: f64) {
+        if self.target.replace(target) == target {
+            return;
+        }
+        let from = self.fill.fraction();
+        if self.animation.state() != adw::AnimationState::Playing
+            && (target - from).abs() < MIN_ANIMATED_STEP
+        {
+            self.fill.set_fraction(target);
+            return;
+        }
+        self.animation.set_value_from(from);
+        self.animation.set_value_to(target);
+        self.animation.play();
+    }
+}
+
+fn set_text_if_changed(label: &gtk4::Label, text: &str) {
+    if label.label().as_str() != text {
+        label.set_label(text);
+    }
+}
+
 /// The active target filter, applied to target rows only: by name across all
 /// markers, or by marker across all names.
 fn matches_target(entry: &ProjectedEntry, target: &TargetSel) -> bool {
@@ -338,6 +475,10 @@ struct Inner {
     /// Set when a refresh was deferred while hidden; the next reveal renders
     /// it.
     dirty: Cell<bool>,
+    /// Whether a playhead refresh ran within the last
+    /// [`POSITION_REFRESH_INTERVAL`], and whether another move arrived since.
+    position_throttled: Cell<bool>,
+    position_pending: Cell<bool>,
     /// The virtualized history list on screen and its data key. Occurrence
     /// times and deaths are frozen between playhead ticks, so a matching key
     /// keeps the widget — scroll position and bound rows included — instead
@@ -345,27 +486,20 @@ struct Inner {
     list_cache: RefCell<Option<(String, gtk4::ListView)>>,
     /// Seek request into the player, installed by it at construction.
     seek: RefCell<Option<SeekFn>>,
-    /// On-screen fill fractions per animated row key, written every
-    /// animation frame so a rebuild mid-transition resumes from the value
-    /// currently visible instead of jumping.
-    bar_fractions: RefCell<HashMap<String, f64>>,
-    /// The bundled spell database, loaded lazily on first icon/tooltip use.
-    spell_db: RefCell<Option<Rc<SpellDb>>>,
-    /// Decoded spell-icon textures keyed by basename, so the 500 ms row
-    /// rebuilds reuse them instead of re-decoding.
+    /// The keyed rows in `content`, updated in place by `set_lines`. Cleared
+    /// when the view, segment, target, or entry changes, so a key only ever
+    /// names one row meaning and fresh bars grow in from empty.
+    rows: RefCell<HashMap<String, RowWidgets>>,
+    /// The bundled spell database, parsed off the GTK thread the first time
+    /// the meter is shown; `None` until it arrives.
+    spell_db: RefCell<Option<SpellDb>>,
+    spell_db_requested: Cell<bool>,
+    /// Decoded spell-icon textures keyed by basename, so new rows reuse
+    /// them instead of re-decoding.
     icons: RefCell<HashMap<String, Texture>>,
     /// The video overlay the meter sits on; the tooltip lives here, outside
-    /// the meter, so it survives rebuilds and is never clipped by the
-    /// scroller.
+    /// the meter, so it is never clipped by the scroller.
     overlay: RefCell<Option<gtk4::Overlay>>,
-    /// The spell whose tooltip is showing. Rows are rebuilt every 500 ms,
-    /// destroying the icon the pointer entered without a leave event, so the
-    /// hover state is remembered and re-armed by the rebuilt row.
-    hovered_spell: RefCell<Option<String>>,
-    /// Whether the content currently being built contains the hovered
-    /// spell's icon; `clear_content` drops a tooltip whose spell left the
-    /// list.
-    tooltip_rearmed: Cell<bool>,
     /// The shared spell tooltip, shown directly left of the meter.
     tooltip: gtk4::Box,
     tooltip_icon: gtk4::Picture,
@@ -443,7 +577,7 @@ impl DamageMeter {
         // meter, parented to the video overlay in `attach_drag` so it is
         // never clipped by the meter scroller. Its position is anchored to
         // the meter, not the hovered row, so it stays still while rows
-        // rebuild every half second.
+        // reorder.
         let tooltip = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
         tooltip.add_css_class("wr-tooltip");
         tooltip.set_visible(false);
@@ -486,6 +620,8 @@ impl DamageMeter {
             position_ms: Cell::new(0),
             visible: Cell::new(false),
             dirty: Cell::new(false),
+            position_throttled: Cell::new(false),
+            position_pending: Cell::new(false),
             list_cache: RefCell::new(None),
             breakdown: RefCell::new(None),
             spell: RefCell::new(None),
@@ -494,12 +630,11 @@ impl DamageMeter {
             drag_geometry: Cell::new((16, 16, 0, 0)),
             desired_size: Cell::new(None),
             seek: RefCell::new(None),
-            bar_fractions: RefCell::new(HashMap::new()),
+            rows: RefCell::new(HashMap::new()),
             spell_db: RefCell::new(None),
+            spell_db_requested: Cell::new(false),
             icons: RefCell::new(HashMap::new()),
             overlay: RefCell::new(None),
-            hovered_spell: RefCell::new(None),
-            tooltip_rearmed: Cell::new(false),
             tooltip,
             tooltip_icon,
             tooltip_name,
@@ -511,36 +646,6 @@ impl DamageMeter {
         {
             let inner = Rc::clone(&inner);
             close.connect_clicked(move |_| inner.set_visible(false));
-        }
-        // Tooltip drop conditions beyond the icon enter handlers. The
-        // meter-level controller outlives every row: a rebuild destroys the
-        // entered icon without any leave event, so the tooltip is dropped
-        // when the pointer next moves somewhere other than a spell icon, and
-        // when it leaves the meter entirely.
-        {
-            let this = Rc::clone(&inner);
-            let motion = gtk4::EventControllerMotion::new();
-            {
-                let this = Rc::clone(&this);
-                motion.connect_motion(move |_, x, y| {
-                    let over_icon = this
-                        .root
-                        .pick(x, y, gtk4::PickFlags::DEFAULT)
-                        .is_some_and(|picked| is_within_spell_icon(&picked));
-                    if !over_icon {
-                        this.hovered_spell.borrow_mut().take();
-                        this.hide_tooltip();
-                    }
-                });
-            }
-            {
-                let this = Rc::clone(&this);
-                motion.connect_leave(move |_| {
-                    this.hovered_spell.borrow_mut().take();
-                    this.hide_tooltip();
-                });
-            }
-            inner.root.add_controller(motion);
         }
         inner.refresh();
 
@@ -563,7 +668,7 @@ impl DamageMeter {
         inner.breakdown.replace(None);
         inner.spell.replace(None);
         inner.target.replace(TargetSel::All);
-        inner.bar_fractions.borrow_mut().clear();
+        inner.clear_rows();
         inner.refresh();
     }
     /// The playhead moved. Both segment modes are cumulative through the
@@ -576,7 +681,7 @@ impl DamageMeter {
         if position_ms / SAMPLE_INTERVAL_MS != previous_interval
             || inner.current_fight.get() != previous_fight
         {
-            inner.refresh();
+            inner.refresh_for_position();
         }
     }
 
@@ -624,8 +729,9 @@ impl Inner {
     fn set_visible(self: &Rc<Self>, visible: bool) {
         // The tooltip lives on the video overlay, outside the meter: hiding
         // the meter must hide it too or it would float over the video alone.
-        if !visible {
-            self.hovered_spell.borrow_mut().take();
+        if visible {
+            self.request_spell_db();
+        } else {
             self.hide_tooltip();
         }
         self.visible.set(visible);
@@ -801,7 +907,7 @@ impl Inner {
             self.target.replace(TargetSel::All);
             self.breakdown.replace(None);
             self.spell.replace(None);
-            self.bar_fractions.borrow_mut().clear();
+            self.clear_rows();
             self.refresh();
         }
     }
@@ -811,7 +917,7 @@ impl Inner {
             // Pick the Current fight from the last known playhead before the
             // re-render; positions arrived while Overall was shown too.
             self.sync_current_fight();
-            self.bar_fractions.borrow_mut().clear();
+            self.clear_rows();
             self.refresh();
         }
     }
@@ -831,7 +937,7 @@ impl Inner {
     fn set_target(self: &Rc<Self>, target: TargetSel) {
         if *self.target.borrow() != target {
             self.target.replace(target);
-            self.bar_fractions.borrow_mut().clear();
+            self.clear_rows();
             self.refresh();
         }
     }
@@ -851,6 +957,26 @@ impl Inner {
         let fight = self.selected_fight();
         self.rebuild_title(fight.as_ref());
         self.rebuild_content(fight);
+    }
+
+    /// A playhead refresh, throttled: the first move renders at once and
+    /// later moves inside [`POSITION_REFRESH_INTERVAL`] coalesce into one
+    /// trailing refresh, so a timeline drag always ends on its final
+    /// position.
+    fn refresh_for_position(self: &Rc<Self>) {
+        if self.position_throttled.get() {
+            self.position_pending.set(true);
+            return;
+        }
+        self.refresh();
+        self.position_throttled.set(true);
+        let this = Rc::clone(self);
+        gtk4::glib::timeout_add_local_once(POSITION_REFRESH_INTERVAL, move || {
+            this.position_throttled.set(false);
+            if this.position_pending.take() {
+                this.refresh_for_position();
+            }
+        });
     }
 
     /// Mirror the cells into the stateful actions so rebuilt menus mark the
@@ -1091,7 +1217,7 @@ impl Inner {
     ) {
         let top = ranked.first().map_or(1, |(_, total)| *total);
         let counted = is_count_metric(view);
-        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let mut lines = Vec::with_capacity(ranked.len());
         for (rank, (actor, total)) in ranked.iter().enumerate() {
             let right = if fight.elapsed_ms == 0 {
                 format_compact(*total)
@@ -1110,19 +1236,35 @@ impl Inner {
                     format_compact(rate as u64)
                 )
             };
-            let overlay = self.fill_line(
-                Some(&format!("r:{}", actor.guid)),
-                self.class_for(&actor.guid),
-                &format!("{}. {}", rank + 1, actor.name),
-                &right,
+            lines.push(self.actor_line(
+                rank,
+                &actor.guid,
+                &actor.name,
+                right,
                 *total as f64 / top as f64,
-            );
-            let guid = actor.guid.clone();
-            content.append(&self.row_button(&overlay, move |this| {
-                this.breakdown.replace(Some(guid.clone()));
-            }));
+            ));
         }
-        self.set_content(&content);
+        self.set_lines(0, lines);
+    }
+
+    /// A ranking row for one actor; activating it opens the breakdown.
+    fn actor_line(
+        &self,
+        rank: usize,
+        guid: &str,
+        name: &str,
+        right: String,
+        fraction: f64,
+    ) -> Line {
+        Line::Bar(Bar {
+            key: format!("r:{guid}"),
+            class: self.class_for(guid),
+            left: format!("{}. {name}", rank + 1),
+            right,
+            fraction,
+            spell_icon: false,
+            open: Some(Open::Actor(guid.to_owned())),
+        })
     }
 
     fn rebuild_deaths(self: &Rc<Self>, fight: &MeterProjection, selected_guid: Option<&str>) {
@@ -1153,20 +1295,20 @@ impl Inner {
         }
         ranked.sort_by_key(|(_, _, count)| std::cmp::Reverse(*count));
         let top = ranked[0].2;
-        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        for (rank, (guid, name, count)) in ranked.into_iter().enumerate() {
-            let overlay = self.fill_line(
-                Some(&format!("r:{guid}")),
-                self.class_for(&guid),
-                &format!("{}. {name}", rank + 1),
-                &count.to_string(),
-                count as f64 / top as f64,
-            );
-            content.append(&self.row_button(&overlay, move |this| {
-                this.breakdown.replace(Some(guid.clone()));
-            }));
-        }
-        self.set_content(&content);
+        let lines = ranked
+            .iter()
+            .enumerate()
+            .map(|(rank, (guid, name, count))| {
+                self.actor_line(
+                    rank,
+                    guid,
+                    name,
+                    count.to_string(),
+                    *count as f64 / top as f64,
+                )
+            })
+            .collect();
+        self.set_lines(0, lines);
     }
 
     fn rebuild_death_breakdown(self: &Rc<Self>, guid: &str, deaths: &[&MeterDeath]) {
@@ -1205,8 +1347,7 @@ impl Inner {
                 } else {
                     1.0
                 };
-                let row = this.fill_line(
-                    None,
+                let row = fill_line(
                     Some(class),
                     &format!(
                         "-{:.1}s {} ({})",
@@ -1226,12 +1367,12 @@ impl Inner {
                     remaining,
                 );
                 let at_ms = event.at_ms;
-                this.attach_spell_icon(&row, &event.spell_name);
-                content.append(&this.row_button(&row, move |this| this.seek_to(at_ms)));
+                this.attach_spell_icon(&row.line, &event.spell_name);
+                content.append(&this.row_button(&row.overlay, move |this| this.seek_to(at_ms)));
             }
-            let row = this.fill_line(None, Some("wr-death-damage"), "0.0s Death", "", 0.0);
+            let row = fill_line(Some("wr-death-damage"), "0.0s Death", "", 0.0);
             let at_ms = death.at_ms;
-            content.append(&this.row_button(&row, move |this| this.seek_to(at_ms)));
+            content.append(&this.row_button(&row.overlay, move |this| this.seek_to(at_ms)));
             content.upcast()
         });
         self.set_list_content(&key, &list);
@@ -1260,21 +1401,20 @@ impl Inner {
         }
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
         let top = ranked.first().map_or(1, |(_, uptime, _)| *uptime).max(1);
-        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        for (rank, (actor, uptime, apps)) in ranked.iter().enumerate() {
-            let overlay = self.fill_line(
-                Some(&format!("r:{}", actor.guid)),
-                self.class_for(&actor.guid),
-                &format!("{}. {}", rank + 1, actor.name),
-                &format!("{} ({apps})", format_uptime(*uptime)),
-                *uptime as f64 / top as f64,
-            );
-            let guid = actor.guid.clone();
-            content.append(&self.row_button(&overlay, move |this| {
-                this.breakdown.replace(Some(guid.clone()));
-            }));
-        }
-        self.set_content(&content);
+        let lines = ranked
+            .iter()
+            .enumerate()
+            .map(|(rank, (actor, uptime, apps))| {
+                self.actor_line(
+                    rank,
+                    &actor.guid,
+                    &actor.name,
+                    format!("{} ({apps})", format_uptime(*uptime)),
+                    *uptime as f64 / top as f64,
+                )
+            })
+            .collect();
+        self.set_lines(0, lines);
     }
 
     /// The player's buffs: name on the left, applications and their share of
@@ -1306,35 +1446,34 @@ impl Inner {
             return;
         }
         buffs.sort_by(|a, b| b.amount.cmp(&a.amount).then_with(|| a.key.cmp(&b.key)));
-        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
-        for entry in buffs {
-            // The share is relative to the fight's timed window; a buff that
-            // outlived it reads as capped rather than over 100%.
-            let share = if fight.elapsed_ms == 0 {
-                0.0
-            } else {
-                entry.amount as f64 / fight.elapsed_ms as f64
-            };
-            let right = if fight.elapsed_ms == 0 {
-                entry.hits.to_string()
-            } else {
-                format!("{} · {:.0}%", entry.hits, share.min(1.0) * 100.0)
-            };
-            let row = self.fill_line(
-                Some(&format!("b:{}", entry.key)),
-                self.class_for(&actor.guid),
-                &entry.key,
-                &right,
-                share,
-            );
-            self.attach_spell_icon(&row, &entry.key);
-            row.add_css_class("wr-meter-row");
-            let key = entry.key.clone();
-            content.append(&self.row_button(&row, move |this| {
-                this.spell.replace(Some(key.clone()));
-            }));
-        }
-        self.set_content(&content);
+        let class = self.class_for(&actor.guid);
+        let lines = buffs
+            .into_iter()
+            .map(|entry| {
+                // The share is relative to the fight's timed window; a buff
+                // that outlived it reads as capped rather than over 100%.
+                let share = if fight.elapsed_ms == 0 {
+                    0.0
+                } else {
+                    entry.amount as f64 / fight.elapsed_ms as f64
+                };
+                let right = if fight.elapsed_ms == 0 {
+                    entry.hits.to_string()
+                } else {
+                    format!("{} · {:.0}%", entry.hits, share.min(1.0) * 100.0)
+                };
+                Line::Bar(Bar {
+                    key: format!("b:{}", entry.key),
+                    class,
+                    left: entry.key.clone(),
+                    right,
+                    fraction: share,
+                    spell_icon: true,
+                    open: Some(Open::Spell(entry.key.clone())),
+                })
+            })
+            .collect();
+        self.set_lines(4, lines);
     }
 
     /// The actor drilldown in the same scroller: the Spells and Targets lists
@@ -1361,8 +1500,8 @@ impl Inner {
             }
             self.spell.replace(None);
         }
-        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
-        content.append(&heading("Spells"));
+        let class = self.class_for(&actor.guid);
+        let mut lines = vec![Line::Heading("Spells")];
         let spell_total: u64 = actor
             .spells
             .iter()
@@ -1370,12 +1509,10 @@ impl Inner {
             .map(|entry| entry.amount)
             .sum();
         for entry in ranked_spells(actor, view) {
-            let row =
-                self.breakdown_row(&format!("s:{}", entry.key), actor, entry, spell_total, true);
-            let key = entry.key.clone();
-            content.append(&self.row_button(&row, move |this| {
-                this.spell.replace(Some(key.clone()));
-            }));
+            let mut bar =
+                breakdown_bar(format!("s:{}", entry.key), class, entry, spell_total, true);
+            bar.open = Some(Open::Spell(entry.key.clone()));
+            lines.push(Line::Bar(bar));
         }
 
         // Casts keep no target rows, so the heading would stand alone.
@@ -1385,24 +1522,25 @@ impl Inner {
             .filter(|entry| entry.metric == view && matches_target(entry, target))
             .collect();
         if !targets.is_empty() {
-            content.append(&heading(if view == MeterMetric::DamageTaken {
+            lines.push(Line::Heading(if view == MeterMetric::DamageTaken {
                 "Sources"
             } else {
                 "Targets"
             }));
             let target_total: u64 = targets.iter().map(|entry| entry.amount).sum();
             for entry in targets {
-                let row = self.breakdown_row(
-                    &format!("t:{}", entry.key),
-                    actor,
+                // One name can occur under several markers.
+                let key = format!("t:{}:{}", entry.marker, entry.key);
+                lines.push(Line::Bar(breakdown_bar(
+                    key,
+                    class,
                     entry,
                     target_total,
                     false,
-                );
-                content.append(&row);
+                )));
             }
         }
-        self.set_content(&content);
+        self.set_lines(4, lines);
     }
 
     /// One spell's per-hit statistics and its own target split. The spell name
@@ -1440,14 +1578,25 @@ impl Inner {
                 .collect();
             let list = history_list(items, move |(at_ms, target)| {
                 let at_ms = *at_ms;
-                let row = this.fill_line(None, class, &format_mm_ss(at_ms), target, 1.0);
-                this.row_button(&row, move |this| this.seek_to(at_ms))
+                let row = fill_line(class, &format_mm_ss(at_ms), target, 1.0);
+                this.row_button(&row.overlay, move |this| this.seek_to(at_ms))
                     .upcast()
             });
             self.set_list_content(&key, &list);
             return;
         }
-        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        let stat = |label: &str, right: String, fraction: f64| {
+            Line::Bar(Bar {
+                key: format!("stat:{label}"),
+                class,
+                left: label.to_owned(),
+                right,
+                fraction,
+                spell_icon: false,
+                open: None,
+            })
+        };
+        let mut lines = Vec::new();
         let average = if entry.hits == 0 {
             0
         } else {
@@ -1470,19 +1619,9 @@ impl Inner {
             } else {
                 value as f64 / entry.max as f64
             };
-            let row = self.fill_line(
-                Some(&format!("stat:{label}")),
-                class,
-                label,
-                &right,
-                fraction,
-            );
-            row.add_css_class("wr-meter-row");
-            content.append(&row);
+            lines.push(stat(label, right, fraction));
         }
-        let hits = self.fill_line(None, class, "Hits", &entry.hits.to_string(), 1.0);
-        hits.add_css_class("wr-meter-row");
-        content.append(&hits);
+        lines.push(stat("Hits", entry.hits.to_string(), 1.0));
         if view == MeterMetric::Healing {
             let raw = entry.amount + entry.overheal;
             let share = if raw == 0 {
@@ -1490,104 +1629,139 @@ impl Inner {
             } else {
                 entry.overheal as f64 / raw as f64
             };
-            let row = self.fill_line(
-                Some("stat:Overheal"),
-                class,
+            lines.push(stat(
                 "Overheal",
-                &format!("{} {:.1}%", format_compact(entry.overheal), share * 100.0),
+                format!("{} {:.1}%", format_compact(entry.overheal), share * 100.0),
                 share,
-            );
-            row.add_css_class("wr-meter-row");
-            content.append(&row);
+            ));
         }
 
         // A sidecar without the per-spell split would otherwise leave a
         // heading with nothing under it.
         if !entry.targets.is_empty() {
-            content.append(&heading(if view == MeterMetric::DamageTaken {
+            lines.push(Line::Heading(if view == MeterMetric::DamageTaken {
                 "Sources"
             } else {
                 "Targets"
             }));
             for target in &entry.targets {
-                let row = self.breakdown_row(
-                    &format!("st:{}", target.key),
-                    actor,
+                let key = format!("st:{}:{}", target.marker, target.key);
+                lines.push(Line::Bar(breakdown_bar(
+                    key,
+                    class,
                     target,
                     entry.amount,
                     false,
-                );
-                content.append(&row);
+                )));
             }
         }
-        self.set_content(&content);
+        self.set_lines(4, lines);
     }
 
-    /// One breakdown line, sharing the ranking row visual with the fill
-    /// proportional to the share. Spell rows keep hit counts in their detail
-    /// view; target/source rows show them inline.
-    fn breakdown_row(
-        self: &Rc<Self>,
-        key: &str,
-        actor: &ProjectedActor,
-        entry: &ProjectedEntry,
-        total: u64,
-        spell: bool,
-    ) -> gtk4::Overlay {
-        let share = if total == 0 {
-            0.0
-        } else {
-            entry.amount as f64 / total as f64 * 100.0
-        };
-        let right = if spell {
-            format!("{} {:.1}%", format_compact(entry.amount), share)
-        } else {
-            format!(
-                "{} {:.1}% {}",
-                format_compact(entry.amount),
-                share,
-                entry.hits
-            )
-        };
-        let row = self.fill_line(
-            Some(key),
-            self.class_for(&actor.guid),
-            &entry.key,
-            &right,
-            share / 100.0,
-        );
-        row.add_css_class("wr-meter-row");
-        if spell {
-            self.attach_spell_icon(&row, &entry.key);
-        }
-        row
-    }
-
-    /// A ranking row: the fill visual in a flat button that opens the actor's
-    /// breakdown. The click acts on press, in the capture phase, because the
-    /// half-second re-render replaces the button and a `clicked` press/release
-    /// pair straddling it would be dropped.
+    /// A clickable row: the fill visual in a flat button that runs
+    /// `activate`. Rows persist across refreshes, so a plain `clicked` is
+    /// reliable.
     fn row_button(
         self: &Rc<Self>,
         overlay: &gtk4::Overlay,
-        open: impl Fn(&Rc<Self>) + 'static,
+        activate: impl Fn(&Rc<Self>) + 'static,
     ) -> gtk4::Button {
         let button = gtk4::Button::new();
         button.add_css_class("flat");
         button.add_css_class("wr-meter-row");
         button.set_child(Some(overlay));
-        let click = gtk4::GestureClick::new();
-        click.set_button(gtk4::gdk::BUTTON_PRIMARY);
-        click.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let this = Rc::clone(self);
-        click.connect_pressed(move |gesture, _, _, _| {
-            open(&this);
-            this.refresh();
-            gesture.set_state(gtk4::EventSequenceState::Claimed);
-        });
-        button.add_controller(click);
+        button.connect_clicked(move |_| activate(&this));
         button
     }
+
+    /// Navigate into the breakdown or spell detail a keyed row opens.
+    fn open_row(self: &Rc<Self>, open: &Open) {
+        match open {
+            Open::Actor(guid) => self.breakdown.replace(Some(guid.clone())),
+            Open::Spell(key) => self.spell.replace(Some(key.clone())),
+        };
+        self.refresh();
+    }
+    /// Apply `lines` onto the content box: rows whose key is still present
+    /// are updated in place and reordered, new keys get fresh rows, and rows
+    /// whose key vanished are removed.
+    fn set_lines(self: &Rc<Self>, spacing: i32, lines: Vec<Line>) {
+        self.list_cache.borrow_mut().take();
+        if self.scroller.child().as_ref() != Some(self.content.upcast_ref()) {
+            self.scroller.set_child(Some(&self.content));
+        }
+        if self.empty_label.parent().is_some() {
+            self.content.remove(&self.empty_label);
+        }
+        self.content.set_spacing(spacing);
+        let lines: Vec<(String, Line)> = lines.into_iter().map(|line| (line.key(), line)).collect();
+        let keys: HashSet<&str> = lines.iter().map(|(key, _)| key.as_str()).collect();
+        let mut rows = self.rows.borrow_mut();
+        rows.retain(|key, row| {
+            let keep = keys.contains(key.as_str());
+            if !keep {
+                self.remove_row(row);
+            }
+            keep
+        });
+        let mut previous: Option<gtk4::Widget> = None;
+        for (key, line) in &lines {
+            let row = rows.entry(key.clone()).or_insert_with(|| {
+                let row = self.new_row(line);
+                self.content.append(&row.widget());
+                row
+            });
+            let widget = row.widget();
+            if widget.prev_sibling() != previous {
+                self.content.reorder_child_after(&widget, previous.as_ref());
+            }
+            if let (RowWidgets::Bar(row), Line::Bar(bar)) = (&*row, line) {
+                row.update(bar);
+                if bar.spell_icon && !row.has_icon.get() {
+                    row.has_icon
+                        .set(self.attach_spell_icon(&row.line, &bar.left));
+                }
+            }
+            previous = Some(widget);
+        }
+    }
+
+    /// Fresh widgets for a keyed line; `set_lines` fills in the values.
+    fn new_row(self: &Rc<Self>, line: &Line) -> RowWidgets {
+        let bar = match line {
+            Line::Heading(text) => return RowWidgets::Heading(heading(text)),
+            Line::Bar(bar) => bar,
+        };
+        let widgets = bar_widgets(bar.class);
+        widgets.overlay.add_css_class("wr-meter-row");
+        let root = match &bar.open {
+            Some(open) => {
+                let open = open.clone();
+                self.row_button(&widgets.overlay, move |this| this.open_row(&open))
+                    .upcast()
+            }
+            None => widgets.overlay.clone().upcast(),
+        };
+        RowWidgets::Bar(BarRow::new(root, widgets))
+    }
+
+    /// Drop every keyed row; the next `set_lines` builds them afresh.
+    fn clear_rows(&self) {
+        for (_, row) in self.rows.borrow_mut().drain() {
+            self.remove_row(&row);
+        }
+    }
+
+    /// Remove a keyed row's widget. A hovered icon goes with it, and the
+    /// tooltip must not outlive the row it describes.
+    fn remove_row(&self, row: &RowWidgets) {
+        if matches!(row, RowWidgets::Bar(bar) if bar.has_icon.get()) {
+            self.hide_tooltip();
+        }
+        self.content.remove(&row.widget());
+    }
+
     /// Seek the player a beat before `at_ms`, so the event plays rather than
     /// having just happened. Inert until the player installs the callback.
     fn seek_to(&self, at_ms: u64) {
@@ -1605,28 +1779,39 @@ impl Inner {
             .and_then(|spec| class_css_class(*spec))
     }
 
-    /// Load the bundled spell database once, from its gresource JSON.
-    fn load_db(&self) -> Option<Rc<SpellDb>> {
-        if let Some(db) = self.spell_db.borrow().as_ref() {
-            return Some(Rc::clone(db));
+    /// Parse the bundled spell database on GIO's blocking pool the first time
+    /// the meter is shown. Rows render without icons and tooltips until it
+    /// lands; one refresh then adds them.
+    fn request_spell_db(self: &Rc<Self>) {
+        if self.spell_db_requested.replace(true) {
+            return;
         }
-        let db = gtk4::gio::resources_lookup_data(
-            SPELLS_JSON_RESOURCE,
-            gtk4::gio::ResourceLookupFlags::NONE,
-        )
-        .ok()
-        .and_then(|bytes| {
-            let text = std::str::from_utf8(bytes.as_ref()).ok()?;
-            SpellDb::parse(text).ok()
-        })
-        .map(Rc::new)?;
-        *self.spell_db.borrow_mut() = Some(Rc::clone(&db));
-        Some(db)
+        let this = Rc::clone(self);
+        gtk4::glib::spawn_future_local(async move {
+            let parsed = gtk4::gio::spawn_blocking(|| {
+                let bytes = gtk4::gio::resources_lookup_data(
+                    SPELLS_JSON_RESOURCE,
+                    gtk4::gio::ResourceLookupFlags::NONE,
+                )
+                .ok()?;
+                SpellDb::parse(std::str::from_utf8(&bytes).ok()?).ok()
+            })
+            .await;
+            let Ok(Some(db)) = parsed else {
+                tracing::warn!("spell database unavailable; meter spell icons disabled");
+                return;
+            };
+            this.spell_db.replace(Some(db));
+            // A cached history list was built without icons.
+            this.list_cache.borrow_mut().take();
+            this.refresh();
+        });
     }
 
     /// The row's icon basename if the database knows this spell.
-    fn spell_icon_basename(&self, name: &str) -> Option<String> {
-        self.load_db()?.lookup(name).map(|info| info.icon.clone())
+    fn spell_icon_basename(&self, name: &str) -> Option<Box<str>> {
+        let db = self.spell_db.borrow();
+        db.as_ref()?.lookup(name).map(|info| info.icon.clone())
     }
 
     /// A cached icon texture for `basename`, decoded once from the resource.
@@ -1647,62 +1832,47 @@ impl Inner {
         Some(texture)
     }
 
-    /// Prepend a small spell icon to a row and arm its hover tooltip.
-    fn attach_spell_icon(self: &Rc<Self>, row: &gtk4::Overlay, spell: &str) {
+    /// Prepend a small spell icon to a row's label line and arm its hover
+    /// tooltip. False when the spell has no bundled icon.
+    fn attach_spell_icon(self: &Rc<Self>, line: &gtk4::Box, spell: &str) -> bool {
         let Some(basename) = self.spell_icon_basename(spell) else {
-            return;
+            return false;
         };
         let Some(texture) = self.icon_texture(&basename) else {
-            return;
-        };
-        // `fill_line`'s row is an overlay whose main child is the fill bar and
-        // whose overlay child is the label line; find that line Box.
-        let mut next = row.first_child();
-        let line = loop {
-            let Some(child) = next else {
-                return;
-            };
-            next = child.next_sibling();
-            if let Ok(line) = child.downcast::<gtk4::Box>() {
-                break line;
-            }
+            return false;
         };
         let icon = gtk4::Picture::for_paintable(&texture);
         icon.add_css_class("wr-spell-icon");
         icon.set_size_request(SPELL_ICON_SIZE, SPELL_ICON_SIZE);
         line.prepend(&icon);
-        // A rebuild under a stationary pointer replaces the entered icon
-        // without any leave event; mark the spell as re-armed so the tooltip
-        // survives, and let the meter-level motion controller drop it once
-        // the pointer moves off an icon again.
-        if self.hovered_spell.borrow().as_deref() == Some(spell) {
-            self.tooltip_rearmed.set(true);
-        }
-        let this = Rc::clone(self);
-        let spell = spell.to_owned();
+        // Rows persist across refreshes, so the icon's own crossing events
+        // are the whole hover state; GTK also sends `leave` when a hovered
+        // row is removed.
         let motion = gtk4::EventControllerMotion::new();
-        motion.connect_enter(move |_, _, _| {
-            // Playback replaces this icon every 500 ms. GTK emits `enter`
-            // for the replacement under a stationary pointer; the tooltip
-            // is already populated and positioned, so touching it again can
-            // only make it jump during the transient row allocation.
-            if this.hovered_spell.borrow().as_deref() == Some(spell.as_str())
-                && this.tooltip.is_visible()
-            {
-                return;
-            }
-            this.hovered_spell.borrow_mut().replace(spell.clone());
-            this.show_tooltip(&spell);
-        });
+        {
+            let this = Rc::clone(self);
+            let spell = spell.to_owned();
+            motion.connect_enter(move |_, _, _| this.show_tooltip(&spell));
+        }
+        {
+            let this = Rc::clone(self);
+            motion.connect_leave(move |_| this.hide_tooltip());
+        }
         icon.add_controller(motion);
+        true
     }
 
     /// Populate the shared tooltip and place it directly left of the meter,
     /// bottom-aligned with it inside the video overlay.
     /// Anchoring to the meter rather than the hovered row keeps the panel
-    /// still while rows rebuild around it.
+    /// still while rows reorder around it.
     fn show_tooltip(&self, spell: &str) {
-        let Some(info) = self.load_db().and_then(|db| db.lookup(spell).cloned()) else {
+        let Some(info) = self
+            .spell_db
+            .borrow()
+            .as_ref()
+            .and_then(|db| db.lookup(spell).cloned())
+        else {
             return;
         };
         if let Some(texture) = self.icon_texture(&info.icon) {
@@ -1724,7 +1894,7 @@ impl Inner {
         }
         // Both widgets are end/bottom aligned overlay children. Reuse the
         // meter's stable margins and allocated width instead of measuring its
-        // transient height during a playback rebuild. Their lower edges then
+        // height, which follows the row count. Their lower edges then
         // remain level and the tooltip cannot fall into the playback bar.
         let margin_end =
             (self.root.margin_end() + self.root.width() + TOOLTIP_GAP).clamp(0, overlay_width);
@@ -1740,13 +1910,6 @@ impl Inner {
         self.tooltip.set_visible(false);
     }
 
-    /// Replace the scroller content; the empty state label is shown only by
-    /// `show_empty`.
-    fn set_content(&self, content: &impl IsA<gtk4::Widget>) {
-        self.clear_content();
-        self.content.append(content);
-    }
-
     fn show_empty(&self, message: &str) {
         self.clear_content();
         self.empty_label.set_text(message);
@@ -1754,22 +1917,17 @@ impl Inner {
     }
 
     fn clear_content(&self) {
-        // A rebuild replaces every row while the new rows were already
-        // built. If the hovered spell's icon did not come back (the re-arm
-        // flag), the tooltip would describe a row that no longer exists.
-        if self.hovered_spell.borrow().is_some() && !self.tooltip_rearmed.get() {
-            self.hovered_spell.borrow_mut().take();
-            self.hide_tooltip();
-        }
-        self.tooltip_rearmed.set(false);
+        // A history list row may have carried the hovered icon.
+        self.hide_tooltip();
         self.list_cache.borrow_mut().take();
         // A history list may have replaced the content box as the scroller's
         // child; normal content always lives in the box again.
         if self.scroller.child().as_ref() != Some(self.content.upcast_ref()) {
             self.scroller.set_child(Some(&self.content));
         }
-        while let Some(child) = self.content.first_child() {
-            self.content.remove(&child);
+        self.clear_rows();
+        if self.empty_label.parent().is_some() {
+            self.content.remove(&self.empty_label);
         }
     }
 
@@ -1856,91 +2014,92 @@ impl Inner {
         let overlay = self.root.parent().and_downcast::<gtk4::Overlay>()?;
         Some((overlay.width(), overlay.height()))
     }
+}
 
-    /// One dense meter row visual: class-colored fill behind always-white
-    /// labels, left label expanding, right label aligned end. A keyed row
-    /// eases from the fraction last on screen toward `fraction`; a `None`
-    /// key is a static bar that simply jumps.
-    fn fill_line(
-        self: &Rc<Self>,
-        key: Option<&str>,
-        class: Option<&str>,
-        left: &str,
-        right: &str,
-        fraction: f64,
-    ) -> gtk4::Overlay {
-        let fill = gtk4::ProgressBar::new();
-        fill.set_show_text(false);
-        fill.add_css_class("wr-meter-fill");
-        if let Some(class) = class {
-            fill.add_css_class(class);
-        }
-        let target = fraction.clamp(0.0, 1.0);
-        match key {
-            Some(key) => {
-                let start = self.bar_fractions.borrow().get(key).copied().unwrap_or(0.0);
-                fill.set_fraction(start);
-                if (start - target).abs() > f64::EPSILON {
-                    self.animate_fill(&fill, key, start, target);
-                } else {
-                    self.bar_fractions
-                        .borrow_mut()
-                        .insert(key.to_owned(), target);
-                }
-            }
-            None => fill.set_fraction(target),
-        }
-        let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
-        line.set_margin_start(6);
-        line.set_margin_end(6);
-        let left_label = gtk4::Label::new(Some(left));
-        left_label.set_xalign(0.0);
-        left_label.set_hexpand(true);
-        left_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        let right_label = gtk4::Label::new(Some(right));
-        right_label.set_xalign(1.0);
-        right_label.add_css_class("numeric");
-        line.append(&left_label);
-        line.append(&right_label);
-        let overlay = gtk4::Overlay::new();
-        overlay.set_child(Some(&fill));
-        overlay.add_overlay(&line);
-        overlay
+/// The widgets of one dense meter row: class-colored fill behind
+/// always-white labels, left label expanding, right label aligned end.
+struct BarWidgets {
+    overlay: gtk4::Overlay,
+    fill: gtk4::ProgressBar,
+    line: gtk4::Box,
+    left: gtk4::Label,
+    right: gtk4::Label,
+}
+
+fn bar_widgets(class: Option<&str>) -> BarWidgets {
+    let fill = gtk4::ProgressBar::new();
+    fill.set_show_text(false);
+    fill.add_css_class("wr-meter-fill");
+    if let Some(class) = class {
+        fill.add_css_class(class);
     }
+    let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+    line.set_margin_start(6);
+    line.set_margin_end(6);
+    let left = gtk4::Label::new(None);
+    left.set_xalign(0.0);
+    left.set_hexpand(true);
+    left.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    let right = gtk4::Label::new(None);
+    right.set_xalign(1.0);
+    right.add_css_class("numeric");
+    line.append(&left);
+    line.append(&right);
+    let overlay = gtk4::Overlay::new();
+    overlay.set_child(Some(&fill));
+    overlay.add_overlay(&line);
+    BarWidgets {
+        overlay,
+        fill,
+        line,
+        left,
+        right,
+    }
+}
 
-    /// Ease one fill bar from `start` to `target` over [`FILL_ANIMATE_MS`]
-    /// on the frame clock, writing every eased frame back into
-    /// `bar_fractions` so the half-second re-render mid-transition picks up
-    /// the value currently visible and the motion stays continuous.
-    fn animate_fill(self: &Rc<Self>, fill: &gtk4::ProgressBar, key: &str, start: f64, target: f64) {
-        let this = Rc::clone(self);
-        let key = key.to_owned();
-        let begin = Cell::new(None);
-        fill.add_tick_callback(move |fill, clock| {
-            let now = clock.frame_time();
-            let begin = match begin.get() {
-                Some(begin) => begin,
-                None => {
-                    begin.set(Some(now));
-                    now
-                }
-            };
-            let progress = (now - begin) as f64 / (FILL_ANIMATE_MS as f64 * 1_000.0);
-            let eased = if progress >= 1.0 {
-                target
-            } else {
-                // Ease-out cubic: quick off the old position, settling on
-                // the new one.
-                start + (target - start) * (1.0 - (1.0 - progress).powi(3))
-            };
-            fill.set_fraction(eased);
-            this.bar_fractions.borrow_mut().insert(key.clone(), eased);
-            if progress >= 1.0 {
-                gtk4::glib::ControlFlow::Break
-            } else {
-                gtk4::glib::ControlFlow::Continue
-            }
-        });
+/// A static meter row for the virtualized histories: the bar simply shows
+/// `fraction`.
+fn fill_line(class: Option<&str>, left: &str, right: &str, fraction: f64) -> BarWidgets {
+    let widgets = bar_widgets(class);
+    widgets.left.set_label(left);
+    widgets.right.set_label(right);
+    widgets.fill.set_fraction(fraction.clamp(0.0, 1.0));
+    widgets
+}
+
+/// One breakdown line, sharing the ranking row visual with the fill
+/// proportional to the share. Spell rows keep hit counts in their detail
+/// view; target/source rows show them inline.
+fn breakdown_bar(
+    key: String,
+    class: Option<&'static str>,
+    entry: &ProjectedEntry,
+    total: u64,
+    spell: bool,
+) -> Bar {
+    let share = if total == 0 {
+        0.0
+    } else {
+        entry.amount as f64 / total as f64 * 100.0
+    };
+    let right = if spell {
+        format!("{} {:.1}%", format_compact(entry.amount), share)
+    } else {
+        format!(
+            "{} {:.1}% {}",
+            format_compact(entry.amount),
+            share,
+            entry.hits
+        )
+    };
+    Bar {
+        key,
+        class,
+        left: entry.key.clone(),
+        right,
+        fraction: share / 100.0,
+        spell_icon: spell,
+        open: None,
     }
 }
 fn heading(text: &str) -> gtk4::Label {
@@ -2003,20 +2162,6 @@ fn history_list<T: 'static>(
         list_item.set_child(Some(&build(&data)));
     });
     gtk4::ListView::new(Some(gtk4::NoSelection::new(Some(model))), Some(factory))
-}
-
-/// Whether a picked widget is a spell icon, or sits inside one; the
-/// meter-level motion controller uses this to tell a hover that is still
-/// live from a pointer that has moved on to a non-icon part of a row.
-fn is_within_spell_icon(widget: &gtk4::Widget) -> bool {
-    let mut current = Some(widget.clone());
-    while let Some(widget) = current {
-        if widget.has_css_class("wr-spell-icon") {
-            return true;
-        }
-        current = widget.parent();
-    }
-    false
 }
 
 /// A stateful string action for the meter action group.
