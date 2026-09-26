@@ -107,10 +107,6 @@ pub enum ActivityAction {
         draft: Box<RecordingDraft>,
         detected_at_ms: i64,
     },
-    Update {
-        id: RecordingId,
-        item: TimelineItem,
-    },
     Complete {
         id: RecordingId,
         outcome: Outcome,
@@ -511,7 +507,6 @@ fn handle_event(
             spell_name,
             owner_guid.as_deref(),
             at_ms,
-            actions,
         ),
         CombatEvent::UnitDied {
             guid,
@@ -865,18 +860,6 @@ fn update_arena_category(active: &mut ActiveActivity) {
     };
 }
 
-fn push_timeline(
-    active: &mut ActiveActivity,
-    item: TimelineItem,
-    actions: &mut Vec<ActivityAction>,
-) {
-    actions.push(ActivityAction::Update {
-        id: active.id.clone(),
-        item: item.clone(),
-    });
-    active.timeline.push(item);
-}
-
 /// The combatant map written by combatant events: the current round for solo
 /// shuffle, the activity map otherwise.
 fn combatant_target(active: &mut ActiveActivity) -> &mut Combatants {
@@ -972,7 +955,7 @@ fn handle_encounter_start(
         // Mythic+ boss encounter segment: close the open segment, then push a
         // boss segment labelled with the encounter name. The meter fight is
         // cut at the same transition.
-        close_open_segment(active, at_ms, actions);
+        close_open_segment(active, at_ms);
         let label = dungeon_encounter_name(encounter_id)
             .unwrap_or(name)
             .to_string();
@@ -1077,7 +1060,7 @@ fn handle_encounter_end(
         {
             segment.result = Some(success);
         }
-        close_open_segment(active, at_ms, actions);
+        close_open_segment(active, at_ms);
         if let ActiveKind::Challenge(challenge) = &mut active.kind {
             challenge.segments.push(CmSegment {
                 kind: TimelineKind::Trash,
@@ -1111,9 +1094,9 @@ fn handle_encounter_end(
     );
 }
 
-/// Close a currently open challenge segment, emitting its span update. Event
+/// Close a currently open challenge segment into a timeline span. Event
 /// times are monotonic in practice; the span end is clamped defensively.
-fn close_open_segment(active: &mut ActiveActivity, at_ms: i64, actions: &mut Vec<ActivityAction>) {
+fn close_open_segment(active: &mut ActiveActivity, at_ms: i64) {
     let started_at_ms = active.started_at_ms;
     let item = {
         let ActiveKind::Challenge(challenge) = &mut active.kind else {
@@ -1128,7 +1111,7 @@ fn close_open_segment(active: &mut ActiveActivity, at_ms: i64, actions: &mut Vec
         segment.end_ms = Some(at_ms);
         segment_item(started_at_ms, segment)
     };
-    push_timeline(active, item, actions);
+    active.timeline.push(item);
 }
 
 fn segment_item(started_at_ms: i64, segment: &CmSegment) -> TimelineItem {
@@ -1281,7 +1264,7 @@ fn handle_challenge_end(
         }
     }
     if let Some(item) = emitted {
-        push_timeline(active, item, actions);
+        active.timeline.push(item);
     }
     let outcome = match rules {
         Rules::Retail => {
@@ -1382,7 +1365,7 @@ fn handle_arena_start(
             round_number = shuffle.rounds.len();
         }
         if let Some(item) = pending {
-            push_timeline(active, item, actions);
+            active.timeline.push(item);
         }
         // A new round cuts the meter fight at the existing round transition.
         active.meter.cut(at_ms, format!("Round {round_number}"));
@@ -1738,7 +1721,6 @@ fn handle_player_observed(
     spell_name: &str,
     owner_guid: Option<&str>,
     at_ms: i64,
-    actions: &mut Vec<ActivityAction>,
 ) {
     let Some(active) = state.active.as_mut() else {
         return;
@@ -1783,7 +1765,7 @@ fn handle_player_observed(
                 None,
             )
             .expect("bloodlust duration is positive");
-            push_timeline(active, item, actions);
+            active.timeline.push(item);
         }
     }
     // Removals and refreshes only bookkeep the meter; they identified no new
@@ -2015,23 +1997,17 @@ fn handle_unit_died(
                 ));
             }
         }
-        for item in items {
-            push_timeline(active, item, actions);
-        }
+        active.timeline.extend(items);
         return;
     }
 
-    push_timeline(
-        active,
-        TimelineItem::point(
-            TimelineKind::Death,
-            relative,
-            Some(plain_name),
-            Some(outcome),
-            None,
-        ),
-        actions,
-    );
+    active.timeline.push(TimelineItem::point(
+        TimelineKind::Death,
+        relative,
+        Some(plain_name),
+        Some(outcome),
+        None,
+    ));
 
     if rules == Rules::Classic && matches!(active.kind, ActiveKind::Arena(_)) {
         process_classic_arena_death(state, at_ms, config, finished, actions);
@@ -2142,7 +2118,7 @@ fn finish(
     finished: &mut Vec<RecordingDraft>,
     actions: &mut Vec<ActivityAction>,
 ) {
-    finalize_open_items(&mut active, actions);
+    finalize_open_items(&mut active);
     let outcome = match end {
         EndKind::Complete(outcome) => outcome,
         EndKind::Abandon(_) => abandon_outcome(&active),
@@ -2210,7 +2186,7 @@ fn abandon_outcome(active: &ActiveActivity) -> Outcome {
 
 /// Close any open challenge segment as zero length and emit unstarted or
 /// unended solo-shuffle rounds as points.
-fn finalize_open_items(active: &mut ActiveActivity, actions: &mut Vec<ActivityAction>) {
+fn finalize_open_items(active: &mut ActiveActivity) {
     let started_at_ms = active.started_at_ms;
     let mut items = Vec::new();
     match &mut active.kind {
@@ -2233,7 +2209,7 @@ fn finalize_open_items(active: &mut ActiveActivity, actions: &mut Vec<ActivityAc
         _ => {}
     }
     for item in items {
-        push_timeline(active, item, actions);
+        active.timeline.push(item);
     }
 }
 
@@ -3214,6 +3190,19 @@ mod tests {
         fn force_end(&mut self, flavor: GameFlavor, occurred_at_ms: i64) -> Vec<ActivityAction> {
             self.engine.force_end(flavor, occurred_at_ms)
         }
+
+        /// The in-flight activity's timeline, in push order.
+        fn timeline(&self) -> &[TimelineItem] {
+            let state = match self.flavor {
+                GameFlavor::Retail => &self.engine.retail,
+                GameFlavor::Classic => &self.engine.classic,
+                _ => &self.engine.era,
+            };
+            state
+                .active
+                .as_ref()
+                .map_or(&[], |active| active.timeline.as_slice())
+        }
     }
 
     fn encounter_start(encounter_id: u32, name: &str, difficulty_id: u32) -> CombatEvent {
@@ -3312,35 +3301,27 @@ mod tests {
                 affixes: vec![],
             },
         );
-        let ActivityAction::Begin { draft, .. } = &begin[0] else {
-            panic!("expected recording start");
-        };
-        let id = draft.id.clone();
+        assert_eq!(begins(&begin), 1);
 
-        let actions = engine.feed(
-            start + 12_345,
-            bloodlust_cast("Player-1-A", "Evoker-Realm", FRIENDLY_FLAGS),
-        );
+        for _ in 0..2 {
+            engine.feed(
+                start + 12_345,
+                bloodlust_cast("Player-1-A", "Evoker-Realm", FRIENDLY_FLAGS),
+            );
+        }
+        // The duplicate cast adds nothing.
         assert_eq!(
-            actions,
-            vec![ActivityAction::Update {
-                id,
-                item: TimelineItem::span(
-                    TimelineKind::Bloodlust,
-                    12_345,
-                    52_345,
-                    Some("Fury of the Aspects".to_owned()),
-                    None,
-                    None,
-                )
-                .unwrap(),
-            }]
+            engine.timeline(),
+            [TimelineItem::span(
+                TimelineKind::Bloodlust,
+                12_345,
+                52_345,
+                Some("Fury of the Aspects".to_owned()),
+                None,
+                None,
+            )
+            .unwrap()]
         );
-        let duplicate = engine.feed(
-            start + 12_345,
-            bloodlust_cast("Player-1-A", "Evoker-Realm", FRIENDLY_FLAGS),
-        );
-        assert!(duplicate.is_empty());
     }
 
     #[test]
@@ -3368,19 +3349,16 @@ mod tests {
             100_600,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
         );
-        let death = engine.feed(110_000, died("Player-2-A", "Beta-Realm", FRIENDLY_FLAGS));
+        engine.feed(110_000, died("Player-2-A", "Beta-Realm", FRIENDLY_FLAGS));
         assert_eq!(
-            death,
-            vec![ActivityAction::Update {
-                id: id.clone(),
-                item: TimelineItem::point(
-                    TimelineKind::Death,
-                    9_998,
-                    Some("Beta".to_string()),
-                    Some(Outcome::Loss),
-                    None,
-                ),
-            }]
+            engine.timeline(),
+            [TimelineItem::point(
+                TimelineKind::Death,
+                9_998,
+                Some("Beta".to_string()),
+                Some(Outcome::Loss),
+                None,
+            )]
         );
 
         let end = engine.feed(130_000, encounter_end(2587, 16, true));
@@ -3569,29 +3547,23 @@ mod tests {
         );
 
         // Boss pull at 60 s closes the opening trash segment.
-        let boss = engine.feed(60_000, encounter_start(2562, "Vexamus", 8));
+        engine.feed(60_000, encounter_start(2562, "Vexamus", 8));
         assert_eq!(
-            boss,
-            vec![ActivityAction::Update {
-                id: id.clone(),
-                item: TimelineItem::span(TimelineKind::Trash, 0, 60_000, None, None, None).unwrap(),
-            }]
+            engine.timeline(),
+            [TimelineItem::span(TimelineKind::Trash, 0, 60_000, None, None, None).unwrap()]
         );
-        let boss_end = engine.feed(120_000, encounter_end(2562, 8, true));
+        engine.feed(120_000, encounter_end(2562, 8, true));
         assert_eq!(
-            boss_end,
-            vec![ActivityAction::Update {
-                id: id.clone(),
-                item: TimelineItem::span(
-                    TimelineKind::Encounter,
-                    60_000,
-                    120_000,
-                    Some("Vexamus".to_string()),
-                    Some(Outcome::Win),
-                    None
-                )
-                .unwrap(),
-            }]
+            engine.timeline()[1],
+            TimelineItem::span(
+                TimelineKind::Encounter,
+                60_000,
+                120_000,
+                Some("Vexamus".to_string()),
+                Some(Outcome::Win),
+                None
+            )
+            .unwrap()
         );
 
         // End 125 s later: the trailing 5 s trash segment is dropped.
@@ -3659,12 +3631,8 @@ mod tests {
                 duration_ms: 0,
             },
         );
-        let [
-            ActivityAction::Update { .. },
-            ActivityAction::Complete { id, outcome, .. },
-        ] = end.as_slice()
-        else {
-            panic!("expected trailing segment update then Complete, got {end:?}");
+        let [ActivityAction::Complete { id, outcome, .. }] = end.as_slice() else {
+            panic!("expected Complete, got {end:?}");
         };
         assert_eq!(*outcome, Outcome::Abandoned);
         let finished = engine.take_finished(id).unwrap();
@@ -3702,12 +3670,11 @@ mod tests {
         );
         let handoff = engine.feed(60_000, encounter_start(2587, "Eranog", 16));
         let [
-            ActivityAction::Update { .. },
             ActivityAction::Abandon { id, reason, .. },
             ActivityAction::Begin { draft, .. },
         ] = handoff.as_slice()
         else {
-            panic!("expected Update, Abandon, Begin, got {handoff:?}");
+            panic!("expected Abandon, Begin, got {handoff:?}");
         };
         assert_eq!(*reason, AbandonReason::Superseded);
         assert_eq!(draft.category, Category::Raids);
@@ -3787,40 +3754,29 @@ mod tests {
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
         );
         // Enemy death decides round one as a win: round span plus death point.
-        let decided = engine.feed(30_000, died("Player-9-B", "Foe-Realm", ENEMY_FLAGS));
-        assert_eq!(
-            decided,
-            vec![
-                ActivityAction::Update {
-                    id: id.clone(),
-                    item: TimelineItem::span(
-                        TimelineKind::Round,
-                        0,
-                        30_000,
-                        Some("Round 1".to_string()),
-                        Some(Outcome::Win),
-                        None
-                    )
-                    .unwrap(),
-                },
-                ActivityAction::Update {
-                    id: id.clone(),
-                    item: TimelineItem::point(
-                        TimelineKind::Death,
-                        29_998,
-                        Some("Foe".to_string()),
-                        Some(Outcome::Win),
-                        None
-                    ),
-                },
-            ]
-        );
+        engine.feed(30_000, died("Player-9-B", "Foe-Realm", ENEMY_FLAGS));
+        let decided = [
+            TimelineItem::span(
+                TimelineKind::Round,
+                0,
+                30_000,
+                Some("Round 1".to_string()),
+                Some(Outcome::Win),
+                None,
+            )
+            .unwrap(),
+            TimelineItem::point(
+                TimelineKind::Death,
+                29_998,
+                Some("Foe".to_string()),
+                Some(Outcome::Win),
+                None,
+            ),
+        ];
+        assert_eq!(engine.timeline(), decided);
         // A second death in the same round is dropped entirely.
-        assert!(
-            engine
-                .feed(31_000, died("Player-8-B", "Ally-Realm", FRIENDLY_FLAGS))
-                .is_empty()
-        );
+        engine.feed(31_000, died("Player-8-B", "Ally-Realm", FRIENDLY_FLAGS));
+        assert_eq!(engine.timeline(), decided);
 
         // Round two: no duplicate Begin, fresh round roster.
         let round_two = engine.feed(60_000, start);
@@ -3839,20 +3795,17 @@ mod tests {
                 team_1_mmr: 1_500,
             },
         );
-        // The undecided round two is emitted as a point, then the game
-        // completes as a win.
-        let [
-            ActivityAction::Update { item, .. },
-            ActivityAction::Complete { outcome, .. },
-        ] = end.as_slice()
-        else {
-            panic!("expected round point then Complete, got {end:?}");
+        // The undecided round two is kept as a point, and the game completes
+        // as a win.
+        let [ActivityAction::Complete { outcome, .. }] = end.as_slice() else {
+            panic!("expected Complete, got {end:?}");
         };
-        assert_eq!(item.kind(), &TimelineKind::Round);
-        assert_eq!(item.label(), Some("Round 2"));
         assert_eq!(*outcome, Outcome::Win);
 
         let finished = engine.take_finished(&id).unwrap();
+        let round_two = finished.timeline.last().unwrap();
+        assert_eq!(round_two.kind(), &TimelineKind::Round);
+        assert_eq!(round_two.label(), Some("Round 2"));
         assert_eq!(
             finished.title.as_deref(),
             Some("Alpha - Solo Shuffle Blade's Edge (1-1)")
@@ -4003,9 +3956,8 @@ mod tests {
         }
         engine.feed(30_000, died("Player-9-B", "Foe-Realm", ENEMY_FLAGS));
         let end = engine.feed(40_000, died("Player-8-B", "Bane-Realm", ENEMY_FLAGS));
-        // Second enemy death empties their team: death marker then Complete.
+        // Second enemy death empties their team.
         let [
-            ActivityAction::Update { .. },
             ActivityAction::Complete {
                 outcome,
                 ended_at_ms,
@@ -4013,7 +3965,7 @@ mod tests {
             },
         ] = end.as_slice()
         else {
-            panic!("expected Update then Complete, got {end:?}");
+            panic!("expected Complete, got {end:?}");
         };
         assert_eq!(*outcome, Outcome::Win);
         assert_eq!(*ended_at_ms, 40_000);

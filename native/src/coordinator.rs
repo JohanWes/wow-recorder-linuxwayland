@@ -735,13 +735,6 @@ impl Coordinator {
                 draft,
                 detected_at_ms,
             } => self.begin(*draft, detected_at_ms),
-            ActivityAction::Update { id, item } => {
-                if let Some(active) = self.active.as_mut()
-                    && active.draft.id == id
-                {
-                    active.draft.timeline.push(item);
-                }
-            }
             ActivityAction::Complete { id, .. } | ActivityAction::Abandon { id, .. } => {
                 let Some(draft) = self.engine.take_finished(&id) else {
                     return;
