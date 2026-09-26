@@ -9,6 +9,9 @@ config-opts:
   - -Dportal=true
   - -Dapp_audio=false
   - -Dplugin_examples=false
+cleanup:
+  # Example shell scripts for manual gpu-screen-recorder use.
+  - /share/gpu-screen-recorder
 post-install:
   - rm -f /app/bin/gsr-kms-server
   - install -Dm644 ../LICENSE /app/share/licenses/$FLATPAK_ID/gpu-screen-recorder-LICENSE

@@ -39,9 +39,13 @@ modules:
       append-path: /usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/warcraft-recorder/cargo
+        CARGO_PROFILE_RELEASE_LTO: fat
+        CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
     build-commands:
       - cargo --offline build --manifest-path native/Cargo.toml --release --features development
       - install -Dm755 native/target/release/warcraft-recorder /app/bin/warcraft-recorder
+      - install -d /app/share/warcraft-recorder
+      - glib-compile-resources --sourcedir=data --target=/app/share/warcraft-recorder/spells.gresource data/spells.gresource.xml
       - install -Dm644 data/io.github.JohanWes.WarcraftRecorder.Devel.desktop /app/share/applications/io.github.JohanWes.WarcraftRecorder.Devel.desktop
       - install -Dm644 data/io.github.JohanWes.WarcraftRecorder.Devel.metainfo.xml /app/share/metainfo/io.github.JohanWes.WarcraftRecorder.Devel.metainfo.xml
       - install -Dm644 data/icons/io.github.JohanWes.WarcraftRecorder.Devel.svg /app/share/icons/hicolor/scalable/apps/io.github.JohanWes.WarcraftRecorder.Devel.svg

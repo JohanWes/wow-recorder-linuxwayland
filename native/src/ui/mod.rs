@@ -187,8 +187,7 @@ pub enum Registration {
 /// primary registration can emit `startup` immediately, which is why
 /// resources and the provider hookup are connected before `register`.
 pub fn register(app_id: &'static str) -> Result<Registration, gtk4::glib::Error> {
-    gtk4::gio::resources_register_include!("warcraft-recorder.gresource")
-        .expect("register compiled GResource bundle");
+    register_ui_resources();
 
     let application = adw::Application::builder().application_id(app_id).build();
 
@@ -212,6 +211,41 @@ pub fn register(app_id: &'static str) -> Result<Registration, gtk4::glib::Error>
         Ok(Registration::Secondary(application))
     } else {
         Ok(Registration::Primary(application))
+    }
+}
+
+/// `include_bytes!` is only byte-aligned; GIO copies unaligned resource data
+/// to the heap, so over-align it to keep the embedded bundle zero-copy.
+#[repr(C, align(8))]
+struct Aligned<T: ?Sized>(T);
+
+static UI_RESOURCES: &Aligned<[u8]> = &Aligned(*include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/warcraft-recorder.gresource"
+)));
+
+/// Register the embedded UI bundle (CSS, icons) that `startup` needs.
+fn register_ui_resources() {
+    let bytes = gtk4::glib::Bytes::from_static(&UI_RESOURCES.0);
+    let resource =
+        gtk4::gio::Resource::from_data(&bytes).expect("register compiled GResource bundle");
+    gtk4::gio::resources_register(&resource);
+}
+
+/// Register the spell bundle by mmap. The Flatpak installs it beside the
+/// app; development runs fall back to the copy `build.rs` compiled. Without
+/// it the damage meter shows no spell icons or tooltips. Called from `run`,
+/// after logging is up and only in the primary instance.
+fn register_spell_resources() {
+    let spells = [
+        "/app/share/warcraft-recorder/spells.gresource",
+        concat!(env!("OUT_DIR"), "/spells.gresource"),
+    ]
+    .into_iter()
+    .find_map(|path| gtk4::gio::Resource::load(path).ok());
+    match spells {
+        Some(resource) => gtk4::gio::resources_register(&resource),
+        None => tracing::warn!("spell resource bundle not found; spell icons disabled"),
     }
 }
 
@@ -280,6 +314,7 @@ pub fn run(
     tray: Option<Rc<TrayBackend>>,
     tray_events: Receiver<TrayEvent>,
 ) -> i32 {
+    register_spell_resources();
     let shell: Rc<RefCell<Option<window::Shell>>> = Rc::new(RefCell::new(None));
     {
         let shell_cell = Rc::clone(&shell);
