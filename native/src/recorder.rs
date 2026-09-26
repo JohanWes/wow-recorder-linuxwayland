@@ -55,14 +55,6 @@ pub struct StartRequest {
     pub id: RecordingId,
     /// Detection delay plus lead-in, already clamped by the coordinator.
     pub requested_replay_ms: u64,
-    pub mode: RecordingMode,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CaptureStarted {
-    pub id: RecordingId,
-    pub requested_replay_ms: u64,
-    pub regular_started_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,7 +121,6 @@ pub enum RecorderEvent {
     },
     RestartScheduled {
         attempt: u32,
-        at_ms: i64,
     },
     Restarted,
     /// A requested end resolved: `None` means the bounded wait produced no
@@ -401,8 +392,9 @@ impl Recorder {
     }
 
     /// Register the replay wait, save the pre-roll (SIGUSR1), and start the
-    /// regular recording (SIGRTMIN). Never waits for media.
-    pub fn begin(&mut self, request: StartRequest) -> Result<CaptureStarted, RecorderError> {
+    /// regular recording (SIGRTMIN). Never waits for media. Returns the
+    /// regular recording's wall-clock start.
+    pub fn begin(&mut self, request: StartRequest) -> Result<i64, RecorderError> {
         // A pending end still owns the hook events GSR has yet to write, and
         // `resolve_end` clears whatever is left over. Starting here would let
         // it swallow the new capture's replay event, costing it the entire
@@ -412,21 +404,17 @@ impl Recorder {
             return Err(RecorderError::Busy);
         }
         let child = self.live_child()?;
-        let started = CaptureStarted {
-            id: request.id.clone(),
-            requested_replay_ms: request.requested_replay_ms,
-            regular_started_at_ms: now_wall_ms(),
-        };
+        let regular_started_at_ms = now_wall_ms();
         process::send_signal(child, libc::SIGUSR1)?;
         process::send_signal(child, process::sigrtmin())?;
         self.last_toggle_at = Some(Instant::now());
         self.active = Some(ActiveCapture {
             id: request.id,
             requested_replay_ms: request.requested_replay_ms,
-            regular_started_at_ms: started.regular_started_at_ms,
+            regular_started_at_ms,
             replay_deadline: Instant::now() + self.timeouts.replay_event,
         });
-        Ok(started)
+        Ok(regular_started_at_ms)
     }
 
     /// Stop the regular recording and resolve its artifacts through `poll`.
@@ -782,11 +770,9 @@ impl Recorder {
     fn schedule_restart(&mut self, now_ms: i64, events: &mut Vec<RecorderEvent>) {
         self.restart_attempts += 1;
         let delay_seconds = MAX_RESTART_DELAY_SECONDS.min(1u64 << self.restart_attempts.min(63));
-        let at_ms = now_ms + (delay_seconds * 1_000) as i64;
-        self.restart_at_ms = Some(at_ms);
+        self.restart_at_ms = Some(now_ms + (delay_seconds * 1_000) as i64);
         events.push(RecorderEvent::RestartScheduled {
             attempt: self.restart_attempts,
-            at_ms,
         });
     }
 
@@ -1217,20 +1203,17 @@ mod tests {
         assert_eq!(fs::read(Recorder::events_path(&config)).unwrap(), b"");
 
         let id = RecordingId::new();
-        let started = recorder
+        recorder
             .begin(StartRequest {
                 id: id.clone(),
                 requested_replay_ms: 12_000,
-                mode: RecordingMode::Automatic,
             })
             .unwrap();
-        assert_eq!(started.requested_replay_ms, 12_000);
         // A second begin cannot disturb the active session.
         assert!(matches!(
             recorder.begin(StartRequest {
                 id: RecordingId::new(),
                 requested_replay_ms: 0,
-                mode: RecordingMode::Manual,
             }),
             Err(RecorderError::Busy)
         ));
@@ -1259,6 +1242,7 @@ mod tests {
         let artifacts = artifacts.expect("regular artifact");
         assert_eq!(artifacts.replay.as_deref(), Some(replay.as_path()));
         assert_eq!(artifacts.regular, regular);
+        assert_eq!(artifacts.requested_replay_ms, 12_000);
         assert!(artifacts.regular_stopped_at_ms >= artifacts.regular_started_at_ms);
         // The ignored events surface as one bounded diagnostic.
         let events = recorder.poll(now_wall_ms());
@@ -1282,7 +1266,6 @@ mod tests {
             .begin(StartRequest {
                 id: id.clone(),
                 requested_replay_ms: 5_000,
-                mode: RecordingMode::Automatic,
             })
             .unwrap();
         let regular = Recorder::regular_dir(&config).join("Video_1.mkv");
@@ -1301,7 +1284,6 @@ mod tests {
             .begin(StartRequest {
                 id: id.clone(),
                 requested_replay_ms: 0,
-                mode: RecordingMode::Test(Category::Raids),
             })
             .unwrap();
         recorder.request_end(&id).unwrap();
@@ -1314,7 +1296,6 @@ mod tests {
             recorder.begin(StartRequest {
                 id: RecordingId::new(),
                 requested_replay_ms: 0,
-                mode: RecordingMode::Manual,
             }),
             Err(RecorderError::NotArmed)
         ));
@@ -1333,7 +1314,6 @@ mod tests {
             .begin(StartRequest {
                 id: id.clone(),
                 requested_replay_ms: 0,
-                mode: RecordingMode::Automatic,
             })
             .unwrap();
         let started = Instant::now();
@@ -1349,11 +1329,10 @@ mod tests {
         recorder.arm(&config).unwrap();
 
         let id = RecordingId::new();
-        let started = recorder
+        let started_at_ms = recorder
             .begin(StartRequest {
                 id: id.clone(),
                 requested_replay_ms: 12_000,
-                mode: RecordingMode::Automatic,
             })
             .unwrap();
         let stale_regular = Recorder::regular_dir(&config).join("Video_stale.mkv");
@@ -1366,7 +1345,7 @@ mod tests {
         // regular directory, so only its timestamp distinguishes it.
         append_event_at(&config, 0, "regular", &stale_regular);
         // The pre-roll event arrives exactly when the recording began.
-        append_event_at(&config, started.regular_started_at_ms, "replay", &replay);
+        append_event_at(&config, started_at_ms, "replay", &replay);
 
         recorder.request_end(&id).unwrap();
         let stopped_at_ms = recorder.ending.as_ref().unwrap().regular_stopped_at_ms;
@@ -1402,16 +1381,17 @@ mod tests {
             process::send_signal(recorder.child.as_ref().unwrap(), libc::SIGKILL).unwrap();
             recorder.child.as_mut().unwrap().wait().unwrap();
             let events = recorder.poll(now_ms);
-            let scheduled = events.iter().find_map(|event| match event {
-                RecorderEvent::RestartScheduled { at_ms, .. } => Some(at_ms - now_ms),
-                _ => None,
-            });
             assert!(
                 events
                     .iter()
                     .any(|event| matches!(event, RecorderEvent::ChildExited { .. }))
             );
-            let delay = scheduled.expect("restart scheduled");
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, RecorderEvent::RestartScheduled { .. }))
+            );
+            let delay = recorder.restart_at_ms.expect("restart scheduled") - now_ms;
             delays.push(delay);
             // Nothing happens before the deadline.
             assert!(recorder.poll(now_ms + delay - 1).is_empty());
@@ -1431,20 +1411,16 @@ mod tests {
         process::send_signal(recorder.child.as_ref().unwrap(), libc::SIGKILL).unwrap();
         recorder.child.as_mut().unwrap().wait().unwrap();
         let events = recorder.poll(now_ms);
-        assert!(events.contains(&RecorderEvent::RestartScheduled {
-            attempt: 7,
-            at_ms: now_ms + 30_000,
-        }));
+        assert!(events.contains(&RecorderEvent::RestartScheduled { attempt: 7 }));
+        assert_eq!(recorder.restart_at_ms, Some(now_ms + 30_000));
         let events = recorder.poll(now_ms + 30_000);
         assert!(
             events
                 .iter()
                 .any(|event| matches!(event, RecorderEvent::RestartFailed { .. }))
         );
-        let retry_at = events.iter().find_map(|event| match event {
-            RecorderEvent::RestartScheduled { at_ms, .. } => Some(*at_ms),
-            _ => None,
-        });
+        assert!(events.contains(&RecorderEvent::RestartScheduled { attempt: 8 }));
+        let retry_at = recorder.restart_at_ms;
         assert_eq!(retry_at, Some(now_ms + 60_000));
         fs::remove_file(config.data_dir.join("fake-exit")).unwrap();
         assert!(
@@ -1459,10 +1435,8 @@ mod tests {
         process::send_signal(recorder.child.as_ref().unwrap(), libc::SIGKILL).unwrap();
         recorder.child.as_mut().unwrap().wait().unwrap();
         let events = recorder.poll(now_ms);
-        assert!(events.contains(&RecorderEvent::RestartScheduled {
-            attempt: 1,
-            at_ms: now_ms + 2_000,
-        }));
+        assert!(events.contains(&RecorderEvent::RestartScheduled { attempt: 1 }));
+        assert_eq!(recorder.restart_at_ms, Some(now_ms + 2_000));
         assert!(
             recorder
                 .poll(now_ms + 2_000)
@@ -1474,10 +1448,8 @@ mod tests {
         process::send_signal(recorder.child.as_ref().unwrap(), libc::SIGKILL).unwrap();
         recorder.child.as_mut().unwrap().wait().unwrap();
         let events = recorder.poll(now_ms);
-        assert!(events.contains(&RecorderEvent::RestartScheduled {
-            attempt: 1,
-            at_ms: now_ms + 2_000,
-        }));
+        assert!(events.contains(&RecorderEvent::RestartScheduled { attempt: 1 }));
+        assert_eq!(recorder.restart_at_ms, Some(now_ms + 2_000));
 
         // Shutdown cancels the pending restart and leaves no child.
         recorder.shutdown().unwrap();
@@ -1592,7 +1564,6 @@ mod tests {
             recorder.begin(StartRequest {
                 id: RecordingId::new(),
                 requested_replay_ms: 0,
-                mode: RecordingMode::Automatic,
             }),
             Err(RecorderError::NotArmed)
         ));
@@ -1630,7 +1601,6 @@ mod tests {
             .begin(StartRequest {
                 id: RecordingId::new(),
                 requested_replay_ms: 0,
-                mode: RecordingMode::Test(Category::Raids),
             })
             .unwrap();
         recorder.shutdown().unwrap();

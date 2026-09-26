@@ -831,14 +831,13 @@ impl Coordinator {
         let request = StartRequest {
             id: draft.id.clone(),
             requested_replay_ms,
-            mode: mode.clone(),
         };
         match self.recorder.begin(request) {
-            Ok(started) => {
+            Ok(started_unix_ms) => {
                 self.active = Some(ActiveRecording {
                     draft,
                     mode,
-                    started_unix_ms: started.regular_started_at_ms,
+                    started_unix_ms,
                     requested_replay_ms,
                     stop_at_ms: None,
                 });
