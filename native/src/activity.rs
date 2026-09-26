@@ -390,14 +390,13 @@ fn handle_event(
     actions: &mut Vec<ActivityAction>,
 ) {
     match event {
-        CombatEvent::ZoneChanged { zone_id, .. } => {
+        CombatEvent::ZoneChanged { zone_id } => {
             handle_zone_change(state, rules, *zone_id, at_ms, config, finished, actions);
         }
         CombatEvent::EncounterStarted {
             encounter_id,
             name,
             difficulty_id,
-            ..
         } => handle_encounter_start(
             state,
             rules,
@@ -412,7 +411,6 @@ fn handle_event(
         CombatEvent::EncounterEnded {
             difficulty_id,
             success,
-            ..
         } => handle_encounter_end(
             state,
             rules,
@@ -428,14 +426,12 @@ fn handle_event(
             map_id,
             level,
             affixes,
-            ..
         } => handle_challenge_start(
             state, rules, *zone_id, *map_id, *level, affixes, at_ms, config, actions,
         ),
         CombatEvent::ChallengeEnded {
             success,
             duration_ms,
-            ..
         } => handle_challenge_end(
             state,
             rules,
@@ -452,9 +448,7 @@ fn handle_event(
         } => handle_arena_start(
             state, rules, *zone_id, match_type, at_ms, config, finished, actions,
         ),
-        CombatEvent::ArenaEnded {
-            winning_team_id, ..
-        } => handle_arena_end(
+        CombatEvent::ArenaEnded { winning_team_id } => handle_arena_end(
             state,
             rules,
             *winning_team_id,
@@ -617,7 +611,6 @@ fn handle_event(
             source_name,
             source_flags,
             dest_name,
-            dest_flags: _,
             dest_raid_marker,
             spell_name,
         } => {
@@ -638,7 +631,6 @@ fn handle_event(
             source_name,
             source_flags,
             dest_name,
-            dest_flags: _,
             dest_raid_marker,
             spell_name,
         } => {
@@ -671,7 +663,6 @@ fn handle_event(
         CombatEvent::BossCast {
             source_name,
             spell_name,
-            ..
         } => handle_boss_cast(state, rules, source_name, spell_name),
     }
 }
@@ -3165,17 +3156,12 @@ mod tests {
             encounter_id,
             name: name.to_string(),
             difficulty_id,
-            group_size: 20,
-            instance_id: 1,
         }
     }
 
-    fn encounter_end(encounter_id: u32, difficulty_id: u32, success: bool) -> CombatEvent {
+    fn encounter_end(difficulty_id: u32, success: bool) -> CombatEvent {
         CombatEvent::EncounterEnded {
-            encounter_id,
-            name: String::new(),
             difficulty_id,
-            group_size: 20,
             success,
         }
     }
@@ -3249,7 +3235,6 @@ mod tests {
         let begin = engine.feed(
             start,
             CombatEvent::ChallengeStarted {
-                name: "The Stonevault".to_owned(),
                 zone_id: 2286,
                 map_id: 377,
                 level: 10,
@@ -3311,7 +3296,7 @@ mod tests {
             )]
         );
 
-        let end = engine.feed(130_000, encounter_end(2587, 16, true));
+        let end = engine.feed(130_000, encounter_end(16, true));
         assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
 
         let finished = engine.take_finished(&id).expect("finished draft");
@@ -3371,7 +3356,7 @@ mod tests {
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
         );
         // 5 s wipe + 3 s default overrun = 8 s < the 15 s minimum.
-        let end = engine.feed(5_000, encounter_end(2587, 16, false));
+        let end = engine.feed(5_000, encounter_end(16, false));
         assert_eq!(
             end,
             vec![ActivityAction::Discard {
@@ -3389,7 +3374,7 @@ mod tests {
     fn raid_without_identified_player_is_discarded() {
         let mut engine = Engine::new(GameFlavor::Retail);
         engine.feed(0, encounter_start(2587, "Eranog", 16));
-        let end = engine.feed(60_000, encounter_end(2587, 16, true));
+        let end = engine.feed(60_000, encounter_end(16, true));
         assert!(matches!(
             end.as_slice(),
             [ActivityAction::Discard {
@@ -3412,7 +3397,7 @@ mod tests {
         let mut engine = Engine::new(GameFlavor::Retail);
         engine.config.record_raids = false;
         let start = engine.feed(0, encounter_start(2587, "Eranog", 16));
-        let end = engine.feed(60_000, encounter_end(2587, 16, true));
+        let end = engine.feed(60_000, encounter_end(16, true));
         assert!(start.is_empty() && end.is_empty());
     }
 
@@ -3433,7 +3418,6 @@ mod tests {
             let actions = engine.feed(
                 0,
                 CombatEvent::ChallengeStarted {
-                    name: "Midnight Season 2".to_string(),
                     zone_id,
                     map_id,
                     level: 10,
@@ -3469,7 +3453,6 @@ mod tests {
         let actions = engine.feed(
             0,
             CombatEvent::ChallengeStarted {
-                name: "Algeth'ar Academy".to_string(),
                 zone_id: 2526,
                 map_id: 402,
                 level: 10,
@@ -3495,7 +3478,7 @@ mod tests {
             engine.timeline(),
             [TimelineItem::span(TimelineKind::Trash, 0, 60_000, None, None, None).unwrap()]
         );
-        engine.feed(120_000, encounter_end(2562, 8, true));
+        engine.feed(120_000, encounter_end(8, true));
         assert_eq!(
             engine.timeline()[1],
             TimelineItem::span(
@@ -3513,7 +3496,6 @@ mod tests {
         let end = engine.feed(
             125_000,
             CombatEvent::ChallengeEnded {
-                zone_id: 2526,
                 success: true,
                 duration_ms: 1_400_000,
             },
@@ -3549,7 +3531,6 @@ mod tests {
         engine.feed(
             0,
             CombatEvent::ChallengeStarted {
-                name: "Algeth'ar Academy".to_string(),
                 zone_id: 2526,
                 map_id: 402,
                 level: 10,
@@ -3564,7 +3545,6 @@ mod tests {
         let end = engine.feed(
             600_000,
             CombatEvent::ChallengeEnded {
-                zone_id: 2526,
                 success: false,
                 duration_ms: 0,
             },
@@ -3594,7 +3574,6 @@ mod tests {
         engine.feed(
             0,
             CombatEvent::ChallengeStarted {
-                name: "Algeth'ar Academy".to_string(),
                 zone_id: 2526,
                 map_id: 402,
                 level: 10,
@@ -3645,8 +3624,6 @@ mod tests {
                 240_000,
                 CombatEvent::ArenaEnded {
                     winning_team_id: winning_team,
-                    team_0_mmr: 1_500,
-                    team_1_mmr: 1_500,
                 },
             );
             assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
@@ -3718,14 +3695,7 @@ mod tests {
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
         );
 
-        let end = engine.feed(
-            90_000,
-            CombatEvent::ArenaEnded {
-                winning_team_id: 0,
-                team_0_mmr: 1_500,
-                team_1_mmr: 1_500,
-            },
-        );
+        let end = engine.feed(90_000, CombatEvent::ArenaEnded { winning_team_id: 0 });
         // The undecided round two is kept as a point, and the game completes
         // as a win.
         assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
@@ -3762,14 +3732,7 @@ mod tests {
     #[test]
     fn retail_battleground_estimates_result_from_deaths() {
         let mut engine = Engine::new(GameFlavor::Retail);
-        let actions = engine.feed(
-            0,
-            CombatEvent::ZoneChanged {
-                zone_id: 30,
-                name: "Alterac Valley".to_string(),
-                instance_id: 30,
-            },
-        );
+        let actions = engine.feed(0, CombatEvent::ZoneChanged { zone_id: 30 });
         let ActivityAction::Begin { draft, .. } = &actions[0] else {
             panic!("expected Begin");
         };
@@ -3787,14 +3750,7 @@ mod tests {
         ] {
             engine.feed(at_ms, died(guid, name, flags));
         }
-        let end = engine.feed(
-            600_000,
-            CombatEvent::ZoneChanged {
-                zone_id: 1,
-                name: "Durotar".to_string(),
-                instance_id: 1,
-            },
-        );
+        let end = engine.feed(600_000, CombatEvent::ZoneChanged { zone_id: 1 });
         assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
         let finished = engine.take_finished(&id).unwrap();
         assert_eq!(finished.outcome, Some(Outcome::Loss));
@@ -3821,7 +3777,7 @@ mod tests {
             200,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
         );
-        let end = engine.feed(60_000, encounter_end(1107, 9, true));
+        let end = engine.feed(60_000, encounter_end(9, true));
         assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
         let finished = engine.take_finished(&id).unwrap();
         assert_eq!(finished.outcome, Some(Outcome::Win));
@@ -3836,14 +3792,7 @@ mod tests {
     #[test]
     fn classic_arena_death_driven_end() {
         let mut engine = Engine::new(GameFlavor::Classic);
-        let actions = engine.feed(
-            0,
-            CombatEvent::ZoneChanged {
-                zone_id: 559,
-                name: "Nagrand Arena".to_string(),
-                instance_id: 559,
-            },
-        );
+        let actions = engine.feed(0, CombatEvent::ZoneChanged { zone_id: 559 });
         assert_eq!(begins(&actions), 1);
         let ActivityAction::Begin { draft, .. } = &actions[0] else {
             panic!("expected Begin");
@@ -3891,7 +3840,6 @@ mod tests {
         let actions = engine.feed(
             0,
             CombatEvent::ChallengeStarted {
-                name: "Mogu'shan Palace".to_string(),
                 zone_id: 994,
                 map_id: 60,
                 level: 1,
@@ -3911,7 +3859,6 @@ mod tests {
         let end = engine.feed(
             900_000,
             CombatEvent::ChallengeEnded {
-                zone_id: 994,
                 success: false,
                 duration_ms: 900_000,
             },
@@ -3947,7 +3894,7 @@ mod tests {
             200,
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
         );
-        let end = engine.feed(60_000, encounter_end(1107, 9, true));
+        let end = engine.feed(60_000, encounter_end(9, true));
         assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
         let finished = engine.take_finished(&id).unwrap();
         assert_eq!(finished.outcome, Some(Outcome::Win));
@@ -3960,17 +3907,10 @@ mod tests {
         engine.feed(0, encounter_start(2587, "Eranog", 16));
         // A classic battleground begins its own activity.
         engine.flavor = GameFlavor::Classic;
-        let classic = engine.feed(
-            1_000,
-            CombatEvent::ZoneChanged {
-                zone_id: 30,
-                name: "Alterac Valley".to_string(),
-                instance_id: 30,
-            },
-        );
+        let classic = engine.feed(1_000, CombatEvent::ZoneChanged { zone_id: 30 });
         assert_eq!(begins(&classic), 1);
         engine.flavor = GameFlavor::Unknown("ptr_x".to_string());
-        let unknown = engine.feed(2_000, encounter_end(2587, 16, true));
+        let unknown = engine.feed(2_000, encounter_end(16, true));
         assert!(unknown.is_empty());
         // The retail raid is still in flight and only retail can end it.
         assert!(engine.force_end(GameFlavor::Era, 3_000).is_empty());

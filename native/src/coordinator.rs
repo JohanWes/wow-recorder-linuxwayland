@@ -1890,66 +1890,39 @@ fn test_events(
     let (start, end) = match category {
         Category::TwoVTwo => (
             arena(2547, "2v2"),
-            CombatEvent::ArenaEnded {
-                winning_team_id: 0,
-                team_0_mmr: 1673,
-                team_1_mmr: 1668,
-            },
+            CombatEvent::ArenaEnded { winning_team_id: 0 },
         ),
         Category::ThreeVThree => (
             arena(980, "3v3"),
-            CombatEvent::ArenaEnded {
-                winning_team_id: 0,
-                team_0_mmr: 1673,
-                team_1_mmr: 1668,
-            },
+            CombatEvent::ArenaEnded { winning_team_id: 0 },
         ),
         Category::SoloShuffle => (
             arena(2547, "Rated Solo Shuffle"),
-            CombatEvent::ArenaEnded {
-                winning_team_id: 0,
-                team_0_mmr: 1673,
-                team_1_mmr: 1668,
-            },
+            CombatEvent::ArenaEnded { winning_team_id: 0 },
         ),
         Category::Raids => (
             CombatEvent::EncounterStarted {
                 encounter_id: 2820,
                 name: "Test Encounter".to_owned(),
                 difficulty_id: 16,
-                group_size: 20,
-                instance_id: 2549,
             },
             CombatEvent::EncounterEnded {
-                encounter_id: 2820,
-                name: "Test Encounter".to_owned(),
                 difficulty_id: 16,
-                group_size: 20,
                 success: true,
             },
         ),
         Category::Battlegrounds => (
-            CombatEvent::ZoneChanged {
-                zone_id: 30,
-                name: "Alterac Valley".to_owned(),
-                instance_id: 30,
-            },
-            CombatEvent::ZoneChanged {
-                zone_id: 0,
-                name: String::new(),
-                instance_id: 0,
-            },
+            CombatEvent::ZoneChanged { zone_id: 30 },
+            CombatEvent::ZoneChanged { zone_id: 0 },
         ),
         Category::MythicPlus => (
             CombatEvent::ChallengeStarted {
-                name: "Test Dungeon".to_owned(),
                 zone_id: 2286,
                 map_id: 377,
                 level: 10,
                 affixes: vec![9, 6, 3],
             },
             CombatEvent::ChallengeEnded {
-                zone_id: 2286,
                 success: true,
                 duration_ms: (end_ms - start_ms).max(0) as u64,
             },
