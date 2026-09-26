@@ -7,6 +7,58 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## Unreleased
+
+### Changed
+- Damage meters load on demand for the selected recording instead of staying
+  in memory for the whole library. On a 58-recording library, idle memory
+  after the startup scan drops from 415 MB to 30 MB and the scan from 2.4 s to
+  1.0 s; startup reads each sidecar once.
+- Sidecars are written as compact JSON, about a third of the size. Existing
+  ones are rewritten the next time they are tagged or protected.
+- The spell database ships as a separately installed, memory-mapped resource:
+  the binary shrinks from 29 MB to 5 MB, an update downloads about 5 MB instead
+  of 17 MB, and about 40 MB less memory is used.
+- The bundled FFmpeg drops x264, swscale, avdevice and unused filters, and
+  Flatpak release builds use link-time optimization.
+- The video backend starts on first playback. An empty-library window idles at
+  147 MB and 31 threads instead of 186 MB and 53; a tray-only session at 57 MB
+  and 12 threads.
+- The combat meter updates rows in place with animations, throttles refreshes
+  while scrubbing, and loads the spell database off the UI thread.
+- The library keeps focus, scroll and selection across refreshes, shows a
+  loading page at startup, crossfades between states, flips the protect star
+  immediately, and reports busy state, clips and deletions as toasts instead
+  of a layout-shifting banner.
+- The window no longer polls four times a second, and the timeline repaints
+  only when the playhead moves.
+
+### Fixed
+- A raid pull or Mythic+ run that started while the previous activity was
+  still ending was silently dropped; both are now recorded.
+- The gpu-screen-recorder restart backoff resets after a minute of stable
+  running, so a later crash no longer leaves capture unarmed for 30 s.
+- Discarding a capture while a save was queued or running could move that
+  save's files to Recovery and fail it. Cleanup now waits for media work to
+  finish and only touches the failed capture.
+- Per-spell target samples in newly recorded meters were one lead-in early.
+- Test recordings are labelled as such in the status card.
+- Starting minimized no longer loads and plays the newest recording in the
+  background.
+- Player shortcuts no longer fire inside dialogs and popovers.
+- Deleting the last visible recording unloads it from the player.
+- Arrow keys in the category sidebar switch the category.
+- The viewpoint selector refreshes when a viewpoint is added to the selected
+  activity.
+- The Settings dialog and row context menus no longer leak memory on every
+  open.
+- Unreadable sidecars are logged instead of being skipped silently.
+
+### Removed
+- Dead code: never-produced recorder statuses, the no-op timeline action,
+  unread combat-event fields and recorder API, and test-only log tailer modes.
+  Activity data tables moved to their own module.
+
 ## 1.0.10 - 2026-09-09
 
 ### Added
