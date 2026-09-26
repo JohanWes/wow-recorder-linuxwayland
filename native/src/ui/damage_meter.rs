@@ -492,21 +492,12 @@ struct Inner {
     rows: RefCell<HashMap<String, RowWidgets>>,
     /// The bundled spell database, loaded lazily on first icon/tooltip use.
     spell_db: RefCell<Option<Rc<SpellDb>>>,
-    /// Decoded spell-icon textures keyed by basename, so the 500 ms row
-    /// rebuilds reuse them instead of re-decoding.
+    /// Decoded spell-icon textures keyed by basename, so new rows reuse
+    /// them instead of re-decoding.
     icons: RefCell<HashMap<String, Texture>>,
     /// The video overlay the meter sits on; the tooltip lives here, outside
-    /// the meter, so it survives rebuilds and is never clipped by the
-    /// scroller.
+    /// the meter, so it is never clipped by the scroller.
     overlay: RefCell<Option<gtk4::Overlay>>,
-    /// The spell whose tooltip is showing. Rows are rebuilt every 500 ms,
-    /// destroying the icon the pointer entered without a leave event, so the
-    /// hover state is remembered and re-armed by the rebuilt row.
-    hovered_spell: RefCell<Option<String>>,
-    /// Whether the content currently being built contains the hovered
-    /// spell's icon; `clear_content` drops a tooltip whose spell left the
-    /// list.
-    tooltip_rearmed: Cell<bool>,
     /// The shared spell tooltip, shown directly left of the meter.
     tooltip: gtk4::Box,
     tooltip_icon: gtk4::Picture,
@@ -584,7 +575,7 @@ impl DamageMeter {
         // meter, parented to the video overlay in `attach_drag` so it is
         // never clipped by the meter scroller. Its position is anchored to
         // the meter, not the hovered row, so it stays still while rows
-        // rebuild every half second.
+        // reorder.
         let tooltip = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
         tooltip.add_css_class("wr-tooltip");
         tooltip.set_visible(false);
@@ -641,8 +632,6 @@ impl DamageMeter {
             spell_db: RefCell::new(None),
             icons: RefCell::new(HashMap::new()),
             overlay: RefCell::new(None),
-            hovered_spell: RefCell::new(None),
-            tooltip_rearmed: Cell::new(false),
             tooltip,
             tooltip_icon,
             tooltip_name,
@@ -654,36 +643,6 @@ impl DamageMeter {
         {
             let inner = Rc::clone(&inner);
             close.connect_clicked(move |_| inner.set_visible(false));
-        }
-        // Tooltip drop conditions beyond the icon enter handlers. The
-        // meter-level controller outlives every row: a rebuild destroys the
-        // entered icon without any leave event, so the tooltip is dropped
-        // when the pointer next moves somewhere other than a spell icon, and
-        // when it leaves the meter entirely.
-        {
-            let this = Rc::clone(&inner);
-            let motion = gtk4::EventControllerMotion::new();
-            {
-                let this = Rc::clone(&this);
-                motion.connect_motion(move |_, x, y| {
-                    let over_icon = this
-                        .root
-                        .pick(x, y, gtk4::PickFlags::DEFAULT)
-                        .is_some_and(|picked| is_within_spell_icon(&picked));
-                    if !over_icon {
-                        this.hovered_spell.borrow_mut().take();
-                        this.hide_tooltip();
-                    }
-                });
-            }
-            {
-                let this = Rc::clone(&this);
-                motion.connect_leave(move |_| {
-                    this.hovered_spell.borrow_mut().take();
-                    this.hide_tooltip();
-                });
-            }
-            inner.root.add_controller(motion);
         }
         inner.refresh();
 
@@ -768,7 +727,6 @@ impl Inner {
         // The tooltip lives on the video overlay, outside the meter: hiding
         // the meter must hide it too or it would float over the video alone.
         if !visible {
-            self.hovered_spell.borrow_mut().take();
             self.hide_tooltip();
         }
         self.visible.set(visible);
@@ -1695,40 +1653,31 @@ impl Inner {
         self.set_lines(4, lines);
     }
 
-    /// A ranking row: the fill visual in a flat button that opens the actor's
-    /// breakdown. The click acts on press, in the capture phase, because the
-    /// half-second re-render replaces the button and a `clicked` press/release
-    /// pair straddling it would be dropped.
+    /// A clickable row: the fill visual in a flat button that runs
+    /// `activate`. Rows persist across refreshes, so a plain `clicked` is
+    /// reliable.
     fn row_button(
         self: &Rc<Self>,
         overlay: &gtk4::Overlay,
-        open: impl Fn(&Rc<Self>) + 'static,
+        activate: impl Fn(&Rc<Self>) + 'static,
     ) -> gtk4::Button {
         let button = gtk4::Button::new();
         button.add_css_class("flat");
         button.add_css_class("wr-meter-row");
         button.set_child(Some(overlay));
-        let click = gtk4::GestureClick::new();
-        click.set_button(gtk4::gdk::BUTTON_PRIMARY);
-        click.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let this = Rc::clone(self);
-        click.connect_pressed(move |gesture, _, _, _| {
-            open(&this);
-            this.refresh();
-            gesture.set_state(gtk4::EventSequenceState::Claimed);
-        });
-        button.add_controller(click);
+        button.connect_clicked(move |_| activate(&this));
         button
     }
 
     /// Navigate into the breakdown or spell detail a keyed row opens.
-    fn open_row(&self, open: &Open) {
+    fn open_row(self: &Rc<Self>, open: &Open) {
         match open {
             Open::Actor(guid) => self.breakdown.replace(Some(guid.clone())),
             Open::Spell(key) => self.spell.replace(Some(key.clone())),
         };
+        self.refresh();
     }
-
     /// Apply `lines` onto the content box: rows whose key is still present
     /// are updated in place and reordered, new keys get fresh rows, and rows
     /// whose key vanished are removed.
@@ -1747,7 +1696,7 @@ impl Inner {
         rows.retain(|key, row| {
             let keep = keys.contains(key.as_str());
             if !keep {
-                self.content.remove(&row.widget());
+                self.remove_row(row);
             }
             keep
         });
@@ -1795,9 +1744,19 @@ impl Inner {
     /// Drop every keyed row; the next `set_lines` builds them afresh.
     fn clear_rows(&self) {
         for (_, row) in self.rows.borrow_mut().drain() {
-            self.content.remove(&row.widget());
+            self.remove_row(&row);
         }
     }
+
+    /// Remove a keyed row's widget. A hovered icon goes with it, and the
+    /// tooltip must not outlive the row it describes.
+    fn remove_row(&self, row: &RowWidgets) {
+        if matches!(row, RowWidgets::Bar(bar) if bar.has_icon.get()) {
+            self.hide_tooltip();
+        }
+        self.content.remove(&row.widget());
+    }
+
     /// Seek the player a beat before `at_ms`, so the event plays rather than
     /// having just happened. Inert until the player installs the callback.
     fn seek_to(&self, at_ms: u64) {
@@ -1870,29 +1829,19 @@ impl Inner {
         icon.add_css_class("wr-spell-icon");
         icon.set_size_request(SPELL_ICON_SIZE, SPELL_ICON_SIZE);
         line.prepend(&icon);
-        // A rebuild under a stationary pointer replaces the entered icon
-        // without any leave event; mark the spell as re-armed so the tooltip
-        // survives, and let the meter-level motion controller drop it once
-        // the pointer moves off an icon again.
-        if self.hovered_spell.borrow().as_deref() == Some(spell) {
-            self.tooltip_rearmed.set(true);
-        }
-        let this = Rc::clone(self);
-        let spell = spell.to_owned();
+        // Rows persist across refreshes, so the icon's own crossing events
+        // are the whole hover state; GTK also sends `leave` when a hovered
+        // row is removed.
         let motion = gtk4::EventControllerMotion::new();
-        motion.connect_enter(move |_, _, _| {
-            // Playback replaces this icon every 500 ms. GTK emits `enter`
-            // for the replacement under a stationary pointer; the tooltip
-            // is already populated and positioned, so touching it again can
-            // only make it jump during the transient row allocation.
-            if this.hovered_spell.borrow().as_deref() == Some(spell.as_str())
-                && this.tooltip.is_visible()
-            {
-                return;
-            }
-            this.hovered_spell.borrow_mut().replace(spell.clone());
-            this.show_tooltip(&spell);
-        });
+        {
+            let this = Rc::clone(self);
+            let spell = spell.to_owned();
+            motion.connect_enter(move |_, _, _| this.show_tooltip(&spell));
+        }
+        {
+            let this = Rc::clone(self);
+            motion.connect_leave(move |_| this.hide_tooltip());
+        }
         icon.add_controller(motion);
         true
     }
@@ -1900,7 +1849,7 @@ impl Inner {
     /// Populate the shared tooltip and place it directly left of the meter,
     /// bottom-aligned with it inside the video overlay.
     /// Anchoring to the meter rather than the hovered row keeps the panel
-    /// still while rows rebuild around it.
+    /// still while rows reorder around it.
     fn show_tooltip(&self, spell: &str) {
         let Some(info) = self.load_db().and_then(|db| db.lookup(spell).cloned()) else {
             return;
@@ -1924,7 +1873,7 @@ impl Inner {
         }
         // Both widgets are end/bottom aligned overlay children. Reuse the
         // meter's stable margins and allocated width instead of measuring its
-        // transient height during a playback rebuild. Their lower edges then
+        // height, which follows the row count. Their lower edges then
         // remain level and the tooltip cannot fall into the playback bar.
         let margin_end =
             (self.root.margin_end() + self.root.width() + TOOLTIP_GAP).clamp(0, overlay_width);
@@ -1947,14 +1896,8 @@ impl Inner {
     }
 
     fn clear_content(&self) {
-        // A rebuild replaces every row while the new rows were already
-        // built. If the hovered spell's icon did not come back (the re-arm
-        // flag), the tooltip would describe a row that no longer exists.
-        if self.hovered_spell.borrow().is_some() && !self.tooltip_rearmed.get() {
-            self.hovered_spell.borrow_mut().take();
-            self.hide_tooltip();
-        }
-        self.tooltip_rearmed.set(false);
+        // A history list row may have carried the hovered icon.
+        self.hide_tooltip();
         self.list_cache.borrow_mut().take();
         // A history list may have replaced the content box as the scroller's
         // child; normal content always lives in the box again.
@@ -2198,20 +2141,6 @@ fn history_list<T: 'static>(
         list_item.set_child(Some(&build(&data)));
     });
     gtk4::ListView::new(Some(gtk4::NoSelection::new(Some(model))), Some(factory))
-}
-
-/// Whether a picked widget is a spell icon, or sits inside one; the
-/// meter-level motion controller uses this to tell a hover that is still
-/// live from a pointer that has moved on to a non-icon part of a row.
-fn is_within_spell_icon(widget: &gtk4::Widget) -> bool {
-    let mut current = Some(widget.clone());
-    while let Some(widget) = current {
-        if widget.has_css_class("wr-spell-icon") {
-            return true;
-        }
-        current = widget.parent();
-    }
-    false
 }
 
 /// A stateful string action for the meter action group.
