@@ -476,11 +476,23 @@ impl Library {
         ));
         filtered_empty.set_vexpand(true);
 
+        // Shown until the first snapshot, which carries the startup scan.
+        let spinner = adw::Spinner::new();
+        spinner.set_size_request(32, 32);
+        let loading_label = gtk4::Label::new(Some("Loading recordings…"));
+        loading_label.add_css_class("dim-label");
+        let loading = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+        loading.set_valign(gtk4::Align::Center);
+        loading.set_vexpand(true);
+        loading.append(&spinner);
+        loading.append(&loading_label);
+
         let stack = gtk4::Stack::new();
+        stack.add_named(&loading, Some("loading"));
         stack.add_named(&scroll, Some("table"));
         stack.add_named(&empty, Some("empty"));
         stack.add_named(&filtered_empty, Some("filtered-empty"));
-        stack.set_visible_child_name("empty");
+        stack.set_visible_child_name("loading");
 
         // Toolbar: search entry, date-range popover, clear.
         let search = gtk4::SearchEntry::new();
@@ -728,6 +740,10 @@ impl Inner {
     }
 
     fn update_stack(&self) {
+        // Stay on "loading" until a snapshot has built the store.
+        if self.state.category.borrow().is_none() {
+            return;
+        }
         let name = if self.store.n_items() == 0 {
             "empty"
         } else if self.filter_model.n_items() == 0 {
