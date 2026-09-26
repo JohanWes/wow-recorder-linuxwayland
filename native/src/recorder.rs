@@ -22,11 +22,12 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use crate::config::CaptureSettings;
 use crate::domain::{Category, Codec, RecordingId, ReplayStorage};
 use crate::process;
+use crate::storage::now_unix_ms;
 
 /// Everything Recorder needs to arm a capture session, assembled by the
 /// coordinator from validated configuration.
@@ -217,13 +218,6 @@ impl Default for Recorder {
     }
 }
 
-fn now_wall_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 impl Recorder {
     pub fn new() -> Self {
         Self::with_timeouts(Timeouts::default())
@@ -403,7 +397,7 @@ impl Recorder {
             return Err(RecorderError::Busy);
         }
         let child = self.live_child()?;
-        let regular_started_at_ms = now_wall_ms();
+        let regular_started_at_ms = now_unix_ms();
         process::send_signal(child, libc::SIGUSR1)?;
         process::send_signal(child, process::sigrtmin())?;
         self.last_toggle_at = Some(Instant::now());
@@ -447,7 +441,7 @@ impl Recorder {
         // The stop timestamp is sampled before the signal: the hook event
         // that arrives later is admitted against this bound, never a clock
         // read taken while the end resolves.
-        let regular_stopped_at_ms = now_wall_ms();
+        let regular_stopped_at_ms = now_unix_ms();
         process::send_signal(child, process::sigrtmin())?;
         self.last_toggle_at = Some(Instant::now());
         let config = self.config.clone().expect("armed with config");
@@ -1101,7 +1095,7 @@ mod tests {
 
     /// Append an event stamped with the current wall clock.
     fn append_event(config: &CaptureConfig, kind: &str, path: &Path) {
-        append_event_at(config, now_wall_ms(), kind, path);
+        append_event_at(config, now_unix_ms(), kind, path);
     }
 
     fn touch(path: &Path) {
@@ -1228,7 +1222,7 @@ mod tests {
         assert_eq!(artifacts.requested_replay_ms, 12_000);
         assert!(artifacts.regular_stopped_at_ms >= artifacts.regular_started_at_ms);
         // The ignored events surface as one bounded diagnostic.
-        let events = recorder.poll(now_wall_ms());
+        let events = recorder.poll(now_unix_ms());
         assert!(
             events
                 .iter()
@@ -1341,7 +1335,7 @@ mod tests {
         assert_eq!(artifacts.replay.as_deref(), Some(replay.as_path()));
         assert_eq!(artifacts.regular_stopped_at_ms, stopped_at_ms);
         // The stale regular event is noise, reported by the next normal poll.
-        let events = recorder.poll(now_wall_ms());
+        let events = recorder.poll(now_unix_ms());
         assert!(
             events
                 .iter()
@@ -1449,7 +1443,7 @@ mod tests {
         let token_path = Recorder::token_path(&config);
         fs::write(&token_path, "old-token").unwrap();
         // Make poll adopt the current token first.
-        recorder.poll(now_wall_ms());
+        recorder.poll(now_unix_ms());
 
         let selection = recorder.reselect_target(&config).unwrap();
         assert!(recorder.is_running());
@@ -1458,7 +1452,7 @@ mod tests {
         assert!(!token_path.exists());
         // The portal writes the new token later; poll reports it.
         fs::write(&token_path, "new-token").unwrap();
-        let events = recorder.poll(now_wall_ms());
+        let events = recorder.poll(now_unix_ms());
         assert!(events.contains(&RecorderEvent::TargetTokenAvailable(
             "new-token".to_string()
         )));
