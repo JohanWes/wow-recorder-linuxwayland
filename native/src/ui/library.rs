@@ -1093,8 +1093,14 @@ impl Inner {
                 }
             }
         }
-        if !reselected && self.selection.n_items() > 0 {
-            self.selection.select_item(0, true);
+        if !reselected {
+            if self.selection.n_items() > 0 {
+                self.selection.select_item(0, true);
+            } else {
+                // Removing rows does not emit `selection-changed`, so unload
+                // a recording that just left the table.
+                (self.on_select)(None);
+            }
         }
         self.update_bulk_bar(&self.selected_rows());
     }
