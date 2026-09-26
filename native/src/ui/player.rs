@@ -556,33 +556,38 @@ impl Inner {
             self.unload();
             return;
         };
-        // Same activity (e.g. snapshot-driven reselect): keep everything.
+        let povs = {
+            let entries = self.entries.borrow();
+            let resolved: Vec<&LibraryEntry> = selection
+                .viewpoints
+                .iter()
+                .filter_map(|id| entries.iter().find(|entry| &entry.id == id))
+                .collect();
+            multipov::povs(&resolved)
+        };
+        // Same activity (e.g. snapshot-driven reselect): keep playback, but
+        // pick up viewpoints that were correlated or removed since.
         let same_activity = self
             .active_id
             .borrow()
             .as_ref()
             .is_some_and(|active| selection.viewpoints.contains(active));
         if same_activity {
+            if *self.povs.borrow() != povs {
+                *self.povs.borrow_mut() = povs;
+                self.rebuild_pov_selector();
+            }
             self.refresh_timeline();
             return;
         }
-        let entries = self.entries.borrow();
-        let resolved: Vec<&LibraryEntry> = selection
-            .viewpoints
-            .iter()
-            .filter_map(|id| entries.iter().find(|entry| &entry.id == id))
-            .collect();
-        if resolved.is_empty() {
-            drop(entries);
+        if povs.is_empty() {
             self.unload();
             return;
         }
-        let povs = multipov::povs(&resolved);
         let preferred = self.preferred_player.borrow().clone();
         let chosen = multipov::choose(&povs, preferred.as_deref())
             .map(|pov| pov.id.clone())
             .unwrap_or_else(|| selection.id.clone());
-        drop(entries);
 
         // New activity: stop, leave clip mode, and seek to zero.
         *self.povs.borrow_mut() = povs;
