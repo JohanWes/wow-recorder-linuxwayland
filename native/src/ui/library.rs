@@ -400,6 +400,9 @@ struct State {
     /// A protect/tag/delete is in flight; the bulk bar stays disabled until the
     /// authoritative snapshot arrives.
     mutation_pending: Cell<bool>,
+    /// The row the context menu was opened on, resolved again when an action
+    /// runs so it acts on the current snapshot's row.
+    menu_target: RefCell<Option<RecordingId>>,
     /// The authoritative index objects used to build the current rows.  Status
     /// and progress snapshots reuse these Arcs, so retaining them lets the GTK
     /// thread avoid rebuilding row metadata for unrelated updates.
@@ -435,6 +438,7 @@ struct Inner {
     bulk_count: gtk4::Label,
     protect_button: gtk4::Button,
     delete_button: gtk4::Button,
+    row_menu: gtk4::PopoverMenu,
     state: State,
 }
 
@@ -555,6 +559,12 @@ impl Library {
         widget.append(&stack);
         widget.append(&bulk_bar);
 
+        // One context menu for every row; its `row.*` actions live on `widget`.
+        let row_menu = gtk4::PopoverMenu::from_model(None::<&gio::MenuModel>);
+        row_menu.set_has_arrow(false);
+        row_menu.set_halign(gtk4::Align::Start);
+        row_menu.set_parent(&widget);
+
         let inner = Rc::new(Inner {
             sink,
             layout,
@@ -578,6 +588,7 @@ impl Library {
             bulk_count,
             protect_button,
             delete_button,
+            row_menu,
             state: State {
                 selected_chips: RefCell::new(Vec::new()),
                 date_range: Cell::new(None),
@@ -588,6 +599,7 @@ impl Library {
                 category: RefCell::new(None),
                 signature: Cell::new(0),
                 mutation_pending: Cell::new(false),
+                menu_target: RefCell::new(None),
                 entries: RefCell::new(None),
                 correlations: RefCell::new(None),
             },
@@ -598,6 +610,7 @@ impl Library {
         inner.connect_selection();
         inner.connect_bulk_actions(&clear_button);
         inner.connect_date_apply(&date);
+        inner.install_row_actions(&widget);
 
         Self { widget, inner }
     }
@@ -907,11 +920,7 @@ impl Inner {
         // Unless every selected viewpoint is protected the action is Protect;
         // only an all-protected selection unprotects.
         let all_protected = selected.iter().all(|row| row.all_protected);
-        self.protect_button.set_label(if all_protected {
-            "Unprotect"
-        } else {
-            "Protect"
-        });
+        self.protect_button.set_label(protect_label(all_protected));
         let pending = self.state.mutation_pending.get();
         self.protect_button.set_sensitive(!pending);
         self.delete_button.set_sensitive(!pending);
@@ -1279,16 +1288,24 @@ impl Inner {
 
     fn star_column(self: &Rc<Self>) -> gtk4::ColumnViewColumn {
         let factory = gtk4::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
+        let this = Rc::clone(self);
+        factory.connect_setup(move |_, item| {
+            let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
             let button = gtk4::Button::new();
             button.add_css_class("flat");
             button.set_valign(gtk4::Align::Center);
-            item.downcast_ref::<gtk4::ListItem>()
-                .unwrap()
-                .set_child(Some(&button));
+            // Connected once per cell; the bound row is read at click time, so
+            // recycled cells always act on the row they currently show.
+            let this = Rc::clone(&this);
+            let weak_item = item.downgrade();
+            button.connect_clicked(move |_| {
+                if let Some(row) = bound_row(&weak_item) {
+                    this.toggle_protect(&row);
+                }
+            });
+            item.set_child(Some(&button));
         });
-        let this = Rc::clone(self);
-        factory.connect_bind(move |_, item| {
+        factory.connect_bind(|_, item| {
             let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
             let button = item.child().and_downcast::<gtk4::Button>().unwrap();
             let row = row_of(&item.item().unwrap());
@@ -1299,25 +1316,9 @@ impl Inner {
             } else {
                 "non-starred-symbolic"
             });
-            let label = if row.all_protected {
-                "Unprotect"
-            } else {
-                "Protect"
-            };
+            let label = protect_label(row.all_protected);
             button.set_tooltip_text(Some(label));
             button.update_property(&[gtk4::accessible::Property::Label(label)]);
-            let this = Rc::clone(&this);
-            let handler = button.connect_clicked(move |_| this.toggle_protect(&row));
-            unsafe { button.set_data("wr-handler", handler) };
-        });
-        factory.connect_unbind(|_, item| {
-            let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-            let button = item.child().and_downcast::<gtk4::Button>().unwrap();
-            if let Some(handler) =
-                unsafe { button.steal_data::<glib::SignalHandlerId>("wr-handler") }
-            {
-                button.disconnect(handler);
-            }
         });
         let column = gtk4::ColumnViewColumn::new(Some("★"), Some(factory));
         column.set_fixed_width(40);
@@ -1326,7 +1327,9 @@ impl Inner {
 
     fn details_column(self: &Rc<Self>) -> gtk4::ColumnViewColumn {
         let factory = gtk4::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
+        let this = Rc::clone(self);
+        factory.connect_setup(move |_, item| {
+            let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
             let title = gtk4::Label::new(None);
             title.set_xalign(0.0);
             title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
@@ -1342,13 +1345,22 @@ impl Inner {
             text.append(&tag);
             let container = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
             container.append(&text);
-            item.downcast_ref::<gtk4::ListItem>()
-                .unwrap()
-                .set_child(Some(&container));
+            // Right-click menu with the full action set (protect/tag/reveal/
+            // delete), for whichever row the recycled cell shows when pressed.
+            let gesture = gtk4::GestureClick::new();
+            gesture.set_button(gtk4::gdk::BUTTON_SECONDARY);
+            let this = Rc::clone(&this);
+            let weak_item = item.downgrade();
+            gesture.connect_pressed(move |gesture, _, x, y| {
+                if let (Some(row), Some(widget)) = (bound_row(&weak_item), gesture.widget()) {
+                    gesture.set_state(gtk4::EventSequenceState::Claimed);
+                    this.show_row_menu(&row, &widget, x, y);
+                }
+            });
+            container.add_controller(gesture);
+            item.set_child(Some(&container));
         });
-        // Right-click menu with the full action set (protect/tag/reveal/delete).
-        let this = Rc::clone(self);
-        factory.connect_bind(move |_, item| {
+        factory.connect_bind(|_, item| {
             let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
             let container = item.child().and_downcast::<gtk4::Box>().unwrap();
             let text = container.first_child().and_downcast::<gtk4::Box>().unwrap();
@@ -1356,13 +1368,8 @@ impl Inner {
             let tag = title.next_sibling().and_downcast::<gtk4::Label>().unwrap();
             let row = row_of(&item.item().unwrap());
             title.set_text(&row.details);
-            if let Some(previous) = unsafe { title.steal_data::<&'static str>("wr-class") } {
-                title.remove_css_class(previous);
-            }
-            if let Some(class) = row.class_css {
-                title.add_css_class(class);
-                unsafe { title.set_data("wr-class", class) };
-            }
+            // The title carries no other classes, so this swaps the class color.
+            title.set_css_classes(row.class_css.as_slice());
             match &row.tag {
                 Some(value) => {
                     tag.set_text(value);
@@ -1370,7 +1377,6 @@ impl Inner {
                 }
                 None => tag.set_visible(false),
             }
-            this.attach_row_menu(&container, &row);
         });
         let column = gtk4::ColumnViewColumn::new(Some("Details"), Some(factory));
         column.set_expand(true);
@@ -1379,81 +1385,59 @@ impl Inner {
         column
     }
 
-    fn attach_row_menu(self: &Rc<Self>, container: &gtk4::Box, row: &Rc<RowModel>) {
-        if let Some(existing) = unsafe { container.steal_data::<gtk4::GestureClick>("wr-menu") } {
-            container.remove_controller(&existing);
-        }
-        let gesture = gtk4::GestureClick::new();
-        gesture.set_button(gtk4::gdk::BUTTON_SECONDARY);
-        let this = Rc::clone(self);
-        let row = Rc::clone(row);
-        let container_weak = container.downgrade();
-        gesture.connect_pressed(move |_, _, x, y| {
-            let Some(container) = container_weak.upgrade() else {
-                return;
-            };
-            let popover = this.row_menu(&row);
-            popover.set_parent(&container);
-            popover.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-            popover.popup();
-        });
-        container.add_controller(gesture.clone());
-        unsafe { container.set_data("wr-menu", gesture) };
+    fn install_row_actions(self: &Rc<Self>, widget: &gtk4::Box) {
+        let group = gio::SimpleActionGroup::new();
+        let add = |name: &str, run: fn(&Rc<Self>, Rc<RowModel>)| {
+            let action = gio::SimpleAction::new(name, None);
+            let weak = Rc::downgrade(self);
+            action.connect_activate(move |_, _| {
+                if let Some(this) = weak.upgrade()
+                    && let Some(row) = this.menu_row()
+                {
+                    run(&this, row);
+                }
+            });
+            group.add_action(&action);
+        };
+        add("protect", |this, row| this.toggle_protect(&row));
+        add("tag", |this, row| this.edit_tag(&row));
+        add("reveal", |this, row| this.reveal(&row));
+        add("delete", |this, row| this.confirm_delete(vec![row]));
+        widget.insert_action_group("row", Some(&group));
     }
 
-    fn row_menu(self: &Rc<Self>, row: &Rc<RowModel>) -> gtk4::Popover {
-        let list = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        let popover = gtk4::Popover::new();
-        popover.set_child(Some(&list));
-        let make = |label: &str| {
-            let button = gtk4::Button::with_label(label);
-            button.add_css_class("flat");
-            button.set_hexpand(true);
-            if let Some(child) = button.child().and_downcast::<gtk4::Label>() {
-                child.set_xalign(0.0);
-            }
-            list.append(&button);
-            button
+    fn show_row_menu(&self, row: &RowModel, from: &gtk4::Widget, x: f64, y: f64) {
+        let Some((x, y)) = self
+            .row_menu
+            .parent()
+            .and_then(|parent| from.translate_coordinates(&parent, x, y))
+        else {
+            return;
         };
-        let protect = make(if row.all_protected {
-            "Unprotect"
-        } else {
-            "Protect"
-        });
-        let tag = make("Edit tag");
-        let reveal = make("Reveal in folder");
-        let delete = make("Delete");
-        delete.add_css_class("destructive-action");
+        *self.state.menu_target.borrow_mut() = Some(row.id.clone());
+        let actions = gio::Menu::new();
+        actions.append(Some(protect_label(row.all_protected)), Some("row.protect"));
+        actions.append(Some("Edit tag"), Some("row.tag"));
+        actions.append(Some("Reveal in folder"), Some("row.reveal"));
+        let destructive = gio::Menu::new();
+        destructive.append(Some("Delete"), Some("row.delete"));
+        let menu = gio::Menu::new();
+        menu.append_section(None, &actions);
+        menu.append_section(None, &destructive);
+        self.row_menu.set_menu_model(Some(&menu));
+        self.row_menu
+            .set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        self.row_menu.popup();
+    }
 
-        let this = Rc::clone(self);
-        let r = Rc::clone(row);
-        let pop = popover.clone();
-        protect.connect_clicked(move |_| {
-            pop.popdown();
-            this.toggle_protect(&r);
-        });
-        let this = Rc::clone(self);
-        let r = Rc::clone(row);
-        let pop = popover.clone();
-        tag.connect_clicked(move |_| {
-            pop.popdown();
-            this.edit_tag(&r);
-        });
-        let this = Rc::clone(self);
-        let r = Rc::clone(row);
-        let pop = popover.clone();
-        reveal.connect_clicked(move |_| {
-            pop.popdown();
-            this.reveal(&r);
-        });
-        let this = Rc::clone(self);
-        let r = Rc::clone(row);
-        let pop = popover.clone();
-        delete.connect_clicked(move |_| {
-            pop.popdown();
-            this.confirm_delete(vec![Rc::clone(&r)]);
-        });
-        popover
+    /// The current row the context menu targets, if it still exists.
+    fn menu_row(&self) -> Option<Rc<RowModel>> {
+        let id = self.state.menu_target.borrow().clone()?;
+        self.store
+            .iter::<BoxedAnyObject>()
+            .filter_map(Result::ok)
+            .map(|item| row_of(item.upcast_ref()))
+            .find(|row| row.id == id)
     }
 }
 
@@ -1484,6 +1468,21 @@ fn viewpoint_ids(rows: &[Rc<RowModel>]) -> Vec<RecordingId> {
         }
     }
     ids
+}
+
+/// The row a factory cell is bound to right now, if any.
+fn bound_row(item: &glib::WeakRef<gtk4::ListItem>) -> Option<Rc<RowModel>> {
+    item.upgrade()
+        .and_then(|item| item.item())
+        .map(|item| row_of(&item))
+}
+
+fn protect_label(all_protected: bool) -> &'static str {
+    if all_protected {
+        "Unprotect"
+    } else {
+        "Protect"
+    }
 }
 
 fn plural(count: usize) -> &'static str {
