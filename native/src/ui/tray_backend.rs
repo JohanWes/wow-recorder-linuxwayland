@@ -29,8 +29,8 @@ struct RecorderTray {
     events: SyncSender<TrayEvent>,
     available: Arc<AtomicBool>,
     quit_requested: Arc<AtomicBool>,
-    /// Nudges the shell's main loop; Open and Quit are otherwise invisible
-    /// until the slow safety tick.
+    /// Nudges the shell's drain; Open, Quit, and availability changes are
+    /// otherwise never seen.
     wake: Arc<dyn Fn() + Send + Sync>,
     title: String,
     status: ksni::Status,
@@ -69,7 +69,7 @@ impl TrayBackend {
         self.available.load(Ordering::Acquire)
     }
 
-    /// Set by the tray's Quit menu item. The GTK pump reads this each tick and
+    /// Set by the tray's Quit menu item. The GTK pump reads this when woken and
     /// dispatches one graceful `Shutdown`; using a latch instead of a channel
     /// send keeps the single-threaded tray executor from ever parking (a
     /// blocking send there would deadlock `shutdown`).
@@ -146,10 +146,12 @@ impl ksni::Tray for RecorderTray {
 
     fn watcher_online(&self) {
         self.available.store(true, Ordering::Release);
+        (self.wake)();
     }
 
     fn watcher_offline(&self, _reason: ksni::OfflineReason) -> bool {
         self.available.store(false, Ordering::Release);
+        (self.wake)();
         true
     }
 }

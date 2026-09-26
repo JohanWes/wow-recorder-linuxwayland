@@ -4,8 +4,9 @@
 //!
 //! The GTK thread owns widgets only. It receives immutable `AppSnapshot`s
 //! through the capacity-one coordinator channel and dispatches typed
-//! `Command`s back; every send is nonblocking. One 33 ms timeout drains the
-//! snapshot, tray-event, and coordinator-stopped receivers. No stores, no
+//! `Command`s back; every send is nonblocking. One drain consumes the
+//! snapshot, tray-event, and coordinator-stopped receivers; it runs only when
+//! a producer calls `wake_shell`, so an idle shell never polls. No stores, no
 //! per-widget view models, no string events, no blocking work.
 
 pub mod damage_meter;
@@ -67,19 +68,26 @@ thread_local! {
 
 /// Run the shell's drain on the main thread. Safe to call from any thread and
 /// harmless before the pump is installed or after the loop has finished.
-/// `pending` collapses a burst of wakes into one queued idle.
+/// `pending` collapses a burst of wakes into one queued idle. Producers queue
+/// their data before waking, and the latch is cleared before the drain reads
+/// anything, so a wake that finds the latch set is covered by that drain.
+/// The clearing swap acquires, which makes that data visible to the drain.
 pub fn wake_shell(pending: &Arc<AtomicBool>) {
     if pending.swap(true, Ordering::AcqRel) {
         return;
     }
     let pending = Arc::clone(pending);
     gtk4::glib::idle_add_once(move || {
-        pending.store(false, Ordering::Release);
-        let pump = PUMP.with(|pump| pump.borrow().clone());
-        if let Some(pump) = pump {
-            pump();
-        }
+        pending.swap(false, Ordering::AcqRel);
+        run_pump();
     });
+}
+
+fn run_pump() {
+    let pump = PUMP.with(|pump| pump.borrow().clone());
+    if let Some(pump) = pump {
+        pump();
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -353,15 +361,20 @@ pub fn run(
             } else {
                 built.present();
             }
+            drop(shell_ref);
+            // The drain leaves a snapshot queued while there is no shell yet,
+            // and the coordinator will not wake it again for that snapshot.
+            if first_activation {
+                run_pump();
+            }
         });
     }
 
     // The single drain: tray events, the newest snapshot, and the
-    // coordinator-stopped signal. The coordinator and the tray call
-    // `wake_shell` whenever they queue something, so this normally runs within
-    // one main-loop iteration of the event; the slow timer below is only a
-    // safety net for state nobody signals, such as the tray appearing or
-    // vanishing on the session bus.
+    // coordinator-stopped signal. It runs once after the shell is built and
+    // otherwise only on `wake_shell`: the coordinator calls it for every
+    // snapshot and the stopped signal, the tray for Open, Quit, and watcher
+    // availability changes.
     {
         let app = application.clone();
         let shutdown_sent = Cell::new(false);
@@ -414,11 +427,7 @@ pub fn run(
                 app.quit();
             }
         });
-        PUMP.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&pump)));
-        gtk4::glib::timeout_add_local(Duration::from_millis(250), move || {
-            pump();
-            gtk4::glib::ControlFlow::Continue
-        });
+        PUMP.with(|slot| *slot.borrow_mut() = Some(pump));
     }
 
     application.run_with_args(&[env!("CARGO_PKG_NAME")]).into()
