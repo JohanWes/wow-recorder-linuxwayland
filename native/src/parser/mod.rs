@@ -328,13 +328,7 @@ pub fn parse_line(
             };
             event
         }
-        "SPELL_INTERRUPT" => {
-            let Some(event) = parse_utility(&fields, event_name, context) else {
-                return Ok(None);
-            };
-            event
-        }
-        "SPELL_DISPEL" | "SPELL_STOLEN" => {
+        "SPELL_INTERRUPT" | "SPELL_DISPEL" | "SPELL_STOLEN" => {
             let Some(event) = parse_utility(&fields, event_name, context) else {
                 return Ok(None);
             };
@@ -417,6 +411,11 @@ fn lenient_hex(fields: &[String], index: usize) -> Option<u64> {
         .and_then(|value| u64::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).ok())
 }
 
+/// The raid-target marker in the low byte of the destination raid flags.
+fn dest_raid_marker(fields: &[String]) -> u8 {
+    (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8
+}
+
 /// Destination HP from the advanced block, trusted only when its infoGUID
 /// names the destination (for swings the block describes the source).
 fn dest_hp(
@@ -477,7 +476,7 @@ fn parse_damage(
             dest_guid: dest_guid.to_owned(),
             dest_name: fields.get(6)?.as_str().to_owned(),
             dest_flags: lenient_hex(fields, 7)?,
-            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            dest_raid_marker: dest_raid_marker(fields),
             spell_name: if event_name == "SWING_DAMAGE" {
                 "Melee".to_owned()
             } else {
@@ -519,7 +518,7 @@ fn parse_heal(
             dest_guid: fields.get(5)?.as_str().to_owned(),
             dest_name: fields.get(6)?.as_str().to_owned(),
             dest_flags: lenient_hex(fields, 7)?,
-            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            dest_raid_marker: dest_raid_marker(fields),
             spell_name: fields.get(10)?.as_str().to_owned(),
             amount,
             overheal,
@@ -548,7 +547,7 @@ fn parse_utility(
             source_name: fields.get(2)?.as_str().to_owned(),
             source_flags: lenient_hex(fields, 3)?,
             dest_name: fields.get(6)?.as_str().to_owned(),
-            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            dest_raid_marker: dest_raid_marker(fields),
             spell_name,
         }
     } else {
@@ -557,7 +556,7 @@ fn parse_utility(
             source_name: fields.get(2)?.as_str().to_owned(),
             source_flags: lenient_hex(fields, 3)?,
             dest_name: fields.get(6)?.as_str().to_owned(),
-            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            dest_raid_marker: dest_raid_marker(fields),
             spell_name,
         }
     })
@@ -598,7 +597,7 @@ fn parse_support(
             supporter_guid: guid_or_none(fields.last()?)?.to_owned(),
             source_guid: fields.get(1)?.as_str().to_owned(),
             dest_name: fields.get(6)?.as_str().to_owned(),
-            dest_raid_marker: (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8,
+            dest_raid_marker: dest_raid_marker(fields),
             spell_name: fields.get(10)?.as_str().to_owned(),
             amount,
             overheal,
