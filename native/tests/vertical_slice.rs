@@ -28,7 +28,7 @@ use warcraft_recorder::domain::{
 use warcraft_recorder::media_jobs::MediaConfig;
 use warcraft_recorder::meter::{MeterProjection, project_current, project_overall};
 use warcraft_recorder::recorder::Timeouts;
-use warcraft_recorder::storage::{RECOVERY_DIR, now_unix_ms};
+use warcraft_recorder::storage::{RECOVERY_DIR, load_meter, now_unix_ms};
 
 const PLAYER_GUID: &str = "Player-1092-0A70E103";
 const PLAYER_NAME: &str = "Testplayer-Testrealm";
@@ -445,7 +445,8 @@ fn automatic_raid_completes_and_survives_a_restart() {
     assert!(read_dir_count(&harness.capture_root.join("regular")) == 0);
     // The version-22 advanced-layout events survived parsing into per-second
     // deltas while retaining their exact full-fight aggregates.
-    let fights = &entry.meter.fights;
+    let meter = load_meter(&entry.sidecar_path).unwrap();
+    let fights = &meter.fights;
     assert_eq!(fights.len(), 1, "expected exactly one meter fight");
     assert_eq!(meter_total(&fights[0], MeterMetric::Damage), 3_000);
     assert_eq!(meter_total(&fights[0], MeterMetric::Healing), 600);
@@ -519,9 +520,10 @@ fn automatic_raid_completes_and_survives_a_restart() {
         "nothing was quarantined"
     );
 
-    // The rescanned sidecar carries the same full and per-second aggregates.
-    let fights = &restarted.latest.entries[0].meter.fights;
-    assert_eq!(fights, &entry.meter.fights);
+    // The tagged, protected, and rescanned sidecar still carries the same
+    // full and per-second aggregates.
+    let reloaded = load_meter(&restarted.latest.entries[0].sidecar_path).unwrap();
+    assert_eq!(reloaded, meter);
 
     let id = restarted.latest.entries[0].id.clone();
     restarted.send(Command::Delete { ids: vec![id] });
@@ -584,13 +586,10 @@ fn manual_and_test_recordings_reuse_the_capture_pipeline() {
     harness.pump(|snapshot| snapshot.active.is_some());
     harness.emit_artifacts(true);
     harness.pump(|snapshot| snapshot.entries.len() == 2);
-    let raid = harness.entries_of(&Category::Raids)[0];
-    assert_eq!(raid.meter.fights.len(), 1);
-    assert_eq!(
-        meter_total(&raid.meter.fights[0], MeterMetric::Damage),
-        7_800_000
-    );
-    assert_eq!(raid.meter.fights[0].actors.len(), 2);
+    let raid = load_meter(&harness.entries_of(&Category::Raids)[0].sidecar_path).unwrap();
+    assert_eq!(raid.fights.len(), 1);
+    assert_eq!(meter_total(&raid.fights[0], MeterMetric::Damage), 7_800_000);
+    assert_eq!(raid.fights[0].actors.len(), 2);
 }
 
 #[test]

@@ -11,6 +11,7 @@
 //! and individual local recordings remain.
 
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,6 +23,7 @@ use warcraft_recorder::coordinator::{AppSnapshot, ClipRange, Command};
 use warcraft_recorder::domain::{
     Category, DeathMarkerVisibility, LibraryEntry, MarkerVisibility, RecordingId,
 };
+use warcraft_recorder::storage;
 
 use super::damage_meter::DamageMeter;
 use super::library::Selection;
@@ -596,7 +598,9 @@ impl Inner {
         let Some(entry) = entries.iter().find(|entry| &entry.id == id) else {
             return;
         };
-        self.meter.set_entry(Some(entry));
+        // Empty until `load_meter` delivers this entry's meter.
+        self.meter.set_entry(None);
+        let sidecar_path = entry.sidecar_path.clone();
         let uri = gtk4::gio::File::for_path(&entry.media_path)
             .uri()
             .to_string();
@@ -614,6 +618,7 @@ impl Inner {
         self.load_generation.set(generation);
         self.seek_in_flight.set(false);
         self.pending_seek.set(None);
+        self.load_meter(id.clone(), sidecar_path, generation);
 
         self.error_bar.set_visible(false);
         self.empty_reveal.set_visible(false);
@@ -666,6 +671,34 @@ impl Inner {
         self.watch_for_video_dimensions(id.clone(), uri, previous_video_stream);
         self.refresh_timeline();
         self.watch_for_failure(generation);
+    }
+
+    /// A sidecar meter can be tens of megabytes, so it is parsed off the GTK
+    /// thread. A result that arrives after another load or an unload belongs
+    /// to a recording no longer shown and is dropped.
+    fn load_meter(self: &Rc<Self>, id: RecordingId, sidecar_path: PathBuf, generation: u64) {
+        let this = Rc::clone(self);
+        gtk4::glib::spawn_future_local(async move {
+            let loaded =
+                gtk4::gio::spawn_blocking(move || storage::load_meter(&sidecar_path)).await;
+            if this.load_generation.get() != generation {
+                return;
+            }
+            let meter = match loaded {
+                Ok(Ok(meter)) => meter,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "damage meter could not be loaded");
+                    return;
+                }
+                Err(_) => return,
+            };
+            let entries = this.entries.borrow();
+            if let Some(entry) = entries.iter().find(|entry| entry.id == id) {
+                this.meter.set_entry(Some((entry, meter)));
+                this.meter
+                    .set_position((this.position_seconds.get() * 1_000.0) as u64);
+            }
+        });
     }
 
     fn report_video_dimensions(&self, dimensions: Option<(u32, u32)>) -> bool {

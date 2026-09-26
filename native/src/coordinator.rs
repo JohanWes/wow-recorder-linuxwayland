@@ -2191,9 +2191,10 @@ mod tests {
                     codec: None,
                     has_content: true,
                 },
-                meter: MeterData::default(),
             };
-            sidecar_storage.write_new_entry(&entry, &source).unwrap();
+            sidecar_storage
+                .write_new_entry(&entry, &MeterData::default(), &source)
+                .unwrap();
             entries.push(entry);
         }
 

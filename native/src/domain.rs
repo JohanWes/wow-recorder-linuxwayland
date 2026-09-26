@@ -525,9 +525,6 @@ pub struct LibraryEntry {
     pub details: ActivityDetails,
     pub timeline: Vec<TimelineItem>,
     pub media: MediaFacts,
-    /// Pre-aggregated damage/healing facts, media-relative after finalize.
-    /// Empty for clips and manual recordings.
-    pub meter: MeterData,
 }
 
 impl LibraryEntry {
@@ -684,7 +681,6 @@ mod tests {
                 codec: Some(Codec::H264),
                 has_content: true,
             },
-            meter: MeterData::default(),
         }
     }
 

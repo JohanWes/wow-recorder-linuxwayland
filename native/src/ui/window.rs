@@ -767,7 +767,7 @@ pub(crate) mod tests {
     use warcraft_recorder::config::Config;
     use warcraft_recorder::domain::{
         ActivityDetails, Category, Codec, CorrelatedActivity, GameFlavor, LibraryEntry, MediaFacts,
-        MeterData, Outcome, Problem, RecorderStatus, RecordingId,
+        Outcome, Problem, RecorderStatus, RecordingId,
     };
 
     pub(crate) fn entry(category: Category, title: &str, start_unix_ms: i64) -> LibraryEntry {
@@ -795,7 +795,6 @@ pub(crate) mod tests {
                 codec: Some(Codec::H264),
                 has_content: true,
             },
-            meter: MeterData::default(),
         }
     }
 

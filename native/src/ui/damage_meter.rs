@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The damage-meter overlay: a compact Details/Skada-style ranking laid over
-//! the player video and fed from `LibraryEntry.meter` interval aggregates. The
+//! the player video and fed from the sidecar meter's interval aggregates. The
 //! player owns one instance on its `video_overlay`; visibility, filters, and
 //! drag position are session-only state. Current and Overall totals stop at
 //! the latest completed interval.
@@ -14,7 +14,7 @@ use gtk4::gdk::Texture;
 use gtk4::prelude::*;
 
 use warcraft_recorder::domain::{
-    LibraryEntry, MeterDeath, MeterDeathEventKind, MeterFight, MeterMetric,
+    LibraryEntry, MeterData, MeterDeath, MeterDeathEventKind, MeterFight, MeterMetric,
 };
 use warcraft_recorder::meter::{
     MeterProjection, ProjectedActor, ProjectedEntry, SAMPLE_INTERVAL_MS, fight_index_at,
@@ -237,21 +237,21 @@ fn format_uptime(ms: u64) -> String {
 }
 
 /// The selected entry's meter facts plus the combatant GUID → spec id join
-/// for class colors. Cloned from the snapshot entry; no file I/O.
+/// for class colors. The meter is loaded by the player; no file I/O here.
 struct EntryMeter {
     fights: Vec<MeterFight>,
     spec_by_guid: HashMap<String, u16>,
 }
 
 impl EntryMeter {
-    fn from_entry(entry: &LibraryEntry) -> Self {
+    fn from_entry(entry: &LibraryEntry, meter: MeterData) -> Self {
         let spec_by_guid = entry
             .combatants
             .iter()
             .filter_map(|combatant| Some((combatant.guid.clone()?, combatant.spec_id?)))
             .collect();
         Self {
-            fights: entry.meter.fights.clone(),
+            fights: meter.fights,
             spec_by_guid,
         }
     }
@@ -550,12 +550,14 @@ impl DamageMeter {
         }
     }
 
-    /// Feed the selected entry's meter facts; `None` clears. No file I/O:
-    /// everything arrives on the snapshot. A target filter is reset: names and
-    /// markers of a previous recording need not occur here.
-    pub fn set_entry(&self, entry: Option<&LibraryEntry>) {
+    /// Feed the selected entry with its loaded meter; `None` clears. No file
+    /// I/O here. A target filter is reset: names and markers of a previous
+    /// recording need not occur here.
+    pub fn set_entry(&self, entry: Option<(&LibraryEntry, MeterData)>) {
         let inner = &self.inner;
-        inner.entry.replace(entry.map(EntryMeter::from_entry));
+        inner
+            .entry
+            .replace(entry.map(|(entry, meter)| EntryMeter::from_entry(entry, meter)));
         inner.position_ms.set(0);
         inner.current_fight.set(None);
         inner.breakdown.replace(None);

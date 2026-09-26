@@ -203,8 +203,7 @@ impl Storage {
     /// counted, unreadable sidecars are reported, and nothing is repaired.
     pub fn scan(&self) -> LibraryIndex {
         let mut index = LibraryIndex::default();
-        // Loaded in directory order, sorted once at the end: no per-entry
-        // clone of the (possibly meter-heavy) entries.
+        // Loaded in directory order, sorted once at the end.
         let mut scanned: Vec<(LibraryEntry, i64)> = Vec::new();
 
         let Ok(read_dir) = fs::read_dir(&self.root) else {
@@ -252,44 +251,37 @@ impl Storage {
 
     fn load_sidecar(&self, path: &Path) -> Result<LoadedSidecar, String> {
         let text = fs::read_to_string(path).map_err(|error| format!("unreadable: {error}"))?;
-        let probe: SidecarProbe =
-            serde_json::from_str(&text).map_err(|error| format!("invalid JSON: {error}"))?;
-
-        if probe.schema_version {
-            let sidecar: NativeSidecar = serde_json::from_str(&text)
-                .map_err(|error| format!("invalid native sidecar: {error}"))?;
-            if sidecar.schema_version > SIDECAR_SCHEMA_VERSION {
-                return Err(format!(
-                    "sidecar schema version {} is newer than {SIDECAR_SCHEMA_VERSION}",
-                    sidecar.schema_version
-                ));
+        // Native sidecars are the common case, so they are parsed once; the
+        // probe only runs to tell a broken native sidecar from a legacy one.
+        // The meter is most of a sidecar and only the player needs it
+        // (`load_meter`): it is streamed past, never materialized.
+        let sidecar = match serde_json::from_str::<NativeSidecar<IgnoredAny>>(&text) {
+            Ok(sidecar) => sidecar,
+            Err(native_error) => {
+                let probe: SidecarProbe = serde_json::from_str(&text)
+                    .map_err(|error| format!("invalid JSON: {error}"))?;
+                if probe.schema_version {
+                    return Err(format!("invalid native sidecar: {native_error}"));
+                }
+                return load_legacy_sidecar(path, &text);
             }
-            let media_path = self.root.join(&sidecar.media_file);
-            self.check_owned(&media_path)?;
-            let has_content = media_has_content(&media_path)?;
-            let start = sidecar.start_unix_ms;
-            let mut entry = sidecar.into_entry(media_path, path.to_path_buf());
-            entry.media.has_content = has_content;
-            entry.validate().map_err(|error| error.to_string())?;
-            return Ok(LoadedSidecar {
-                entry,
-                correlation_start_ms: start,
-            });
+        };
+        if sidecar.schema_version > SIDECAR_SCHEMA_VERSION {
+            return Err(format!(
+                "sidecar schema version {} is newer than {SIDECAR_SCHEMA_VERSION}",
+                sidecar.schema_version
+            ));
         }
-
-        let legacy: LegacySidecar = serde_json::from_str(&text)
-            .map_err(|error| format!("invalid legacy sidecar: {error}"))?;
-        let media_path = path.with_extension(MEDIA_EXTENSION);
+        let media_path = self.root.join(&sidecar.media_file);
+        self.check_owned(&media_path)?;
         let has_content = media_has_content(&media_path)?;
-        let mtime_ms = file_modified_ms(&media_path).unwrap_or(0);
-        let mut entry = legacy.into_entry(media_path, path.to_path_buf(), mtime_ms)?;
+        let start = sidecar.start_unix_ms;
+        let mut entry = sidecar.into_entry(media_path, path.to_path_buf());
         entry.media.has_content = has_content;
-        // Legacy sidecars without a recorded start fall back to the media
-        // mtime, which two POVs of one activity rarely share.
-        let correlation_start_ms = entry.start_unix_ms;
+        entry.validate().map_err(|error| error.to_string())?;
         Ok(LoadedSidecar {
             entry,
-            correlation_start_ms,
+            correlation_start_ms: start,
         })
     }
 
@@ -342,15 +334,15 @@ impl Storage {
                 duration_ms,
             ),
             media: media.facts.clone(),
-            meter: shift_meter(
-                &draft.meter,
-                draft.started_at_ms,
-                media_start_ms,
-                duration_ms,
-            ),
         };
+        let meter = shift_meter(
+            &draft.meter,
+            draft.started_at_ms,
+            media_start_ms,
+            duration_ms,
+        );
 
-        self.write_new_entry(&entry, &media.temp_media)?;
+        self.write_new_entry(&entry, &meter, &media.temp_media)?;
 
         // Both final names exist: the intermediates are now safe to remove.
         if let Some(replay) = artifacts.replay.as_deref() {
@@ -391,12 +383,17 @@ impl Storage {
 
     /// Write the sidecar temp, move the media into place, then rename the
     /// sidecar. `source_media` is consumed.
-    pub fn write_new_entry(&self, entry: &LibraryEntry, source_media: &Path) -> io::Result<()> {
+    pub fn write_new_entry(
+        &self,
+        entry: &LibraryEntry,
+        meter: &MeterData,
+        source_media: &Path,
+    ) -> io::Result<()> {
         entry
             .validate()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
         let sidecar_temp = temp_sibling(&entry.sidecar_path);
-        let json = NativeSidecar::from_entry(entry, &self.root).to_json()?;
+        let json = NativeSidecar::from_entry(entry, &self.root, meter).to_json()?;
         write_atomic(&sidecar_temp, None, json.as_bytes())?;
         move_file(source_media, &entry.media_path)?;
         fs::rename(&sidecar_temp, &entry.sidecar_path)
@@ -427,9 +424,13 @@ impl Storage {
         }
 
         let json = if probe.schema_version {
-            // The typed model already holds the whole entry; the on-disk
-            // document is only probed for its schema, never materialized.
-            NativeSidecar::from_entry(&updated, &self.root).to_json()?
+            // The entry does not hold the meter, so patch the document on
+            // disk rather than rebuilding it from the entry.
+            let mut sidecar: NativeSidecar = serde_json::from_str(&text)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+            sidecar.protected = updated.protected;
+            sidecar.tag = updated.tag.clone();
+            sidecar.to_json()?
         } else {
             // The sole sanctioned untyped escape hatch; it never enters the
             // domain model.
@@ -706,13 +707,30 @@ impl Storage {
     }
 }
 
+fn load_legacy_sidecar(path: &Path, text: &str) -> Result<LoadedSidecar, String> {
+    let legacy: LegacySidecar =
+        serde_json::from_str(text).map_err(|error| format!("invalid legacy sidecar: {error}"))?;
+    let media_path = path.with_extension(MEDIA_EXTENSION);
+    let has_content = media_has_content(&media_path)?;
+    let mtime_ms = file_modified_ms(&media_path).unwrap_or(0);
+    let mut entry = legacy.into_entry(media_path, path.to_path_buf(), mtime_ms)?;
+    entry.media.has_content = has_content;
+    // Legacy sidecars without a recorded start fall back to the media
+    // mtime, which two POVs of one activity rarely share.
+    let correlation_start_ms = entry.start_unix_ms;
+    Ok(LoadedSidecar {
+        entry,
+        correlation_start_ms,
+    })
+}
+
 struct LoadedSidecar {
     entry: LibraryEntry,
     /// Recorded activity start used for multi-POV correlation.
     correlation_start_ms: i64,
 }
 
-/// Classification probe parsed ahead of the full sidecar: whether a
+/// Lenient classification probe: whether a
 /// `schema_version` key is present at all (native, whatever its value) and
 /// which media file the sidecar names. The meter payload can be tens of
 /// megabytes, so unknown fields are streamed past instead of materialized.
@@ -865,8 +883,10 @@ impl<'de> Deserialize<'de> for MediaFile {
 
 // --- Native sidecar ---
 
+/// `M` is the meter payload: `MeterData` to read or write it, `IgnoredAny`
+/// for the library scan, a reference when writing a meter held elsewhere.
 #[derive(Debug, Serialize, Deserialize)]
-struct NativeSidecar {
+struct NativeSidecar<M = MeterData> {
     schema_version: u32,
     /// Media file name relative to the storage root.
     media_file: String,
@@ -887,11 +907,11 @@ struct NativeSidecar {
     media: MediaFacts,
     /// Absent in sidecars written before the damage meter shipped.
     #[serde(default)]
-    meter: MeterData,
+    meter: M,
 }
 
-impl NativeSidecar {
-    fn from_entry(entry: &LibraryEntry, root: &Path) -> Self {
+impl<M> NativeSidecar<M> {
+    fn from_entry(entry: &LibraryEntry, root: &Path, meter: M) -> Self {
         let media_file = entry
             .media_path
             .strip_prefix(root)
@@ -916,7 +936,7 @@ impl NativeSidecar {
             details: entry.details.clone(),
             timeline: entry.timeline.clone(),
             media: entry.media.clone(),
-            meter: entry.meter.clone(),
+            meter,
         }
     }
 
@@ -939,16 +959,33 @@ impl NativeSidecar {
             details: self.details,
             timeline: self.timeline,
             media: self.media,
-            meter: self.meter,
         }
     }
+}
 
+impl<M: Serialize> NativeSidecar<M> {
     /// Compact: meter payloads make pretty-printed sidecars several times
     /// larger and slower to parse, and every reader is format-agnostic.
     fn to_json(&self) -> io::Result<String> {
         serde_json::to_string(self)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
     }
+}
+
+/// Read one sidecar's damage meter. The library index never holds meters
+/// (they are most of a sidecar's size), so the player loads the selected one
+/// on demand. Legacy sidecars and native ones written before the meter
+/// shipped have none.
+pub fn load_meter(sidecar_path: &Path) -> io::Result<MeterData> {
+    #[derive(Deserialize)]
+    struct MeterOnly {
+        #[serde(default)]
+        meter: MeterData,
+    }
+    let text = fs::read_to_string(sidecar_path)?;
+    serde_json::from_str::<MeterOnly>(&text)
+        .map(|sidecar| sidecar.meter)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
 }
 
 // --- Legacy sidecar ---
@@ -1160,7 +1197,6 @@ impl LegacySidecar {
                 codec: None,
                 has_content: true,
             },
-            meter: MeterData::default(),
         };
         entry.validate().map_err(|error| error.to_string())?;
         Ok(entry)
@@ -2143,37 +2179,38 @@ mod tests {
         assert_eq!(entry.timeline[0].end_ms(), None);
         assert_eq!(entry.timeline[1].start_ms(), 3_000);
         assert_eq!(entry.timeline[1].end_ms(), Some(63_000));
-        // Meter fights shift by the same three-second lead-in, clamp to the
-        // media duration, and keep their contents; the fight beyond the media
-        // end is dropped.
-        assert_eq!(entry.meter.fights.len(), 3);
-        assert_eq!(entry.meter.fights[0].start_ms, 3_500);
-        assert_eq!(entry.meter.fights[0].end_ms, 61_000);
-        assert_eq!(entry.meter.fights[0].active_ms, 55_000);
-        assert_eq!(entry.meter.fights[0].actors[0].spells[0].amount, 1_234);
+        // Meter fights, read back from the written sidecar, shift by the same
+        // three-second lead-in, clamp to the media duration, and keep their
+        // contents; the fight beyond the media end is dropped.
+        let meter = load_meter(&entry.sidecar_path).expect("meter");
+        assert_eq!(meter.fights.len(), 3);
+        assert_eq!(meter.fights[0].start_ms, 3_500);
+        assert_eq!(meter.fights[0].end_ms, 61_000);
+        assert_eq!(meter.fights[0].active_ms, 55_000);
+        assert_eq!(meter.fights[0].actors[0].spells[0].amount, 1_234);
         assert_eq!(
-            entry.meter.fights[0].actors[0].spells[0].samples[0].at_ms,
-            entry.meter.fights[0].end_ms
+            meter.fights[0].actors[0].spells[0].samples[0].at_ms,
+            meter.fights[0].end_ms
         );
         // A spell's own per-target split shifts with it.
-        let nested = &entry.meter.fights[0].actors[0].spells[0].targets[0];
+        let nested = &meter.fights[0].actors[0].spells[0].targets[0];
         assert_eq!(nested.samples[0].at_ms, 33_000);
         assert_eq!(nested.amount, 1_234);
-        assert_eq!(entry.meter.fights[0].deaths[0].at_ms, 5_000);
+        assert_eq!(meter.fights[0].deaths[0].at_ms, 5_000);
         assert_eq!(
-            entry.meter.fights[0].deaths[0]
+            meter.fights[0].deaths[0]
                 .events
                 .iter()
                 .map(|event| event.at_ms)
                 .collect::<Vec<_>>(),
             vec![3_000, 4_500]
         );
-        assert_eq!(entry.meter.fights[1].start_ms, 78_000);
-        assert_eq!(entry.meter.fights[1].end_ms, 78_000);
-        assert_eq!(entry.meter.fights[1].active_ms, 12_000);
-        assert_eq!(entry.meter.fights[2].start_ms, 3_000);
-        assert_eq!(entry.meter.fights[2].end_ms, 7_000);
-        assert_eq!(entry.meter.fights[2].active_ms, 3_000);
+        assert_eq!(meter.fights[1].start_ms, 78_000);
+        assert_eq!(meter.fights[1].end_ms, 78_000);
+        assert_eq!(meter.fights[1].active_ms, 12_000);
+        assert_eq!(meter.fights[2].start_ms, 3_000);
+        assert_eq!(meter.fights[2].end_ms, 7_000);
+        assert_eq!(meter.fights[2].active_ms, 3_000);
         assert!(entry.media_path.starts_with(tree.library()));
         assert!(
             entry
@@ -2278,8 +2315,8 @@ mod tests {
         let tree = TempTree::new("update");
         let storage = tree.storage();
 
-        // A native sidecar round-trips through the typed model; the meter must
-        // survive the tag/protect rewrite.
+        // A native sidecar round-trips through the typed model; the meter,
+        // which the entry does not hold, must survive the tag/protect rewrite.
         let temp_media = tree.capture_root().join("staging/native.mp4");
         fs::write(&temp_media, "media").expect("media");
         let mut native_draft = draft(&RecordingId::new());
@@ -2301,6 +2338,7 @@ mod tests {
                 },
             )
             .expect("finalize");
+        let written = load_meter(&native.sidecar_path).expect("finalized meter");
         let updated = storage
             .update(&native, &EntryUpdate::Protected(true))
             .expect("protect native");
@@ -2308,20 +2346,20 @@ mod tests {
             .update(&updated, &EntryUpdate::Tag("  keeper  ".to_owned()))
             .expect("tag native");
         assert_eq!(tagged.tag.as_deref(), Some("  keeper  "));
-        // The update path rebuilds the sidecar from the entry: meter contents
-        // must come back byte-identical, and the rescan equality below proves
-        // they were actually written.
-        assert_eq!(updated.meter, native.meter);
+        // Both rewrites patch the document on disk, so the meter comes back
+        // unchanged.
+        let meter = load_meter(&tagged.sidecar_path).expect("updated meter");
+        assert_eq!(meter, written);
         // No replay here: the media starts five seconds after the activity, so
         // the lead-in is negative. The encounter fight clamps to the media
         // start, the trash fight end clamps to the 70 s media duration, and
         // the pre-media fight is dropped.
-        assert_eq!(updated.meter.fights.len(), 2);
-        assert_eq!(updated.meter.fights[0].start_ms, 0);
-        assert_eq!(updated.meter.fights[0].end_ms, 53_000);
-        assert_eq!(updated.meter.fights[0].active_ms, 55_000);
-        assert_eq!(updated.meter.fights[1].start_ms, 70_000);
-        assert_eq!(updated.meter.fights[1].end_ms, 70_000);
+        assert_eq!(meter.fights.len(), 2);
+        assert_eq!(meter.fights[0].start_ms, 0);
+        assert_eq!(meter.fights[0].end_ms, 53_000);
+        assert_eq!(meter.fights[0].active_ms, 55_000);
+        assert_eq!(meter.fights[1].start_ms, 70_000);
+        assert_eq!(meter.fights[1].end_ms, 70_000);
         let reloaded = storage
             .scan()
             .entries
