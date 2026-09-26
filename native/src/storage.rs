@@ -943,8 +943,10 @@ impl NativeSidecar {
         }
     }
 
+    /// Compact: meter payloads make pretty-printed sidecars several times
+    /// larger and slower to parse, and every reader is format-agnostic.
     fn to_json(&self) -> io::Result<String> {
-        serde_json::to_string_pretty(self)
+        serde_json::to_string(self)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
     }
 }
@@ -1465,7 +1467,7 @@ fn file_modified_ms(path: &Path) -> Option<i64> {
 }
 
 /// Legacy sidecars are `JSON.stringify(metadata, null, 2)` with no trailing
-/// newline; native sidecars use the same shape.
+/// newline; patched legacy sidecars keep that shape.
 fn pretty_json(value: &Value) -> io::Result<String> {
     serde_json::to_string_pretty(value)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
