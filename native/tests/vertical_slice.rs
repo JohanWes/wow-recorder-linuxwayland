@@ -661,6 +661,40 @@ fn commands_are_served_while_a_capture_is_ending() {
     assert_eq!(harness.latest.entries[0].category, Category::Raids);
 }
 
+/// A new pull without an `ENCOUNTER_END` for the previous one supersedes it:
+/// both must be saved, the old one abandoned.
+#[test]
+fn a_superseding_encounter_keeps_both_pulls() {
+    let mut harness = Harness::new("superseded");
+    harness.log(&raid_start(now_unix_ms() - 1_000));
+    harness.pump(|snapshot| snapshot.active.is_some());
+    let first = harness.latest.active.clone().unwrap().id;
+    harness.emit_artifacts(true);
+
+    harness.log(&raid_start(now_unix_ms()));
+    harness.pump(|snapshot| {
+        snapshot
+            .active
+            .as_ref()
+            .is_some_and(|active| active.id != first)
+    });
+    let second = harness.latest.active.clone().unwrap().id;
+    harness.emit_artifacts(true);
+    harness.log(&[raid_end(now_unix_ms(), true)]);
+    harness.pump(|snapshot| snapshot.entries.len() == 2);
+
+    let outcome_of = |id| {
+        harness
+            .latest
+            .entries
+            .iter()
+            .find(|entry| &entry.id == id)
+            .map(|entry| entry.outcome)
+    };
+    assert_eq!(outcome_of(&first), Some(Outcome::Loss));
+    assert_eq!(outcome_of(&second), Some(Outcome::Win));
+}
+
 #[test]
 fn dismissing_the_release_notes_ends_them_for_good() {
     let harness = Harness::new("dismissals");

@@ -793,6 +793,16 @@ impl Coordinator {
     }
 
     fn begin(&mut self, draft: RecordingDraft, detected_at_ms: i64) {
+        // The previous activity already ended (or was just superseded by this
+        // one) and is only running out its overrun: cut the overrun short so
+        // the new activity takes the deferred path instead of being dropped.
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.stop_at_ms.is_some())
+        {
+            self.end_capture();
+        }
         if self.active.is_some() {
             self.drop_activity(&draft.flavor);
             return;
