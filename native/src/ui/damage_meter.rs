@@ -55,6 +55,11 @@ type SeekFn = Box<dyn Fn(u64)>;
 /// plays out on screen instead of having already happened.
 const SEEK_LEAD_MS: u64 = 3_000;
 
+/// Minimum spacing of playhead-driven refreshes, so dragging the timeline
+/// re-projects the meter about ten times a second instead of on every
+/// pointer event.
+const POSITION_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// How long a bar fill eases from its previous on-screen position toward
 /// the new one. Kept under the 500 ms sample cadence so consecutive
 /// updates chain into continuous motion instead of jagged jumps.
@@ -470,6 +475,10 @@ struct Inner {
     /// Set when a refresh was deferred while hidden; the next reveal renders
     /// it.
     dirty: Cell<bool>,
+    /// Whether a playhead refresh ran within the last
+    /// [`POSITION_REFRESH_INTERVAL`], and whether another move arrived since.
+    position_throttled: Cell<bool>,
+    position_pending: Cell<bool>,
     /// The virtualized history list on screen and its data key. Occurrence
     /// times and deaths are frozen between playhead ticks, so a matching key
     /// keeps the widget — scroll position and bound rows included — instead
@@ -618,6 +627,8 @@ impl DamageMeter {
             position_ms: Cell::new(0),
             visible: Cell::new(false),
             dirty: Cell::new(false),
+            position_throttled: Cell::new(false),
+            position_pending: Cell::new(false),
             list_cache: RefCell::new(None),
             breakdown: RefCell::new(None),
             spell: RefCell::new(None),
@@ -708,7 +719,7 @@ impl DamageMeter {
         if position_ms / SAMPLE_INTERVAL_MS != previous_interval
             || inner.current_fight.get() != previous_fight
         {
-            inner.refresh();
+            inner.refresh_for_position();
         }
     }
 
@@ -983,6 +994,26 @@ impl Inner {
         let fight = self.selected_fight();
         self.rebuild_title(fight.as_ref());
         self.rebuild_content(fight);
+    }
+
+    /// A playhead refresh, throttled: the first move renders at once and
+    /// later moves inside [`POSITION_REFRESH_INTERVAL`] coalesce into one
+    /// trailing refresh, so a timeline drag always ends on its final
+    /// position.
+    fn refresh_for_position(self: &Rc<Self>) {
+        if self.position_throttled.get() {
+            self.position_pending.set(true);
+            return;
+        }
+        self.refresh();
+        self.position_throttled.set(true);
+        let this = Rc::clone(self);
+        gtk4::glib::timeout_add_local_once(POSITION_REFRESH_INTERVAL, move || {
+            this.position_throttled.set(false);
+            if this.position_pending.take() {
+                this.refresh_for_position();
+            }
+        });
     }
 
     /// Mirror the cells into the stateful actions so rebuilt menus mark the
