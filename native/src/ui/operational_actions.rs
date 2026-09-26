@@ -489,12 +489,6 @@ mod tests {
                 true,
                 (true, false, false),
             ),
-            (
-                RecorderStatus::Buffering,
-                Category::Manual,
-                true,
-                (true, false, false),
-            ),
         ];
         for (status, selected, manual, (visible, start, stop)) in cases {
             let view = manual_view(&snapshot(status.clone(), selected, manual));

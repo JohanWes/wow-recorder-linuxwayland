@@ -564,9 +564,7 @@ pub struct CorrelatedActivity {
 pub enum RecorderStatus {
     SetupRequired,
     WaitingForWow,
-    Reconfiguring,
     Ready,
-    Buffering,
     Recording {
         category: Category,
         title: String,
@@ -580,9 +578,6 @@ pub enum RecorderStatus {
     },
     Finalizing {
         title: String,
-    },
-    Fatal {
-        problem: Problem,
     },
 }
 

@@ -29,8 +29,7 @@
   background-color: @green_4;
 }
 
-.status-light.tone-recording,
-.status-light.tone-error {
+.status-light.tone-recording {
   background-color: @red_3;
 }
 
