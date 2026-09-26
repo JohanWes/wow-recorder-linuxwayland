@@ -845,34 +845,24 @@ fn update_arena_category(active: &mut ActiveActivity) {
     };
 }
 
-/// The combatant map written by combatant events: the current round for solo
-/// shuffle, the activity map otherwise.
-fn combatant_target(active: &mut ActiveActivity) -> &mut Combatants {
-    if let ActiveKind::SoloShuffle(shuffle) = &mut active.kind
-        && let Some(round) = shuffle.rounds.last_mut()
-    {
-        return &mut round.combatants;
-    }
-    &mut active.combatants
-}
-
-fn set_player_guid(active: &mut ActiveActivity, guid: Option<String>) {
-    if let ActiveKind::SoloShuffle(shuffle) = &mut active.kind
-        && let Some(round) = shuffle.rounds.last_mut()
-    {
-        round.player_guid = guid;
-        return;
-    }
-    active.player_guid = guid;
-}
-
-fn current_player_guid(active: &ActiveActivity) -> Option<&String> {
+/// The combatant map and player GUID that combatant events write: the current
+/// round's for solo shuffle, the activity's otherwise.
+fn roster(active: &ActiveActivity) -> (&Combatants, Option<&String>) {
     if let ActiveKind::SoloShuffle(shuffle) = &active.kind
         && let Some(round) = shuffle.rounds.last()
     {
-        return round.player_guid.as_ref();
+        return (&round.combatants, round.player_guid.as_ref());
     }
-    active.player_guid.as_ref()
+    (&active.combatants, active.player_guid.as_ref())
+}
+
+fn roster_mut(active: &mut ActiveActivity) -> (&mut Combatants, &mut Option<String>) {
+    if let ActiveKind::SoloShuffle(shuffle) = &mut active.kind
+        && let Some(round) = shuffle.rounds.last_mut()
+    {
+        return (&mut round.combatants, &mut round.player_guid);
+    }
+    (&mut active.combatants, &mut active.player_guid)
 }
 
 // --- Encounter handling (raids and Mythic+ boss segments) ---
@@ -1401,7 +1391,7 @@ fn handle_arena_end(
 
 /// False when the player is unknown.
 fn arena_result(active: &ActiveActivity, winning_team_id: u32) -> bool {
-    let Some(guid) = current_player_guid(active) else {
+    let Some(guid) = roster(active).1 else {
         return false;
     };
     let Some(player) = active.combatants.get(guid) else {
@@ -1605,7 +1595,7 @@ fn handle_combatant_info(
     };
     match rules {
         Rules::Retail => {
-            let target = combatant_target(active);
+            let target = roster_mut(active).0;
             if target
                 .get(guid)
                 .is_some_and(CombatantState::is_fully_defined)
@@ -1620,7 +1610,7 @@ fn handle_combatant_info(
             });
         }
         Rules::Classic => {
-            let target = combatant_target(active);
+            let target = roster_mut(active).0;
             if target.contains(guid) {
                 return;
             }
@@ -1630,7 +1620,7 @@ fn handle_combatant_info(
             });
         }
         Rules::Era => {
-            combatant_target(active).upsert(CombatantState {
+            roster_mut(active).0.upsert(CombatantState {
                 guid: guid.to_string(),
                 team_id,
                 spec_id,
@@ -1719,20 +1709,13 @@ fn handle_player_observed(
                 }
                 let allow_new =
                     matches!(active.kind, ActiveKind::Battleground { .. }) || is_unit_self(flags);
-                let mut player_guid = current_player_guid(active).cloned();
-                let index = process_combatant(
-                    combatant_target(active),
-                    &mut player_guid,
-                    guid,
-                    name,
-                    flags,
-                    allow_new,
-                );
-                set_player_guid(active, player_guid);
+                let (combatants, player_guid) = roster_mut(active);
+                let index =
+                    process_combatant(combatants, player_guid, guid, name, flags, allow_new);
                 if kind == PlayerObservationKind::CastSucceeded
                     && matches!(active.kind, ActiveKind::Battleground { .. })
                     && let Some(combatant) =
-                        index.and_then(|i| combatant_target(active).entries.get_mut(i))
+                        index.and_then(|i| roster_mut(active).0.entries.get_mut(i))
                     && combatant.spec_id.is_none()
                     && let Some(spec) = retail_unique_spec(spell_name)
                 {
@@ -1740,7 +1723,7 @@ fn handle_player_observed(
                 }
             }
             Rules::Classic => {
-                let already_know = combatant_target(active).contains(guid);
+                let already_know = roster(active).0.contains(guid);
                 let Some(index) = process_classic_combatant(
                     active,
                     guid,
@@ -1755,7 +1738,7 @@ fn handle_player_observed(
                 // First enemy spotted in an arena: the gates just opened, so the
                 // activity start moves to this event.
                 if matches!(active.kind, ActiveKind::Arena(_)) && !already_know {
-                    let target = combatant_target(active);
+                    let target = roster_mut(active).0;
                     let is_enemy = target
                         .entries
                         .get(index)
@@ -1770,7 +1753,7 @@ fn handle_player_observed(
                         }
                     }
                 }
-                let combatant = &mut combatant_target(active).entries[index];
+                let combatant = &mut roster_mut(active).0.entries[index];
                 if combatant.spec_id.is_none() {
                     let spec = if kind == PlayerObservationKind::CastSucceeded {
                         classic_unique_spec(spell_name)
@@ -1783,19 +1766,11 @@ fn handle_player_observed(
                 }
             }
             Rules::Era => {
-                let mut player_guid = current_player_guid(active).cloned();
-                let index = process_combatant(
-                    combatant_target(active),
-                    &mut player_guid,
-                    guid,
-                    name,
-                    flags,
-                    false,
-                );
-                set_player_guid(active, player_guid);
+                let (combatants, player_guid) = roster_mut(active);
+                let index = process_combatant(combatants, player_guid, guid, name, flags, false);
                 if kind == PlayerObservationKind::CastSucceeded
                     && let Some(combatant) =
-                        index.and_then(|i| combatant_target(active).entries.get_mut(i))
+                        index.and_then(|i| roster_mut(active).0.entries.get_mut(i))
                     && combatant.spec_id.is_none()
                     && let Some(spec) = classic_unique_spec(spell_name)
                 {
@@ -1815,8 +1790,9 @@ fn process_classic_combatant(
     target_name: &str,
     target_flags: u64,
 ) -> Option<usize> {
-    let src_identified = combatant_target(active).contains(guid);
-    let dest_identified = combatant_target(active).contains(target_guid);
+    let (combatants, _) = roster(active);
+    let src_identified = combatants.contains(guid);
+    let dest_identified = combatants.contains(target_guid);
     if matches!(active.kind, ActiveKind::Arena(_))
         && !is_unit_self(flags)
         && !src_identified
@@ -1826,29 +1802,21 @@ fn process_classic_combatant(
         // identified unit, crawling out from the player.
         return None;
     }
-    let mut player_guid = current_player_guid(active).cloned();
+    let (combatants, player_guid) = roster_mut(active);
     if src_identified && !dest_identified {
         process_combatant(
-            combatant_target(active),
-            &mut player_guid,
+            combatants,
+            player_guid,
             target_guid,
             target_name,
             target_flags,
             true,
         );
     }
-    let index = process_combatant(
-        combatant_target(active),
-        &mut player_guid,
-        guid,
-        name,
-        flags,
-        true,
-    )?;
-    set_player_guid(active, player_guid);
+    let index = process_combatant(combatants, player_guid, guid, name, flags, true)?;
     // Classic has no team IDs; friendly units are assigned team 1.
     let team = if is_unit_friendly(flags) { 1 } else { 0 };
-    if let Some(combatant) = combatant_target(active).entries.get_mut(index) {
+    if let Some(combatant) = combatants.entries.get_mut(index) {
         combatant.team_id = Some(team);
     }
     update_arena_category(active);
@@ -2142,13 +2110,8 @@ fn finalize_open_items(active: &mut ActiveActivity) {
 }
 
 fn player_summary(active: &ActiveActivity) -> Option<PlayerSummary> {
-    let (combatants, guid) = if let ActiveKind::SoloShuffle(shuffle) = &active.kind {
-        let round = shuffle.rounds.last()?;
-        (&round.combatants, round.player_guid.as_ref()?)
-    } else {
-        (&active.combatants, active.player_guid.as_ref()?)
-    };
-    let combatant = combatants.get(guid)?;
+    let (combatants, guid) = roster(active);
+    let combatant = combatants.get(guid?)?;
     Some(PlayerSummary {
         name: combatant.name.clone()?,
         realm: combatant.realm.clone(),
@@ -2161,16 +2124,11 @@ fn player_summary(active: &ActiveActivity) -> Option<PlayerSummary> {
 fn combatant_summaries(active: &ActiveActivity) -> Vec<CombatantSummary> {
     // Solo shuffle records only the combatants from the final round, and
     // battlegrounds record none at all (the player is still required).
-    let combatants = match &active.kind {
-        ActiveKind::SoloShuffle(shuffle) => shuffle
-            .rounds
-            .last()
-            .map(|round| &round.combatants)
-            .unwrap_or(&active.combatants),
-        ActiveKind::Battleground { .. } => return Vec::new(),
-        _ => &active.combatants,
-    };
-    combatants
+    if matches!(active.kind, ActiveKind::Battleground { .. }) {
+        return Vec::new();
+    }
+    roster(active)
+        .0
         .iter()
         .map(|combatant| CombatantSummary {
             name: combatant.name.clone(),
@@ -2221,15 +2179,8 @@ fn build_draft(active: ActiveActivity, outcome: Outcome, ended_at_ms: i64) -> Re
 /// GUID-to-name map for pet-owner merge naming, from the same combatant map
 /// the summaries use.
 fn combatant_names(active: &ActiveActivity) -> HashMap<String, String> {
-    let combatants = match &active.kind {
-        ActiveKind::SoloShuffle(shuffle) => shuffle
-            .rounds
-            .last()
-            .map(|round| &round.combatants)
-            .unwrap_or(&active.combatants),
-        _ => &active.combatants,
-    };
-    combatants
+    roster(active)
+        .0
         .iter()
         .filter_map(|combatant| {
             combatant
