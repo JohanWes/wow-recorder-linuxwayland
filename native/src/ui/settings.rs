@@ -702,6 +702,10 @@ impl Settings {
         output_combo.set_title("Output audio");
         output_combo.set_subtitle("Recorded game/system audio");
         let output_ids: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        connect_audio_combo(&output_combo, &output_ids, {
+            let draft = Rc::clone(&draft);
+            move |id| draft.borrow_mut().capture.audio_output = id
+        });
         audio_group.add(&output_combo);
 
         let input_switch = adw::SwitchRow::new();
@@ -711,6 +715,15 @@ impl Settings {
         let input_combo = adw::ComboRow::new();
         input_combo.set_title("Input audio");
         let input_ids: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        connect_audio_combo(&input_combo, &input_ids, {
+            let draft = Rc::clone(&draft);
+            move |id| {
+                let mut draft = draft.borrow_mut();
+                if draft.capture.audio_input.is_some() {
+                    draft.capture.audio_input = Some(id);
+                }
+            }
+        });
         registry
             .borrow_mut()
             .push(("capture.audio_input", input_combo.clone().upcast()));
@@ -1200,26 +1213,8 @@ impl Settings {
                 &output_ids,
                 &devices.outputs,
                 &selected_output,
-                {
-                    let draft = Rc::clone(&draft);
-                    move |id| draft.borrow_mut().capture.audio_output = id
-                },
             );
-            fill_combo(
-                &input_combo,
-                &input_ids,
-                &devices.inputs,
-                &selected_input,
-                {
-                    let draft = Rc::clone(&draft);
-                    move |id| {
-                        let mut draft = draft.borrow_mut();
-                        if draft.capture.audio_input.is_some() {
-                            draft.capture.audio_input = Some(id);
-                        }
-                    }
-                },
-            );
+            fill_combo(&input_combo, &input_ids, &devices.inputs, &selected_input);
         });
     }
 }
@@ -1229,13 +1224,20 @@ fn fill_combo(
     ids: &Rc<RefCell<Vec<String>>>,
     devices: &[AudioDevice],
     selected: &str,
-    on_change: impl Fn(String) + 'static,
 ) {
     let (model, index) = audio_model(devices, selected);
     *ids.borrow_mut() = model.iter().map(|device| device.id.clone()).collect();
     let labels: Vec<&str> = model.iter().map(|device| device.label.as_str()).collect();
     combo.set_model(Some(&gtk4::StringList::new(&labels)));
     combo.set_selected(index);
+}
+
+/// Connected once per combo; `fill_combo` refills it on every device refresh.
+fn connect_audio_combo(
+    combo: &adw::ComboRow,
+    ids: &Rc<RefCell<Vec<String>>>,
+    on_change: impl Fn(String) + 'static,
+) {
     let ids = Rc::clone(ids);
     combo.connect_selected_notify(move |combo| {
         if let Some(id) = ids.borrow().get(combo.selected() as usize) {
