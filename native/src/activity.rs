@@ -27,7 +27,7 @@ use crate::domain::{
 };
 use crate::meter::{BuffEvent, MeterAccumulator};
 use crate::parser::{
-    AuraType, CombatEvent, ParsedEvent, PlayerObservationKind, is_bloodlust_spell,
+    AuraType, CombatEvent, EMPTY_GUID, ParsedEvent, PlayerObservationKind, is_bloodlust_spell,
 };
 
 const RAID_DEFAULT_OVERRUN_MS: u64 = 3_000;
@@ -42,7 +42,6 @@ const ALLERIA_ENCOUNTER_ID: u32 = 3181;
 const BELOREN_UNIT_NAME: &str = "Belo'ren";
 const ALLERIA_UNIT_NAME: &str = "Alleria Windrunner";
 const BELOREN_PHASE_SPELL: &str = "Rebirth";
-const EMPTY_GUID: &str = "0000000000000000";
 pub(crate) const AFFILIATION_MINE: u64 = 0x1;
 pub(crate) const REACTION_FRIENDLY: u64 = 0x10;
 pub(crate) const CONTROL_PLAYER: u64 = 0x100;

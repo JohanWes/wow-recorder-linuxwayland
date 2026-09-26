@@ -365,7 +365,7 @@ const BASE_UNIT_FIELDS: usize = 8;
 const LEGACY_ADVANCED_BLOCK_FIELDS: usize = 17;
 /// COMBAT_LOG_VERSION 22 (Midnight) widened the advanced block by two fields.
 const V22_ADVANCED_BLOCK_FIELDS: usize = 19;
-const EMPTY_GUID: &str = "0000000000000000";
+pub(crate) const EMPTY_GUID: &str = "0000000000000000";
 
 /// A located advanced block: where it starts, whether the infoGUID rule
 /// found one, and where the event suffix begins.
