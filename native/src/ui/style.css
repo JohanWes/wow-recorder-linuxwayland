@@ -23,6 +23,7 @@
   min-width: 10px;
   min-height: 10px;
   border-radius: 9999px;
+  transition: background-color 250ms ease-out;
 }
 
 .status-light.tone-ready {
@@ -48,10 +49,6 @@
 }
 
 /* Compact category rail. */
-.category-row image {
-  color: @window_fg_color;
-}
-
 .category-count {
   color: alpha(@window_fg_color, 0.6);
   font-size: 0.85em;
@@ -234,11 +231,6 @@ window.wr-light .wr-class-warrior { color: #7d5f36; }
   color: alpha(#ffffff, 0.85);
   font-size: 0.85em;
   line-height: 1.25;
-}
-
-/* Combat seek track: fixed dark geometry inside the black player area. */
-.wr-timeline {
-  min-height: 26px;
 }
 
 /* Setup/error detail: technical text stays selectable but quiet. */

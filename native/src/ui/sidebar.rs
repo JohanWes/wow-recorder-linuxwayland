@@ -18,8 +18,6 @@ use super::{ActionSink, CATEGORIES, ShellAction};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowView {
     pub category: Category,
-    pub label: &'static str,
-    pub icon_name: &'static str,
     pub count: usize,
     pub visible: bool,
     pub active: bool,
@@ -35,7 +33,7 @@ pub fn rows(snapshot: &AppSnapshot) -> Vec<RowView> {
         .sum();
     CATEGORIES
         .iter()
-        .map(|(category, label, icon_name)| {
+        .map(|(category, _, _)| {
             let count = snapshot
                 .category_counts
                 .iter()
@@ -48,8 +46,6 @@ pub fn rows(snapshot: &AppSnapshot) -> Vec<RowView> {
                 || force_show;
             RowView {
                 category: category.clone(),
-                label,
-                icon_name,
                 count,
                 visible,
                 active: snapshot.config.interface.selected_category == *category,
@@ -100,7 +96,6 @@ impl Sidebar {
         for (category, label, icon_name) in CATEGORIES {
             let icon = gtk4::Image::from_icon_name(icon_name);
             icon.set_pixel_size(20);
-            icon.add_css_class("category-row");
             let text = gtk4::Label::new(Some(label));
             text.set_xalign(0.0);
             text.set_hexpand(true);
