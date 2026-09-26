@@ -166,7 +166,6 @@ impl Default for Timeouts {
 }
 
 const GSR_EXIT_SELECTION_DENIED: i32 = 60;
-const LOG_TAIL_BYTES: u64 = 8 * 1024;
 const MAX_RESTART_DELAY_SECONDS: u64 = 30;
 /// A child that ran this long before exiting was not crash-looping.
 const STABLE_CHILD: Duration = Duration::from_secs(60);
@@ -377,7 +376,7 @@ impl Recorder {
 
         std::thread::sleep(self.timeouts.arm_stability);
         if let Some(status) = child.try_wait()? {
-            let log_tail = read_log_tail(&Self::log_path(config));
+            let log_tail = process::read_log_tail(&Self::log_path(config));
             if status.code() == Some(GSR_EXIT_SELECTION_DENIED) {
                 return Err(RecorderError::SelectionDenied { log_tail });
             }
@@ -947,26 +946,10 @@ fn read_token(path: &Path) -> Option<String> {
     if token.is_empty() { None } else { Some(token) }
 }
 
-fn read_log_tail(path: &Path) -> String {
-    let Ok(mut file) = fs::File::open(path) else {
-        return String::new();
-    };
-    let Ok(size) = file.metadata().map(|meta| meta.len()) else {
-        return String::new();
-    };
-    let start = size.saturating_sub(LOG_TAIL_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
-    }
-    let mut tail = Vec::new();
-    let _ = file.read_to_end(&mut tail);
-    String::from_utf8_lossy(&tail).into_owned()
-}
-
 fn text_tail(text: &str) -> String {
     let start = text
         .len()
-        .saturating_sub(usize::try_from(LOG_TAIL_BYTES).unwrap_or(usize::MAX));
+        .saturating_sub(usize::try_from(process::LOG_TAIL_BYTES).unwrap_or(usize::MAX));
     String::from_utf8_lossy(&text.as_bytes()[start..]).into_owned()
 }
 

@@ -1,13 +1,39 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Checked Unix signal/termination helpers for spawned children.
+//! Checked Unix signal/termination helpers for spawned children, plus the
+//! bounded log tail their failures are reported with.
 //!
 //! Rust's `Child` can only SIGKILL, so GSR control signals and FFmpeg
 //! termination go through `libc::kill` here.
 
-use std::io;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
+use std::path::Path;
 use std::process::Child;
 use std::time::{Duration, Instant};
+
+/// How much of a child's log a failure report carries.
+pub const LOG_TAIL_BYTES: u64 = 8 * 1024;
+
+/// The last `LOG_TAIL_BYTES` of a log file, lossily decoded; empty when the
+/// file cannot be read.
+pub fn read_log_tail(path: &Path) -> String {
+    let Ok(mut file) = File::open(path) else {
+        return String::new();
+    };
+    let Ok(size) = file.metadata().map(|meta| meta.len()) else {
+        return String::new();
+    };
+    if file
+        .seek(SeekFrom::Start(size.saturating_sub(LOG_TAIL_BYTES)))
+        .is_err()
+    {
+        return String::new();
+    }
+    let mut tail = Vec::new();
+    let _ = file.read_to_end(&mut tail);
+    String::from_utf8_lossy(&tail).into_owned()
+}
 
 /// The runtime SIGRTMIN value; GSR toggles regular recording with it.
 pub fn sigrtmin() -> i32 {
