@@ -53,6 +53,8 @@ modules:
       - cargo --offline test --manifest-path native/Cargo.toml --all-targets
       - cargo --offline build --manifest-path native/Cargo.toml --release
       - install -Dm755 native/target/release/warcraft-recorder /app/bin/warcraft-recorder
+      - install -d /app/share/warcraft-recorder
+      - glib-compile-resources --sourcedir=data --target=/app/share/warcraft-recorder/spells.gresource data/spells.gresource.xml
       - install -Dm644 data/io.github.JohanWes.WarcraftRecorder.desktop /app/share/applications/io.github.JohanWes.WarcraftRecorder.desktop
       - install -Dm644 data/io.github.JohanWes.WarcraftRecorder.metainfo.xml /app/share/metainfo/io.github.JohanWes.WarcraftRecorder.metainfo.xml
       - install -Dm644 data/icons/io.github.JohanWes.WarcraftRecorder.svg /app/share/icons/hicolor/scalable/apps/io.github.JohanWes.WarcraftRecorder.svg
