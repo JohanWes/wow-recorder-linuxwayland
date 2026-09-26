@@ -85,8 +85,7 @@ pub struct RecordingDraft {
     pub id: RecordingId,
     pub category: Category,
     pub flavor: GameFlavor,
-    /// Occurrence start of the activity (combat-log event time). Distinct from
-    /// the later detection time carried by `Begin`.
+    /// Occurrence start of the activity (combat-log event time).
     pub started_at_ms: i64,
     pub overrun_ms: u64,
     pub details: ActivityDetails,
@@ -105,7 +104,6 @@ pub struct RecordingDraft {
 pub enum ActivityAction {
     Begin {
         draft: Box<RecordingDraft>,
-        detected_at_ms: i64,
     },
     Complete {
         id: RecordingId,
@@ -707,7 +705,6 @@ fn allow_record(config: &ActivitySettings, category: &Category) -> bool {
 fn begin(
     state: &mut FlavorState,
     active: ActiveActivity,
-    detected_at_ms: i64,
     config: &ActivitySettings,
     actions: &mut Vec<ActivityAction>,
 ) {
@@ -716,10 +713,7 @@ fn begin(
     }
     let draft = Box::new(draft_for(&active));
     state.active = Some(active);
-    actions.push(ActivityAction::Begin {
-        draft,
-        detected_at_ms,
-    });
+    actions.push(ActivityAction::Begin { draft });
 }
 
 fn draft_for(active: &ActiveActivity) -> RecordingDraft {
@@ -1035,7 +1029,7 @@ fn start_raid(
             boss_unit_active,
         }),
     };
-    begin(state, active, at_ms, config, actions);
+    begin(state, active, config, actions);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1215,7 +1209,7 @@ fn handle_challenge_start(
             segments,
         }),
     };
-    begin(state, active, at_ms, config, actions);
+    begin(state, active, config, actions);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1344,7 +1338,7 @@ fn handle_arena_start(
                 rounds: vec![ShuffleRound::new(at_ms)],
             }),
         };
-        begin(state, active, at_ms, config, actions);
+        begin(state, active, config, actions);
     } else if state.active.is_some() && category == Category::SoloShuffle {
         // New round of the existing shuffle. A previous round that never ended
         // is emitted as an unended round point.
@@ -1382,7 +1376,7 @@ fn handle_arena_start(
             meter: MeterAccumulator::new(at_ms, None),
             kind: ActiveKind::Arena(ArenaState { zone_id }),
         };
-        begin(state, active, at_ms, config, actions);
+        begin(state, active, config, actions);
     }
 }
 
@@ -1548,7 +1542,7 @@ fn classic_zone_change(
             meter: MeterAccumulator::new(at_ms, None),
             kind: ActiveKind::Arena(ArenaState { zone_id }),
         };
-        begin(state, active, at_ms, config, actions);
+        begin(state, active, config, actions);
     }
 }
 
@@ -1575,7 +1569,7 @@ fn start_battleground(
         meter: MeterAccumulator::new(at_ms, None),
         kind: ActiveKind::Battleground { zone_id },
     };
-    begin(state, active, at_ms, config, actions);
+    begin(state, active, config, actions);
 }
 
 fn end_battleground(
@@ -3330,14 +3324,9 @@ mod tests {
 
         let actions = engine.feed(100_000, encounter_start(2587, "Eranog", 16));
         assert_eq!(begins(&actions), 1);
-        let ActivityAction::Begin {
-            draft,
-            detected_at_ms,
-        } = &actions[0]
-        else {
+        let ActivityAction::Begin { draft } = &actions[0] else {
             panic!("expected Begin");
         };
-        assert_eq!(*detected_at_ms, 100_000);
         assert_eq!(draft.started_at_ms, 100_000);
         assert_eq!(draft.category, Category::Raids);
         assert_eq!(draft.overrun_ms, RAID_DEFAULT_OVERRUN_MS);

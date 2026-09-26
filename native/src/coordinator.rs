@@ -731,10 +731,7 @@ impl Coordinator {
     fn apply(&mut self, action: ActivityAction) {
         self.dirty = true;
         match action {
-            ActivityAction::Begin {
-                draft,
-                detected_at_ms,
-            } => self.begin(*draft, detected_at_ms),
+            ActivityAction::Begin { draft } => self.begin(*draft, 0),
             ActivityAction::Complete { id, .. } | ActivityAction::Abandon { id, .. } => {
                 let Some(draft) = self.engine.take_finished(&id) else {
                     return;
@@ -785,7 +782,10 @@ impl Coordinator {
         }
     }
 
-    fn begin(&mut self, draft: RecordingDraft, detected_at_ms: i64) {
+    /// `late_by_ms` is how long after the activity's start its capture begins:
+    /// zero live, the flush wait for a deferred activity. The pre-roll covers
+    /// it on top of the configured lead-in.
+    fn begin(&mut self, draft: RecordingDraft, late_by_ms: i64) {
         // The previous activity already ended (or was just superseded by this
         // one) and is only running out its overrun: cut the overrun short so
         // the new activity takes the deferred path instead of being dropped.
@@ -816,8 +816,7 @@ impl Coordinator {
         }
         let capacity_ms = u64::from(self.config.capture.replay_buffer_seconds) * 1_000;
         let lead_in_ms = i64::from(self.config.capture.extra_lead_in_seconds) * 1_000;
-        let requested_replay_ms =
-            (detected_at_ms - draft.started_at_ms + lead_in_ms).clamp(0, capacity_ms as i64) as u64;
+        let requested_replay_ms = (late_by_ms + lead_in_ms).clamp(0, capacity_ms as i64) as u64;
         self.start_capture(draft, requested_replay_ms, RecordingMode::Automatic);
     }
 
@@ -1084,10 +1083,10 @@ impl Coordinator {
         }
         let overrun_ms = deferred.draft.overrun_ms as i64;
         let ended_at_ms = deferred.draft.ended_at_ms;
-        // The activity started while the previous capture was flushing; treat
-        // now as the detection time so the requested pre-roll still reaches
-        // back to the real activity start.
-        self.begin(*deferred.draft, now_unix_ms());
+        // The activity started while the previous capture was flushing; the
+        // requested pre-roll still reaches back to the real activity start.
+        let late_by_ms = now_unix_ms() - deferred.draft.started_at_ms;
+        self.begin(*deferred.draft, late_by_ms);
         // It already ended too. The capture had to start anyway so the replay
         // buffer is written; stop it on the overrun the live path would have
         // used, anchored to when the activity actually ended. A deadline
