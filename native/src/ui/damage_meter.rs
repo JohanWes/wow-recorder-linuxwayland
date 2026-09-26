@@ -490,8 +490,10 @@ struct Inner {
     /// when the view, segment, target, or entry changes, so a key only ever
     /// names one row meaning and fresh bars grow in from empty.
     rows: RefCell<HashMap<String, RowWidgets>>,
-    /// The bundled spell database, loaded lazily on first icon/tooltip use.
-    spell_db: RefCell<Option<Rc<SpellDb>>>,
+    /// The bundled spell database, parsed off the GTK thread the first time
+    /// the meter is shown; `None` until it arrives.
+    spell_db: RefCell<Option<SpellDb>>,
+    spell_db_requested: Cell<bool>,
     /// Decoded spell-icon textures keyed by basename, so new rows reuse
     /// them instead of re-decoding.
     icons: RefCell<HashMap<String, Texture>>,
@@ -630,6 +632,7 @@ impl DamageMeter {
             seek: RefCell::new(None),
             rows: RefCell::new(HashMap::new()),
             spell_db: RefCell::new(None),
+            spell_db_requested: Cell::new(false),
             icons: RefCell::new(HashMap::new()),
             overlay: RefCell::new(None),
             tooltip,
@@ -726,7 +729,9 @@ impl Inner {
     fn set_visible(self: &Rc<Self>, visible: bool) {
         // The tooltip lives on the video overlay, outside the meter: hiding
         // the meter must hide it too or it would float over the video alone.
-        if !visible {
+        if visible {
+            self.request_spell_db();
+        } else {
             self.hide_tooltip();
         }
         self.visible.set(visible);
@@ -1774,28 +1779,39 @@ impl Inner {
             .and_then(|spec| class_css_class(*spec))
     }
 
-    /// Load the bundled spell database once, from its gresource JSON.
-    fn load_db(&self) -> Option<Rc<SpellDb>> {
-        if let Some(db) = self.spell_db.borrow().as_ref() {
-            return Some(Rc::clone(db));
+    /// Parse the bundled spell database on GIO's blocking pool the first time
+    /// the meter is shown. Rows render without icons and tooltips until it
+    /// lands; one refresh then adds them.
+    fn request_spell_db(self: &Rc<Self>) {
+        if self.spell_db_requested.replace(true) {
+            return;
         }
-        let db = gtk4::gio::resources_lookup_data(
-            SPELLS_JSON_RESOURCE,
-            gtk4::gio::ResourceLookupFlags::NONE,
-        )
-        .ok()
-        .and_then(|bytes| {
-            let text = std::str::from_utf8(bytes.as_ref()).ok()?;
-            SpellDb::parse(text).ok()
-        })
-        .map(Rc::new)?;
-        *self.spell_db.borrow_mut() = Some(Rc::clone(&db));
-        Some(db)
+        let this = Rc::clone(self);
+        gtk4::glib::spawn_future_local(async move {
+            let parsed = gtk4::gio::spawn_blocking(|| {
+                let bytes = gtk4::gio::resources_lookup_data(
+                    SPELLS_JSON_RESOURCE,
+                    gtk4::gio::ResourceLookupFlags::NONE,
+                )
+                .ok()?;
+                SpellDb::parse(std::str::from_utf8(&bytes).ok()?).ok()
+            })
+            .await;
+            let Ok(Some(db)) = parsed else {
+                tracing::warn!("spell database unavailable; meter spell icons disabled");
+                return;
+            };
+            this.spell_db.replace(Some(db));
+            // A cached history list was built without icons.
+            this.list_cache.borrow_mut().take();
+            this.refresh();
+        });
     }
 
     /// The row's icon basename if the database knows this spell.
-    fn spell_icon_basename(&self, name: &str) -> Option<String> {
-        self.load_db()?.lookup(name).map(|info| info.icon.clone())
+    fn spell_icon_basename(&self, name: &str) -> Option<Box<str>> {
+        let db = self.spell_db.borrow();
+        db.as_ref()?.lookup(name).map(|info| info.icon.clone())
     }
 
     /// A cached icon texture for `basename`, decoded once from the resource.
@@ -1851,7 +1867,12 @@ impl Inner {
     /// Anchoring to the meter rather than the hovered row keeps the panel
     /// still while rows reorder around it.
     fn show_tooltip(&self, spell: &str) {
-        let Some(info) = self.load_db().and_then(|db| db.lookup(spell).cloned()) else {
+        let Some(info) = self
+            .spell_db
+            .borrow()
+            .as_ref()
+            .and_then(|db| db.lookup(spell).cloned())
+        else {
             return;
         };
         if let Some(texture) = self.icon_texture(&info.icon) {

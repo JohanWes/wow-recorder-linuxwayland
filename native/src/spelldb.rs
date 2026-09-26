@@ -17,30 +17,38 @@
 
 use std::collections::HashMap;
 
-/// One spell's tooltip facts.
-#[derive(Clone, Debug, PartialEq, Eq)]
+use serde::Deserialize;
+
+/// One spell's tooltip facts. Boxed strings: the index holds ~87k entries
+/// for the process lifetime, so spare capacity words add up.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(from = "(Box<str>, Box<str>)")]
 pub struct SpellInfo {
-    pub description: String,
+    pub description: Box<str>,
     /// Icon basename, e.g. `spell_fire_flamebolt`; the PNG lives at
     /// `/io/github/JohanWes/WarcraftRecorder/spells/{icon}.png`.
-    pub icon: String,
+    pub icon: Box<str>,
+}
+
+impl From<(Box<str>, Box<str>)> for SpellInfo {
+    fn from((description, icon): (Box<str>, Box<str>)) -> Self {
+        Self { description, icon }
+    }
 }
 
 /// An immutable spell-name index built once from the bundled JSON.
 #[derive(Clone, Debug, Default)]
 pub struct SpellDb {
-    by_name: HashMap<String, SpellInfo>,
+    by_name: HashMap<Box<str>, SpellInfo>,
 }
 
 impl SpellDb {
-    /// Parse the bundled spell JSON (`{name: [description, icon]}`).
+    /// Parse the bundled spell JSON (`{name: [description, icon]}`) straight
+    /// into the index.
     pub fn parse(json: &str) -> Result<Self, serde_json::Error> {
-        let raw: HashMap<String, [String; 2]> = serde_json::from_str(json)?;
-        let by_name = raw
-            .into_iter()
-            .map(|(name, [description, icon])| (name, SpellInfo { description, icon }))
-            .collect();
-        Ok(Self { by_name })
+        Ok(Self {
+            by_name: serde_json::from_str(json)?,
+        })
     }
 
     /// The entry for `name`, if the database knows it.
@@ -62,8 +70,8 @@ mod tests {
     fn parses_and_looks_up_by_name() {
         let db = SpellDb::parse(SAMPLE).expect("valid sample");
         let fireball = db.lookup("Fireball").expect("found");
-        assert_eq!(fireball.description, "Throws a fiery ball.");
-        assert_eq!(fireball.icon, "spell_fire_flamebolt");
+        assert_eq!(&*fireball.description, "Throws a fiery ball.");
+        assert_eq!(&*fireball.icon, "spell_fire_flamebolt");
         assert!(db.lookup("Flash Heal").is_some());
     }
 
