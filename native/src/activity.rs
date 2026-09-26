@@ -105,31 +105,21 @@ pub enum ActivityAction {
     Begin {
         draft: Box<RecordingDraft>,
     },
+    /// Ended normally. Outcome and end time are on the finished draft.
     Complete {
         id: RecordingId,
-        outcome: Outcome,
-        ended_at_ms: i64,
     },
+    /// Force-ended (user or data timeout, at the supplied time) or superseded
+    /// by another activity event (arena start during an activity, raid
+    /// encounter during Mythic+, battleground zone-in): zero overrun and a
+    /// loss-style outcome.
     Abandon {
         id: RecordingId,
-        ended_at_ms: i64,
-        reason: AbandonReason,
     },
     Discard {
         id: RecordingId,
         reason: DiscardReason,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AbandonReason {
-    /// User force stop or coordinator data timeout: zero overrun, loss-style
-    /// outcome, ended at the supplied time.
-    ForceEnd,
-    /// Another activity event superseded the in-flight one (arena start during
-    /// an activity, raid encounter during Mythic+, battleground zone-in during
-    /// an activity). Same recorded metadata shape as a force end.
-    Superseded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,7 +205,7 @@ impl ActivityEngine {
         finish(
             active,
             occurred_at_ms,
-            EndKind::Abandon(AbandonReason::ForceEnd),
+            EndKind::Abandon,
             &config,
             &mut self.finished,
             &mut actions,
@@ -386,7 +376,7 @@ impl CombatantState {
 #[derive(Clone, Copy)]
 enum EndKind {
     Complete(Outcome),
-    Abandon(AbandonReason),
+    Abandon,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -908,14 +898,7 @@ fn handle_encounter_start(
             // Active Mythic+ but not a dungeon encounter: abandon it and start
             // the raid encounter (abandoned key into raid pull).
             let active = state.active.take().expect("checked above");
-            finish(
-                active,
-                at_ms,
-                EndKind::Abandon(AbandonReason::Superseded),
-                config,
-                finished,
-                actions,
-            );
+            finish(active, at_ms, EndKind::Abandon, config, finished, actions);
         }
         if state.active.is_none() {
             if config.current_raid_only && !CURRENT_RETAIL_ENCOUNTERS.contains(&encounter_id) {
@@ -1305,14 +1288,7 @@ fn handle_arena_start(
     {
         // Arena start over a non-shuffle activity ends it (never a shuffle round).
         let active = state.active.take().expect("checked above");
-        finish(
-            active,
-            at_ms,
-            EndKind::Abandon(AbandonReason::Superseded),
-            config,
-            finished,
-            actions,
-        );
+        finish(active, at_ms, EndKind::Abandon, config, finished, actions);
     }
     let category = match match_type {
         "Rated Solo Shuffle" => Category::SoloShuffle,
@@ -1495,14 +1471,7 @@ fn retail_zone_change(
     if is_zone_bg {
         // Zoned into a battleground over another activity.
         let active = state.active.take().expect("checked above");
-        finish(
-            active,
-            at_ms,
-            EndKind::Abandon(AbandonReason::Superseded),
-            config,
-            finished,
-            actions,
-        );
+        finish(active, at_ms, EndKind::Abandon, config, finished, actions);
         start_battleground(state, zone_id, GameFlavor::Retail, at_ms, config, actions);
     }
 }
@@ -2115,9 +2084,9 @@ fn finish(
     finalize_open_items(&mut active);
     let outcome = match end {
         EndKind::Complete(outcome) => outcome,
-        EndKind::Abandon(_) => abandon_outcome(&active),
+        EndKind::Abandon => abandon_outcome(&active),
     };
-    if matches!(end, EndKind::Abandon(_)) {
+    if matches!(end, EndKind::Abandon) {
         active.overrun_ms = 0;
     }
 
@@ -2156,18 +2125,10 @@ fn finish(
 
     let id = active.id.clone();
     finished.push(build_draft(active, outcome, ended_at_ms));
-    match end {
-        EndKind::Complete(_) => actions.push(ActivityAction::Complete {
-            id,
-            outcome,
-            ended_at_ms,
-        }),
-        EndKind::Abandon(reason) => actions.push(ActivityAction::Abandon {
-            id,
-            ended_at_ms,
-            reason,
-        }),
-    }
+    actions.push(match end {
+        EndKind::Complete(_) => ActivityAction::Complete { id },
+        EndKind::Abandon => ActivityAction::Abandon { id },
+    });
 }
 
 fn abandon_outcome(active: &ActiveActivity) -> Outcome {
@@ -3351,14 +3312,7 @@ mod tests {
         );
 
         let end = engine.feed(130_000, encounter_end(2587, 16, true));
-        assert_eq!(
-            end,
-            vec![ActivityAction::Complete {
-                id: id.clone(),
-                outcome: Outcome::Win,
-                ended_at_ms: 130_000,
-            }]
-        );
+        assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
 
         let finished = engine.take_finished(&id).expect("finished draft");
         assert_eq!(finished.outcome, Some(Outcome::Win));
@@ -3564,15 +3518,10 @@ mod tests {
                 duration_ms: 1_400_000,
             },
         );
-        assert_eq!(
-            end,
-            vec![ActivityAction::Complete {
-                id: id.clone(),
-                outcome: Outcome::Complete,
-                ended_at_ms: 125_000,
-            }]
-        );
+        assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
         let finished = engine.take_finished(&id).unwrap();
+        assert_eq!(finished.outcome, Some(Outcome::Complete));
+        assert_eq!(finished.ended_at_ms, Some(125_000));
         assert_eq!(finished.overrun_ms, 5_000);
         assert_eq!(finished.timeline.len(), 2);
         // 1400 s minus the 90 s Challenger's Peril adjustment beats the 1488 s
@@ -3620,11 +3569,11 @@ mod tests {
                 duration_ms: 0,
             },
         );
-        let [ActivityAction::Complete { id, outcome, .. }] = end.as_slice() else {
+        let [ActivityAction::Complete { id }] = end.as_slice() else {
             panic!("expected Complete, got {end:?}");
         };
-        assert_eq!(*outcome, Outcome::Abandoned);
         let finished = engine.take_finished(id).unwrap();
+        assert_eq!(finished.outcome, Some(Outcome::Abandoned));
         assert_eq!(finished.overrun_ms, 0);
         assert!(matches!(
             finished.details,
@@ -3659,18 +3608,16 @@ mod tests {
         );
         let handoff = engine.feed(60_000, encounter_start(2587, "Eranog", 16));
         let [
-            ActivityAction::Abandon { id, reason, .. },
-            ActivityAction::Begin { draft, .. },
+            ActivityAction::Abandon { id },
+            ActivityAction::Begin { draft },
         ] = handoff.as_slice()
         else {
             panic!("expected Abandon, Begin, got {handoff:?}");
         };
-        assert_eq!(*reason, AbandonReason::Superseded);
         assert_eq!(draft.category, Category::Raids);
-        assert_eq!(
-            engine.take_finished(id).unwrap().outcome,
-            Some(Outcome::Abandoned)
-        );
+        let abandoned = engine.take_finished(id).unwrap();
+        assert_eq!(abandoned.outcome, Some(Outcome::Abandoned));
+        assert_eq!(abandoned.ended_at_ms, Some(60_000));
     }
 
     #[test]
@@ -3702,21 +3649,16 @@ mod tests {
                     team_1_mmr: 1_500,
                 },
             );
-            assert_eq!(
-                end,
-                vec![ActivityAction::Complete {
-                    id: id.clone(),
-                    outcome: expected,
-                    ended_at_ms: 240_000,
-                }]
-            );
+            assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
             let result_text = if expected == Outcome::Win {
                 "Win"
             } else {
                 "Loss"
             };
+            let finished = engine.take_finished(&id).unwrap();
+            assert_eq!(finished.outcome, Some(expected));
             assert_eq!(
-                engine.take_finished(&id).unwrap().title.as_deref(),
+                finished.title.as_deref(),
                 Some(format!("Alpha - 2v2 Blade's Edge ({result_text})").as_str())
             );
         }
@@ -3786,12 +3728,10 @@ mod tests {
         );
         // The undecided round two is kept as a point, and the game completes
         // as a win.
-        let [ActivityAction::Complete { outcome, .. }] = end.as_slice() else {
-            panic!("expected Complete, got {end:?}");
-        };
-        assert_eq!(*outcome, Outcome::Win);
+        assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
 
         let finished = engine.take_finished(&id).unwrap();
+        assert_eq!(finished.outcome, Some(Outcome::Win));
         let round_two = finished.timeline.last().unwrap();
         assert_eq!(round_two.kind(), &TimelineKind::Round);
         assert_eq!(round_two.label(), Some("Round 2"));
@@ -3855,15 +3795,10 @@ mod tests {
                 instance_id: 1,
             },
         );
-        assert_eq!(
-            end,
-            vec![ActivityAction::Complete {
-                id: id.clone(),
-                outcome: Outcome::Loss,
-                ended_at_ms: 600_000,
-            }]
-        );
+        assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
         let finished = engine.take_finished(&id).unwrap();
+        assert_eq!(finished.outcome, Some(Outcome::Loss));
+        assert_eq!(finished.ended_at_ms, Some(600_000));
         assert!(finished.combatants.is_empty());
         assert_eq!(finished.player.as_ref().map(|p| p.spec_id), Some(Some(71)));
         assert_eq!(
@@ -3887,14 +3822,9 @@ mod tests {
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
         );
         let end = engine.feed(60_000, encounter_end(1107, 9, true));
-        assert!(matches!(
-            end.as_slice(),
-            [ActivityAction::Complete {
-                outcome: Outcome::Win,
-                ..
-            }]
-        ));
+        assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
         let finished = engine.take_finished(&id).unwrap();
+        assert_eq!(finished.outcome, Some(Outcome::Win));
         assert_eq!(finished.flavor, GameFlavor::Classic);
         assert_eq!(finished.player.as_ref().map(|p| p.spec_id), Some(Some(71)));
         assert_eq!(
@@ -3946,19 +3876,10 @@ mod tests {
         engine.feed(30_000, died("Player-9-B", "Foe-Realm", ENEMY_FLAGS));
         let end = engine.feed(40_000, died("Player-8-B", "Bane-Realm", ENEMY_FLAGS));
         // Second enemy death empties their team.
-        let [
-            ActivityAction::Complete {
-                outcome,
-                ended_at_ms,
-                ..
-            },
-        ] = end.as_slice()
-        else {
-            panic!("expected Complete, got {end:?}");
-        };
-        assert_eq!(*outcome, Outcome::Win);
-        assert_eq!(*ended_at_ms, 40_000);
+        assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
         let finished = engine.take_finished(&id).unwrap();
+        assert_eq!(finished.outcome, Some(Outcome::Win));
+        assert_eq!(finished.ended_at_ms, Some(40_000));
         // First enemy sighting at 5 s restarted the activity clock.
         assert_eq!(finished.started_at_ms, 5_000);
         assert_eq!(finished.combatants.len(), 3);
@@ -3995,14 +3916,9 @@ mod tests {
                 duration_ms: 900_000,
             },
         );
-        assert!(matches!(
-            end.as_slice(),
-            [ActivityAction::Complete {
-                outcome: Outcome::Complete,
-                ..
-            }]
-        ));
+        assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
         let finished = engine.take_finished(&id).unwrap();
+        assert_eq!(finished.outcome, Some(Outcome::Complete));
         assert_eq!(
             finished.details,
             ActivityDetails::Dungeon {
@@ -4032,17 +3948,10 @@ mod tests {
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
         );
         let end = engine.feed(60_000, encounter_end(1107, 9, true));
-        assert!(matches!(
-            end.as_slice(),
-            [ActivityAction::Complete {
-                outcome: Outcome::Win,
-                ..
-            }]
-        ));
-        assert_eq!(
-            engine.take_finished(&id).unwrap().flavor,
-            GameFlavor::Classic
-        );
+        assert_eq!(end, vec![ActivityAction::Complete { id: id.clone() }]);
+        let finished = engine.take_finished(&id).unwrap();
+        assert_eq!(finished.outcome, Some(Outcome::Win));
+        assert_eq!(finished.flavor, GameFlavor::Classic);
     }
 
     #[test]
@@ -4090,16 +3999,10 @@ mod tests {
             cast("Player-1-A", "Alpha-Realm", SELF_FLAGS, "Mortal Strike"),
         );
         let ended = engine.force_end(GameFlavor::Retail, 120_000);
-        assert_eq!(
-            ended,
-            vec![ActivityAction::Abandon {
-                id: id.clone(),
-                ended_at_ms: 120_000,
-                reason: AbandonReason::ForceEnd,
-            }]
-        );
+        assert_eq!(ended, vec![ActivityAction::Abandon { id: id.clone() }]);
         let finished = engine.take_finished(&id).unwrap();
         assert_eq!(finished.outcome, Some(Outcome::Loss));
+        assert_eq!(finished.ended_at_ms, Some(120_000));
         assert_eq!(finished.overrun_ms, 0);
         assert_eq!(finished.duration_ms, Some(120_000));
         assert!(engine.force_end(GameFlavor::Retail, 130_000).is_empty());
