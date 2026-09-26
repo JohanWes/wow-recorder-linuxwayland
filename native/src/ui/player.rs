@@ -10,7 +10,7 @@
 //! the product by maintainer decision (2026-07-22); the viewpoint selector
 //! and individual local recordings remain.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -82,8 +82,10 @@ struct Inner {
     /// ratio without making the player own window layout.
     video_dimensions_handler: RefCell<Option<VideoDimensionsHandler>>,
 
-    /// The one Clapper backend; `None` only when Clapper failed to start.
-    backend: Option<PlayerBackend>,
+    /// The one Clapper backend, created on the first load so a session that
+    /// never plays anything (such as one started in the tray) does not pay
+    /// for GStreamer. Holds `None` once Clapper has failed to start.
+    backend: OnceCell<Option<PlayerBackend>>,
 
     entries: RefCell<Arc<Vec<LibraryEntry>>>,
     prefs: Cell<MarkerPrefs>,
@@ -127,14 +129,7 @@ impl Player {
         empty_reveal.set_visible(false);
         placeholder.set_child(Some(&empty_reveal));
 
-        let backend = PlayerBackend::new()
-            .map_err(|error| tracing::warn!(error, "player backend unavailable"))
-            .ok();
-
         let video_overlay = gtk4::Overlay::new();
-        if let Some(backend) = &backend {
-            video_overlay.set_child(Some(backend.widget()));
-        }
         video_overlay.set_vexpand(true);
         // GTK4 gives plain widgets no allocation signal, so this
         // always-allocated probe tells the shell when the video viewport was
@@ -275,7 +270,7 @@ impl Player {
             last_motion: Cell::new(Instant::now()),
             last_pointer: Cell::new((f64::NAN, f64::NAN)),
             video_dimensions_handler: RefCell::new(None),
-            backend,
+            backend: OnceCell::new(),
             entries: RefCell::new(Arc::new(Vec::new())),
             prefs: Cell::new(MarkerPrefs {
                 deaths: DeathMarkerVisibility::Own,
@@ -362,7 +357,6 @@ impl Player {
         }
         video_overlay.add_controller(video_click);
 
-        inner.connect_backend();
         inner.connect_controls(
             &clip_create,
             &clip_cancel,
@@ -463,8 +457,27 @@ impl Player {
 impl Inner {
     // -- construction helpers -----------------------------------------------
 
+    fn backend(&self) -> Option<&PlayerBackend> {
+        self.backend.get()?.as_ref()
+    }
+
+    /// Create the backend on first use and put its video into the overlay.
+    fn ensure_backend(self: &Rc<Self>) -> Option<&PlayerBackend> {
+        if self.backend.get().is_none() {
+            let backend = PlayerBackend::new()
+                .map_err(|error| tracing::warn!(error, "player backend unavailable"))
+                .ok();
+            if let Some(backend) = &backend {
+                self.video_overlay.set_child(Some(backend.widget()));
+            }
+            let _ = self.backend.set(backend);
+            self.connect_backend();
+        }
+        self.backend()
+    }
+
     fn connect_backend(self: &Rc<Self>) {
-        let Some(backend) = &self.backend else {
+        let Some(backend) = self.backend() else {
             return;
         };
         let this = Rc::clone(self);
@@ -497,7 +510,7 @@ impl Inner {
         let this = Rc::clone(self);
         self.volume_scale.connect_value_changed(move |scale| {
             this.set_muted(false);
-            if let Some(backend) = &this.backend {
+            if let Some(backend) = this.backend() {
                 backend.set_volume(scale.value());
             }
         });
@@ -633,7 +646,7 @@ impl Inner {
         self.empty_reveal.set_visible(false);
         self.set_media_usable(false, is_clip);
         if !has_content {
-            if replacing_media && let Some(backend) = &self.backend {
+            if replacing_media && let Some(backend) = self.backend() {
                 backend.stop();
             }
             self.playing.set(false);
@@ -649,7 +662,7 @@ impl Inner {
             self.refresh_timeline();
             return;
         }
-        let Some(backend) = &self.backend else {
+        let Some(backend) = self.ensure_backend() else {
             self.error_bar.set_visible(true);
             return;
         };
@@ -735,7 +748,7 @@ impl Inner {
             if this.active_id.borrow().as_ref() != Some(&id) {
                 return gtk4::glib::ControlFlow::Break;
             }
-            if this.report_video_dimensions(this.backend.as_ref().and_then(|backend| {
+            if this.report_video_dimensions(this.backend().and_then(|backend| {
                 backend.video_dimensions(&expected_uri, previous_stream.as_ref())
             })) {
                 return gtk4::glib::ControlFlow::Break;
@@ -761,7 +774,7 @@ impl Inner {
             if this.load_generation.get() != generation {
                 return;
             }
-            let ready = this.backend.as_ref().is_some_and(PlayerBackend::is_ready);
+            let ready = this.backend().is_some_and(PlayerBackend::is_ready);
             if !ready && this.active_id.borrow().is_some() {
                 let is_clip = this.active_entry_is_clip();
                 this.set_media_usable(false, is_clip);
@@ -772,7 +785,7 @@ impl Inner {
 
     fn unload(self: &Rc<Self>) {
         self.exit_clip_mode();
-        if let Some(backend) = &self.backend {
+        if let Some(backend) = self.backend() {
             backend.stop();
         }
         *self.active_id.borrow_mut() = None;
@@ -823,7 +836,7 @@ impl Inner {
         }
         let playing = !self.playing.get();
         self.playing.set(playing);
-        if let Some(backend) = &self.backend {
+        if let Some(backend) = self.backend() {
             if playing {
                 backend.play();
             } else {
@@ -839,7 +852,7 @@ impl Inner {
 
     fn set_muted(&self, muted: bool) {
         self.muted.set(muted);
-        if let Some(backend) = &self.backend {
+        if let Some(backend) = self.backend() {
             backend.set_muted(muted);
         }
         self.mute_button.set_icon_name(if muted {
@@ -852,7 +865,7 @@ impl Inner {
     fn set_speed(&self, index: usize) {
         self.speed_index.set(index);
         let speed = SPEEDS[index];
-        if let Some(backend) = &self.backend {
+        if let Some(backend) = self.backend() {
             backend.set_speed(speed);
         }
         self.speed_button.set_label(&format!("{speed}x"));
@@ -871,7 +884,7 @@ impl Inner {
         }
         let seconds = seconds.clamp(0.0, self.duration_ms.get() as f64 / 1_000.0);
         self.show_position(seconds);
-        let Some(backend) = &self.backend else {
+        let Some(backend) = self.backend() else {
             return;
         };
         if backend.is_ready() {
@@ -899,7 +912,7 @@ impl Inner {
             PlayerState::Playing | PlayerState::Paused => {
                 if let Some((target, mode)) = self.pending_seek.take() {
                     self.seek_in_flight.set(true);
-                    if let Some(backend) = &self.backend {
+                    if let Some(backend) = self.backend() {
                         backend.seek(target, mode);
                     }
                 }
@@ -923,7 +936,7 @@ impl Inner {
         }
         match self.pending_seek.take() {
             Some((target, mode)) => {
-                if let Some(backend) = &self.backend {
+                if let Some(backend) = self.backend() {
                     backend.seek(target, mode);
                 }
             }
@@ -997,7 +1010,7 @@ impl Inner {
             }
             gtk4::gdk::Key::period => {
                 if !self.playing.get()
-                    && let Some(backend) = &self.backend
+                    && let Some(backend) = self.backend()
                 {
                     backend.advance_frame();
                 }
@@ -1064,7 +1077,7 @@ impl Inner {
         // Clapper sets a cursor on its own video widget, and the innermost
         // widget with one wins, so the window alone leaves the pointer visible
         // over the video, which is the whole screen in fullscreen.
-        if let Some(backend) = &self.backend {
+        if let Some(backend) = self.backend() {
             backend.widget().set_cursor_from_name(name);
         }
     }
