@@ -3,6 +3,7 @@
 //! The category rail: product mark, status card, category rows with derived
 //! counts, and Settings at the bottom.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk4::prelude::*;
@@ -17,8 +18,6 @@ use super::{ActionSink, CATEGORIES, ShellAction};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowView {
     pub category: Category,
-    pub label: &'static str,
-    pub icon_name: &'static str,
     pub count: usize,
     pub visible: bool,
     pub active: bool,
@@ -34,7 +33,7 @@ pub fn rows(snapshot: &AppSnapshot) -> Vec<RowView> {
         .sum();
     CATEGORIES
         .iter()
-        .map(|(category, label, icon_name)| {
+        .map(|(category, _, _)| {
             let count = snapshot
                 .category_counts
                 .iter()
@@ -47,8 +46,6 @@ pub fn rows(snapshot: &AppSnapshot) -> Vec<RowView> {
                 || force_show;
             RowView {
                 category: category.clone(),
-                label,
-                icon_name,
                 count,
                 visible,
                 active: snapshot.config.interface.selected_category == *category,
@@ -62,6 +59,8 @@ pub struct Sidebar {
     pub status_card: StatusCard,
     list: gtk4::ListBox,
     rows: Vec<(Category, gtk4::ListBoxRow, gtk4::Label)>,
+    /// The snapshot's selected category, as last applied.
+    current: Rc<RefCell<Option<Category>>>,
     settings_warning: gtk4::Image,
 }
 
@@ -97,7 +96,6 @@ impl Sidebar {
         for (category, label, icon_name) in CATEGORIES {
             let icon = gtk4::Image::from_icon_name(icon_name);
             icon.set_pixel_size(20);
-            icon.add_css_class("category-row");
             let text = gtk4::Label::new(Some(label));
             text.set_xalign(0.0);
             text.set_hexpand(true);
@@ -118,16 +116,25 @@ impl Sidebar {
             rows.push((category, row, count));
         }
 
+        // Selection, not activation: arrow keys move the selection without
+        // activating. `apply` selects the snapshot's category programmatically,
+        // which is recognised here as the current category and not re-sent.
+        let current: Rc<RefCell<Option<Category>>> = Rc::default();
         {
             let sink = Rc::clone(&sink);
+            let current = Rc::clone(&current);
             let rows_categories: Vec<Category> = rows
                 .iter()
                 .map(|(category, _, _)| category.clone())
                 .collect();
-            list.connect_row_activated(move |_, row| {
-                let Some(category) = rows_categories.get(row.index() as usize) else {
+            list.connect_row_selected(move |_, row| {
+                let Some(category) = row.and_then(|row| rows_categories.get(row.index() as usize))
+                else {
                     return;
                 };
+                if current.borrow().as_ref() == Some(category) {
+                    return;
+                }
                 sink(ShellAction::Command(
                     warcraft_recorder::coordinator::Command::SetSelectedCategory {
                         category: category.clone(),
@@ -217,12 +224,14 @@ impl Sidebar {
             status_card,
             list,
             rows,
+            current,
             settings_warning,
         }
     }
 
     pub fn apply(&self, snapshot: &AppSnapshot) {
         let views = rows(snapshot);
+        *self.current.borrow_mut() = Some(snapshot.config.interface.selected_category.clone());
         for (view, (_, row, count)) in views.iter().zip(&self.rows) {
             row.set_visible(view.visible);
             count.set_label(&view.count.to_string());
