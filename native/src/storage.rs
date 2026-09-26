@@ -29,8 +29,8 @@ use serde_json::Value;
 use crate::activity::RecordingDraft;
 use crate::domain::{
     ActivityDetails, BLOODLUST_DURATION_MS, Category, CombatantSummary, CorrelatedActivity,
-    GameFlavor, LibraryEntry, MediaFacts, MeterData, Outcome, PlayerSummary, RecordingId,
-    RoundSummary, StorageLimit, TimelineItem, TimelineKind, TimelineShape,
+    GameFlavor, LibraryEntry, MediaFacts, MeterData, MeterEntry, Outcome, PlayerSummary,
+    RecordingId, RoundSummary, StorageLimit, TimelineItem, TimelineKind, TimelineShape,
 };
 use crate::meter::SAMPLE_INTERVAL_MS;
 use crate::parser::days_from_civil;
@@ -1630,22 +1630,16 @@ pub fn shift_meter(
                         .clamp(shifted.start_ms as i64, shifted.end_ms as i64)
                         as u64
                 });
+                let (start_ms, end_ms) = (shifted.start_ms, shifted.end_ms);
                 for actor in &mut shifted.actors {
-                    for entry in actor.spells.iter_mut().chain(&mut actor.targets) {
-                        entry.samples.retain_mut(|sample| {
-                            let at_ms = sample.at_ms as i64 + lead_in_ms;
-                            if at_ms < 0 {
-                                return false;
-                            }
-                            sample.at_ms = (at_ms as u64)
-                                .div_ceil(SAMPLE_INTERVAL_MS)
-                                .saturating_mul(SAMPLE_INTERVAL_MS)
-                                .clamp(shifted.start_ms, shifted.end_ms);
-                            true
-                        });
-                        entry.amount = entry.samples.iter().map(|sample| sample.amount).sum();
-                        entry.hits = entry.samples.iter().map(|sample| sample.hits).sum();
-                        entry.overheal = entry.samples.iter().map(|sample| sample.overheal).sum();
+                    for spell in &mut actor.spells {
+                        shift_samples(spell, lead_in_ms, start_ms, end_ms);
+                        for target in &mut spell.targets {
+                            shift_samples(target, lead_in_ms, start_ms, end_ms);
+                        }
+                    }
+                    for target in &mut actor.targets {
+                        shift_samples(target, lead_in_ms, start_ms, end_ms);
                     }
                 }
                 shifted.deaths.retain_mut(|death| {
@@ -1668,6 +1662,26 @@ pub fn shift_meter(
             })
             .collect(),
     }
+}
+
+/// Move one meter entry's samples onto the media sample grid inside its
+/// fight, drop those before the media start, and re-total the entry from what
+/// remains.
+fn shift_samples(entry: &mut MeterEntry, lead_in_ms: i64, start_ms: u64, end_ms: u64) {
+    entry.samples.retain_mut(|sample| {
+        let at_ms = sample.at_ms as i64 + lead_in_ms;
+        if at_ms < 0 {
+            return false;
+        }
+        sample.at_ms = (at_ms as u64)
+            .div_ceil(SAMPLE_INTERVAL_MS)
+            .saturating_mul(SAMPLE_INTERVAL_MS)
+            .clamp(start_ms, end_ms);
+        true
+    });
+    entry.amount = entry.samples.iter().map(|sample| sample.amount).sum();
+    entry.hits = entry.samples.iter().map(|sample| sample.hits).sum();
+    entry.overheal = entry.samples.iter().map(|sample| sample.overheal).sum();
 }
 
 /// Filename sanitizer: invalid characters become spaces, runs of spaces
@@ -1976,7 +1990,25 @@ mod tests {
                             overheal: 0,
                             min: 100,
                             max: 200,
-                            targets: Vec::new(),
+                            targets: vec![MeterEntry {
+                                metric: MeterMetric::Damage,
+                                key: "Chrome King Gallywix".to_owned(),
+                                marker: 0,
+                                amount: 1_234,
+                                hits: 10,
+                                overheal: 0,
+                                min: 100,
+                                max: 200,
+                                targets: Vec::new(),
+                                samples: vec![MeterSample {
+                                    at_ms: 30_000,
+                                    amount: 1_234,
+                                    hits: 10,
+                                    overheal: 0,
+                                    min: 100,
+                                    max: 200,
+                                }],
+                            }],
                             samples: vec![MeterSample {
                                 at_ms: 58_500,
                                 amount: 1_234,
@@ -2123,6 +2155,10 @@ mod tests {
             entry.meter.fights[0].actors[0].spells[0].samples[0].at_ms,
             entry.meter.fights[0].end_ms
         );
+        // A spell's own per-target split shifts with it.
+        let nested = &entry.meter.fights[0].actors[0].spells[0].targets[0];
+        assert_eq!(nested.samples[0].at_ms, 33_000);
+        assert_eq!(nested.amount, 1_234);
         assert_eq!(entry.meter.fights[0].deaths[0].at_ms, 5_000);
         assert_eq!(
             entry.meter.fights[0].deaths[0]
