@@ -1,6 +1,5 @@
 name: ffmpeg
 config-opts:
-  - --enable-gpl
   - --enable-version3
   - --enable-shared
   - --disable-static
@@ -16,25 +15,27 @@ config-opts:
   - --enable-avfilter
   - --enable-avformat
   - --enable-swresample
-  - --enable-swscale
+  - --disable-swscale
+  - --disable-avdevice
   - --enable-protocol=file,pipe
   - --enable-demuxer=concat,matroska,mov
   - --enable-muxer=matroska,mp4
   - --enable-decoder=aac,h264,hevc,libdav1d
-  - --enable-encoder=aac,libx264,h264_nvenc,hevc_nvenc,av1_nvenc,h264_vaapi,hevc_vaapi,av1_vaapi,h264_vulkan,hevc_vulkan,av1_vulkan
+  - --enable-encoder=aac,h264_nvenc,hevc_nvenc,av1_nvenc,h264_vaapi,hevc_vaapi,av1_vaapi,h264_vulkan,hevc_vulkan,av1_vulkan
   - --enable-parser=aac,av1,h264,hevc
   - --enable-bsf=aac_adtstoasc,h264_mp4toannexb,hevc_mp4toannexb
-  - --enable-filter=afade,aformat,amix,aresample,asetpts,atrim,concat,fade,format,fps,pad,scale,setpts,trim
+  # gpu-screen-recorder mixes audio sources with amix; abuffer and
+  # abuffersink are always built. The app itself only stream-copies.
+  - --enable-filter=amix,aformat,aresample
   - --enable-ffnvcodec
   - --enable-libdav1d
-  - --enable-libx264
   - --enable-nvenc
   - --enable-vaapi
   - --enable-vulkan
 cleanup:
-  - /share/ffmpeg/examples
+  - /share/ffmpeg
 post-install:
-  - install -Dm644 COPYING.GPLv3 /app/share/licenses/$FLATPAK_ID/FFmpeg-COPYING.GPLv3
+  - install -Dm644 COPYING.LGPLv3 /app/share/licenses/$FLATPAK_ID/FFmpeg-COPYING.LGPLv3
 sources:
   # The official release tarball on ffmpeg.org is the only byte-identical
   # copy of itself and ffmpeg.org has a history of outages, so fetch the
@@ -52,7 +53,8 @@ modules:
       - PREFIX=/app
     post-install:
       - mkdir -p /app/share/licenses/$FLATPAK_ID/nv-codec-headers
-      - cp -a include/ffnvcodec/*.h /app/share/licenses/$FLATPAK_ID/nv-codec-headers/
+      # Each header opens with its own MIT notice; ship the notices, not the headers.
+      - for f in include/ffnvcodec/*.h; do sed -n '1,/\*\//p' "$f" > /app/share/licenses/$FLATPAK_ID/nv-codec-headers/$(basename "$f").txt; done
     cleanup:
       - /include/ffnvcodec
       - /lib/pkgconfig/ffnvcodec.pc
@@ -61,25 +63,3 @@ modules:
         url: https://github.com/FFmpeg/nv-codec-headers.git
         commit: e844e5b26f46bb77479f063029595293aa8f812d
         tag: n13.0.19.0
-  - name: x264
-    no-autogen: true
-    config-opts:
-      - --disable-cli
-      - --enable-shared
-      - --disable-opencl
-      - --disable-bashcompletion
-      - --enable-strip
-    make-install-args:
-      - PREFIX=/app
-    post-install:
-      - install -Dm644 COPYING /app/share/licenses/$FLATPAK_ID/x264-COPYING
-    sources:
-      # code.videolan.org is the upstream host but has a history of
-      # connectivity failures, and the github.com/mirror/x264 mirror's full
-      # history is tree-incomplete (a treeless-clone artifact), so a git
-      # checkout of this commit fails there. The mirror's commit archive
-      # carries the identical tree (verified against the pinned commit) and
-      # is served from GitHub.
-      - type: archive
-        url: https://github.com/mirror/x264/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.gz
-        sha256: cd71a7515b0e9a012e1ac9b1f8415bebcaf6fc97d4db32286642ac4c0fbe24f9
