@@ -47,6 +47,8 @@ modules:
       append-path: /usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/warcraft-recorder/cargo
+        CARGO_PROFILE_RELEASE_LTO: fat
+        CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
     build-commands:
       - cargo --offline fmt --manifest-path native/Cargo.toml --check
       - cargo --offline clippy --manifest-path native/Cargo.toml --all-targets --all-features -- -D warnings
