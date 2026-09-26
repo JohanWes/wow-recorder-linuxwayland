@@ -604,7 +604,7 @@ impl Storage {
         media.saturating_add(sidecar)
     }
 
-    // --- Startup sweep ---
+    // --- Recovery sweeps ---
 
     /// Quarantine every media/GSR/`.tmp` artifact in the storage, replay,
     /// regular, and staging directories that no sidecar references. `index` is
@@ -613,22 +613,50 @@ impl Storage {
     /// is armed. Nothing is deleted, repaired, or claimed by name/time
     /// proximity.
     pub fn sweep_orphans(&self, index: &LibraryIndex) -> RecoveryReport {
+        self.sweep(Some(&self.referenced_media(index)))
+    }
+
+    /// Quarantine everything in the replay, regular, and staging directories
+    /// but leave the storage folder alone. The caller guarantees no capture or
+    /// media job still owns a file there.
+    pub fn sweep_capture_dirs(&self) -> RecoveryReport {
+        self.sweep(None)
+    }
+
+    /// Quarantine one capture's GSR intermediates, nothing else.
+    pub fn quarantine_capture(&self, artifacts: &CaptureArtifacts, reason: &str) -> RecoveryReport {
         let mut report = RecoveryReport::default();
-        let referenced = self.referenced_media(index);
+        let recovery_dir = self.root.join(RECOVERY_DIR);
+        for path in artifacts.replay.iter().chain([&artifacts.regular]) {
+            match self.quarantine(&recovery_dir, path, reason) {
+                Ok(moved) => report.quarantined.push(moved),
+                Err(error) => report.failures.push(format!("{}: {error}", path.display())),
+            }
+        }
+        report
+    }
+
+    /// Sweep the capture directories, plus the storage folder when the media
+    /// its sidecars reference is known.
+    fn sweep(&self, referenced: Option<&HashSet<PathBuf>>) -> RecoveryReport {
+        let mut report = RecoveryReport::default();
         let recovery_dir = self.root.join(RECOVERY_DIR);
 
-        let directories = [
-            (
+        let mut directories = Vec::new();
+        if referenced.is_some() {
+            directories.push((
                 self.root.clone(),
                 "unreferenced media or interrupted write in the storage folder",
-            ),
+            ));
+        }
+        directories.extend([
             (self.replay_dir.clone(), "replay artifact with no recording"),
             (
                 self.regular_dir.clone(),
                 "regular artifact with no recording",
             ),
             (self.staging_dir.clone(), "media job intermediate"),
-        ];
+        ]);
 
         for (directory, reason) in directories {
             let Ok(read_dir) = fs::read_dir(&directory) else {
@@ -645,7 +673,7 @@ impl Storage {
                 if directory == self.root {
                     let extension = path.extension().and_then(|value| value.to_str());
                     let sweepable = matches!(extension, Some(MEDIA_EXTENSION) | Some("tmp"));
-                    if !sweepable || referenced.contains(&path) {
+                    if !sweepable || referenced.is_some_and(|media| media.contains(&path)) {
                         continue;
                     }
                 }

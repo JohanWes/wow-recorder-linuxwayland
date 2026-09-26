@@ -317,6 +317,9 @@ pub struct Coordinator {
     user_queue: VecDeque<MediaJob>,
     media_busy: Option<WorkKind>,
     work: Option<WorkProgress>,
+    /// A failed capture left files in the capture directories while a capture
+    /// or media job still owned files there; swept once both are done.
+    sweep_pending: bool,
 
     problems: Vec<Problem>,
     setup_problems: Vec<ValidationProblem>,
@@ -386,6 +389,7 @@ impl Coordinator {
             user_queue: VecDeque::new(),
             media_busy: None,
             work: None,
+            sweep_pending: false,
             problems,
             setup_problems: Vec::new(),
             advanced_logging: Vec::new(),
@@ -656,10 +660,7 @@ impl Coordinator {
                     if let Some(active) = self.active.take() {
                         self.pending_test_end = None;
                         self.drop_activity(&active.draft.flavor);
-                        let report = self.storage.sweep_orphans(&self.storage.scan());
-                        if !report.failures.is_empty() {
-                            tracing::warn!(failures = ?report.failures, "capture failure sweep failed");
-                        }
+                        self.sweep_capture_dirs();
                     }
                 }
                 RecorderEvent::Restarted => {
@@ -1024,8 +1025,7 @@ impl Coordinator {
             Ok(()) => self.ending = Some(EndingCapture::Finalize(Box::new(active.draft))),
             Err(error) => {
                 self.push_recorder_problem(&error);
-                let report = self.storage.sweep_orphans(&self.storage.scan());
-                tracing::info!(quarantined = report.quarantined.len(), "capture end failed");
+                self.sweep_capture_dirs();
             }
         }
     }
@@ -1049,15 +1049,17 @@ impl Coordinator {
             }
             (Some(EndingCapture::Finalize(_)), None) => {
                 self.push_recorder_problem(&RecorderError::MissingRegularArtifact);
-                let report = self.storage.sweep_orphans(&self.storage.scan());
-                tracing::info!(quarantined = report.quarantined.len(), "capture end failed");
+                self.sweep_capture_dirs();
             }
-            (Some(EndingCapture::Discard), _) => {
-                let report = self.storage.sweep_orphans(&self.storage.scan());
+            (Some(EndingCapture::Discard), Some(artifacts)) => {
+                let report = self
+                    .storage
+                    .quarantine_capture(&artifacts, "discarded recording");
                 if !report.failures.is_empty() {
-                    tracing::warn!(failures = ?report.failures, "discard sweep failed");
+                    tracing::warn!(failures = ?report.failures, "discarded capture could not be quarantined");
                 }
             }
+            (Some(EndingCapture::Discard), None) => self.sweep_capture_dirs(),
             (None, _) => {}
         }
         // Quitting drains this same path and the recorder is killed right
@@ -1098,9 +1100,12 @@ impl Coordinator {
 
     fn queue_finalization(&mut self, draft: Box<RecordingDraft>, artifacts: CaptureArtifacts) {
         if self.finalize_queue.len() >= MAX_MEDIA_QUEUE {
-            let report = self.storage.sweep_orphans(&self.storage.scan());
+            // Only this capture's files: the queued jobs still need theirs.
+            let report = self
+                .storage
+                .quarantine_capture(&artifacts, "recording that did not fit the save queue");
             if !report.failures.is_empty() {
-                tracing::warn!(failures = ?report.failures, "finalization queue overflow sweep failed");
+                tracing::warn!(failures = ?report.failures, "unqueued capture could not be quarantined");
             }
             self.push_problem(
                 "The recording could not be queued for saving.",
@@ -1200,6 +1205,30 @@ impl Coordinator {
                 }
             }
         }
+        if self.sweep_pending {
+            self.sweep_capture_dirs();
+        }
+    }
+
+    /// Quarantine what a failed capture left in the capture directories. A
+    /// live capture writes there and queued or running media jobs read and
+    /// stage there, so the sweep waits until none is left; `poll_media`
+    /// retries every tick.
+    fn sweep_capture_dirs(&mut self) {
+        if self.capture_in_flight() || self.media_busy.is_some() || !self.finalize_queue.is_empty()
+        {
+            self.sweep_pending = true;
+            return;
+        }
+        self.sweep_pending = false;
+        let report = self.storage.sweep_capture_dirs();
+        if !report.failures.is_empty() {
+            tracing::warn!(failures = ?report.failures, "capture leftovers could not be quarantined");
+        }
+        tracing::info!(
+            quarantined = report.quarantined.len(),
+            "capture leftovers swept"
+        );
     }
 
     fn queue_clip(&mut self, range: &ClipRange) {
@@ -1702,7 +1731,9 @@ impl Coordinator {
         if let Some(join) = self.media_join.take() {
             let _ = join.join();
         }
-        let report = self.storage.sweep_orphans(&self.storage.scan());
+        // GSR and the media worker are gone, so nothing owns the capture
+        // directories; the storage folder is left to the next startup sweep.
+        let report = self.storage.sweep_capture_dirs();
         if !report.failures.is_empty() {
             tracing::warn!(failures = ?report.failures, "shutdown sweep failed");
         }
@@ -2074,15 +2105,17 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ActiveRecording, CAPTURE_RESTART_FAILED_PROBLEM, CAPTURE_STOPPED_PROBLEM, Coordinator,
-        EntryUpdate, MediaConfig, Problem, RecordingDraft, RecordingMode, RecoveryAction, Setup,
-        Storage, Timeouts, clear_recovered_capture_problems, now_unix_ms, test_events,
+        ActiveRecording, CAPTURE_RESTART_FAILED_PROBLEM, CAPTURE_STOPPED_PROBLEM, CaptureArtifacts,
+        Coordinator, EndingCapture, EntryUpdate, MediaConfig, Problem, RecordingDraft,
+        RecordingMode, RecoveryAction, Setup, Storage, Timeouts, clear_recovered_capture_problems,
+        now_unix_ms, test_events,
     };
     use crate::domain::{
         ActivityDetails, Category, GameFlavor, LibraryEntry, MediaFacts, MeterData, Outcome,
-        RecordingId,
+        RecordingId, WorkKind,
     };
     use crate::parser::CombatEvent;
+    use crate::storage::RECOVERY_DIR;
 
     #[test]
     fn recovered_capture_problems_are_removed_without_touching_other_problems() {
@@ -2117,6 +2150,77 @@ mod tests {
         assert!(clear_recovered_capture_problems(&mut problems));
         assert_eq!(problems, vec![preserved]);
         assert!(!clear_recovered_capture_problems(&mut problems));
+    }
+
+    /// A failed or discarded capture must not take a queued finalization's
+    /// inputs with it: a discard quarantines only its own files, and a
+    /// capture-directory sweep waits until the media worker is idle.
+    #[test]
+    fn failed_capture_sweeps_leave_busy_media_work_alone() {
+        let root = std::env::temp_dir().join(format!(
+            "wr-capture-sweep-{}-{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let library = root.join("library");
+        let regular_dir = root.join("buffer/regular");
+        std::fs::create_dir_all(&regular_dir).unwrap();
+        let queued = regular_dir.join("Video_queued.mkv");
+        std::fs::write(&queued, b"queued").unwrap();
+        let discarded = regular_dir.join("Video_discarded.mkv");
+        std::fs::write(&discarded, b"discarded").unwrap();
+
+        {
+            let (_commands, commands_rx) = mpsc::sync_channel(1);
+            let (snapshot_tx, _snapshots) = mpsc::sync_channel(1);
+            let mut coordinator = Coordinator::new(
+                Setup {
+                    config_path: root.join("config.json"),
+                    data_dir: root.join("recorder"),
+                    gsr_binary: PathBuf::from("true"),
+                    media: MediaConfig::default(),
+                    year: 2026,
+                    recorder_timeouts: Timeouts::default(),
+                    poll_interval: Duration::from_millis(5),
+                    test_duration: Duration::from_millis(200),
+                },
+                commands_rx,
+                snapshot_tx,
+                Box::new(|| {}),
+            );
+            coordinator.storage = Storage::new(&library, root.join("buffer"));
+            // The queued recording's finalization is running.
+            coordinator.media_busy = Some(WorkKind::Finalize);
+
+            coordinator.ending = Some(EndingCapture::Discard);
+            coordinator.capture_ended(Some(CaptureArtifacts {
+                replay: None,
+                regular: discarded.clone(),
+                requested_replay_ms: 0,
+                regular_started_at_ms: 0,
+                regular_stopped_at_ms: 0,
+            }));
+            assert!(!discarded.exists(), "the discarded capture was kept");
+            assert!(queued.exists(), "the discard swept a queued input");
+
+            // GSR never produced the regular file: sweep, but not yet.
+            coordinator.ending = Some(EndingCapture::Discard);
+            coordinator.capture_ended(None);
+            assert!(queued.exists(), "the sweep ran while media work was busy");
+
+            coordinator.media_busy = None;
+            coordinator.poll_media();
+            assert!(!queued.exists(), "the deferred sweep never ran");
+            assert_eq!(
+                std::fs::read_dir(library.join(RECOVERY_DIR))
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "mkv"))
+                    .count(),
+                2
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
     #[test]
     fn test_recording_exercises_damage_taken_and_death_log() {
