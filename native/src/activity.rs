@@ -1439,7 +1439,7 @@ fn retail_zone_change(
         return;
     }
     if !is_zone_bg && is_activity_bg {
-        end_battleground(state, at_ms, config, finished, actions);
+        end_on_death_count(state, at_ms, config, finished, actions);
         return;
     }
     if is_arena_category(&active_ref.category) {
@@ -1477,11 +1477,11 @@ fn classic_zone_change(
     if let Some(active_ref) = state.active.as_ref() {
         let activity_zone = active_zone_id(active_ref).unwrap_or(0);
         if matches!(active_ref.kind, ActiveKind::Arena(_)) && zone_id != activity_zone {
-            end_classic_arena(state, at_ms, config, finished, actions);
+            end_on_death_count(state, at_ms, config, finished, actions);
             return;
         }
         if matches!(active_ref.kind, ActiveKind::Battleground { .. }) && zone_id != activity_zone {
-            end_battleground(state, at_ms, config, finished, actions);
+            end_on_death_count(state, at_ms, config, finished, actions);
         }
         return;
     }
@@ -1531,7 +1531,9 @@ fn start_battleground(
     begin(state, active, config, actions);
 }
 
-fn end_battleground(
+/// Battlegrounds, and classic arenas (the player is always team 1), have no
+/// result event: the recorded result is always the death-count estimate.
+fn end_on_death_count(
     state: &mut FlavorState,
     at_ms: i64,
     config: &ActivitySettings,
@@ -1541,7 +1543,6 @@ fn end_battleground(
     let Some(active) = state.active.take() else {
         return;
     };
-    // The recorded result is always the death-count estimate.
     let outcome = battleground_estimate(&active);
     finish(
         active,
@@ -1562,35 +1563,6 @@ fn battleground_estimate(active: &ActiveActivity) -> Outcome {
     } else {
         Outcome::Loss
     }
-}
-
-fn end_classic_arena(
-    state: &mut FlavorState,
-    at_ms: i64,
-    config: &ActivitySettings,
-    finished: &mut Vec<RecordingDraft>,
-    actions: &mut Vec<ActivityAction>,
-) {
-    let Some(active) = state.active.take() else {
-        return;
-    };
-    // Classic decides the winner by counting deaths; the player is always
-    // assigned team 1, so fewer friendly deaths is a win.
-    let friends_dead = death_count(&active, true);
-    let enemies_dead = death_count(&active, false);
-    let outcome = if friends_dead < enemies_dead {
-        Outcome::Win
-    } else {
-        Outcome::Loss
-    };
-    finish(
-        active,
-        at_ms,
-        EndKind::Complete(outcome),
-        config,
-        finished,
-        actions,
-    );
 }
 
 /// Deaths are stored as timeline points: friendly deaths carry `Loss`, enemy
@@ -1988,12 +1960,12 @@ fn process_classic_arena_death(
     }
     let dead_friends = death_count(active, true);
     if total_friends.saturating_sub(dead_friends) < 1 {
-        end_classic_arena(state, at_ms, config, finished, actions);
+        end_on_death_count(state, at_ms, config, finished, actions);
         return;
     }
     let dead_enemies = death_count(active, false);
     if total_enemies.saturating_sub(dead_enemies) < 1 {
-        end_classic_arena(state, at_ms, config, finished, actions);
+        end_on_death_count(state, at_ms, config, finished, actions);
     }
 }
 
