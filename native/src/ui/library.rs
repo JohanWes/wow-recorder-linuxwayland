@@ -403,6 +403,8 @@ struct State {
     /// The row the context menu was opened on, resolved again when an action
     /// runs so it acts on the current snapshot's row.
     menu_target: RefCell<Option<RecordingId>>,
+    /// Primary ids of a delete in flight, to report how many went.
+    deleting: RefCell<Vec<RecordingId>>,
     /// The authoritative index objects used to build the current rows.  Status
     /// and progress snapshots reuse these Arcs, so retaining them lets the GTK
     /// thread avoid rebuilding row metadata for unrelated updates.
@@ -614,6 +616,7 @@ impl Library {
                 category: RefCell::new(None),
                 mutation_pending: Cell::new(false),
                 menu_target: RefCell::new(None),
+                deleting: RefCell::new(Vec::new()),
                 entries: RefCell::new(None),
                 correlations: RefCell::new(None),
             },
@@ -960,6 +963,7 @@ impl Inner {
             return;
         }
         let ids = viewpoint_ids(&selected);
+        let primaries: Vec<RecordingId> = selected.iter().map(|row| row.id.clone()).collect();
         let rows = selected.len();
         let body = format!(
             "Delete {rows} recording{} and their {} viewpoint file{}? This permanently \
@@ -976,8 +980,8 @@ impl Inner {
         dialog.set_close_response("cancel");
         let this = Rc::clone(self);
         dialog.connect_response(None, move |_, response| {
-            if response == "delete" {
-                this.send_mutation(Command::Delete { ids: ids.clone() });
+            if response == "delete" && this.send_mutation(Command::Delete { ids: ids.clone() }) {
+                *this.state.deleting.borrow_mut() = primaries.clone();
             }
         });
         dialog.present(Some(&self.widget_root()));
@@ -1084,6 +1088,9 @@ impl Inner {
         }
         *self.state.entries.borrow_mut() = Some(Arc::clone(&snapshot.entries));
         *self.state.correlations.borrow_mut() = Some(Arc::clone(&snapshot.correlations));
+        if index_changed {
+            self.report_deleted(snapshot);
+        }
 
         // Unchanged rows keep their row object, so GTK sees them as the same
         // items: their widgets, focus, scroll anchor, and selection survive.
@@ -1149,6 +1156,30 @@ impl Inner {
                 .set_selection(&wanted, &gtk4::Bitset::new_range(0, visible));
         }
         self.update_bulk_bar(&self.selected_rows());
+    }
+
+    /// The first index change after a delete carries its result; failures
+    /// arrive as problems, so only the rows actually gone are reported.
+    fn report_deleted(&self, snapshot: &AppSnapshot) {
+        let deleting = self.state.deleting.take();
+        let gone = deleting
+            .iter()
+            .filter(|id| !snapshot.entries.iter().any(|entry| &entry.id == *id))
+            .count();
+        if gone > 0 {
+            self.toast(&format!("Deleted {gone} recording{}", plural(gone)));
+        }
+    }
+
+    /// Toasts go to the shell's overlay, found up the widget tree.
+    fn toast(&self, title: &str) {
+        if let Some(overlay) = self
+            .stack
+            .ancestor(adw::ToastOverlay::static_type())
+            .and_downcast::<adw::ToastOverlay>()
+        {
+            overlay.add_toast(adw::Toast::new(title));
+        }
     }
 
     fn reset_for_category(self: &Rc<Self>, category: &Category, family_changed: bool) {

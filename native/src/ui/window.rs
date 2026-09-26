@@ -8,14 +8,13 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use warcraft_recorder::coordinator::{AppSnapshot, Command, CoordinatorHandle};
-use warcraft_recorder::domain::RecoveryAction;
+use warcraft_recorder::domain::{Category, RecoveryAction};
 
 use warcraft_recorder::domain::RecorderStatus;
 use warcraft_recorder::storage::now_unix_ms;
@@ -170,6 +169,9 @@ pub struct Shell {
     layout: Rc<LayoutStore>,
     pane: Rc<PaneLayout>,
     layout_adopted: Cell<bool>,
+    toasts: adw::ToastOverlay,
+    /// Clips in the library at the last snapshot, to notice a finished clip.
+    clip_count: Cell<Option<usize>>,
     settings: Rc<RefCell<Option<Rc<Settings>>>>,
     latest_snapshot: Rc<RefCell<Option<Arc<AppSnapshot>>>>,
     close_to_tray: Rc<Cell<bool>>,
@@ -216,7 +218,9 @@ impl Shell {
         sync_light(&style_manager);
         style_manager.connect_dark_notify(sync_light);
 
-        let busy_banner = adw::Banner::new("The app is busy, try again in a moment.");
+        // Transient feedback floats over the content instead of pushing the
+        // player and table down.
+        let toasts = adw::ToastOverlay::new();
         let settings_cell: Rc<RefCell<Option<Rc<Settings>>>> = Rc::new(RefCell::new(None));
         let latest_snapshot: Rc<RefCell<Option<Arc<AppSnapshot>>>> = Rc::new(RefCell::new(None));
         let tray_available = Rc::new(Cell::new(
@@ -226,7 +230,7 @@ impl Shell {
             &window,
             application,
             &coordinator,
-            &busy_banner,
+            &toasts,
             data_dir,
             config_dir,
             &settings_cell,
@@ -247,7 +251,7 @@ impl Shell {
         header.set_title_widget(Some(&title));
         header.pack_end(&menu_button);
 
-        // Banners: setup, newest problem, and one transient Busy notice.
+        // Banners: setup and newest problem, both persistent state.
         let setup_banner = adw::Banner::new("");
         setup_banner.set_button_label(Some("Open Settings"));
         {
@@ -380,7 +384,6 @@ impl Shell {
         let banner_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         banner_box.append(&setup_banner);
         banner_box.append(&problem_banner);
-        banner_box.append(&busy_banner);
         // The Manual-category start/stop entry.
         let manual_bar = ManualBar::new(Rc::clone(&sink));
         // One container for everything above the paned, so fullscreen can hide
@@ -394,7 +397,8 @@ impl Shell {
 
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header);
-        toolbar_view.set_content(Some(&content_body));
+        toasts.set_child(Some(&content_body));
+        toolbar_view.set_content(Some(&toasts));
         let nav_page = adw::NavigationPage::new(&toolbar_view, "Warcraft Recorder");
 
         let sidebar_page = adw::NavigationPage::new(&sidebar.widget, "Categories");
@@ -439,6 +443,8 @@ impl Shell {
             layout,
             pane,
             layout_adopted: Cell::new(false),
+            toasts,
+            clip_count: Cell::new(None),
             settings: settings_cell,
             latest_snapshot,
             close_to_tray: Rc::new(Cell::new(close_to_tray)),
@@ -506,6 +512,7 @@ impl Shell {
         self.player.apply_snapshot(snapshot);
         self.library.apply(snapshot);
         self.manual_bar.apply(snapshot, now_unix_ms());
+        self.notice_new_clips(snapshot);
 
         *self.latest_snapshot.borrow_mut() = Some(Arc::clone(snapshot));
         if let Some(settings) = self.settings.borrow().as_ref() {
@@ -544,6 +551,31 @@ impl Shell {
                 present_release_notes(self.window.upcast_ref(), Rc::clone(&self.sink), &notes);
             }
         }
+    }
+
+    /// Clips are only ever added by a finished clip job, so a larger count
+    /// than the previous snapshot's means one was just saved.
+    fn notice_new_clips(&self, snapshot: &AppSnapshot) {
+        let count = snapshot
+            .category_counts
+            .iter()
+            .find(|(category, _)| *category == Category::Clip)
+            .map_or(0, |(_, count)| *count);
+        let previous = self.clip_count.replace(Some(count));
+        if previous.is_none_or(|previous| count <= previous) {
+            return;
+        }
+        let toast = adw::Toast::new("Clip saved");
+        if snapshot.config.interface.selected_category != Category::Clip {
+            toast.set_button_label(Some("Show"));
+            let sink = Rc::clone(&self.sink);
+            toast.connect_button_clicked(move |_| {
+                sink(ShellAction::Command(Command::SetSelectedCategory {
+                    category: Category::Clip,
+                }));
+            });
+        }
+        self.toasts.add_toast(toast);
     }
 
     fn connect_close_request(&self) {
@@ -606,7 +638,7 @@ fn make_sink(
     window: &adw::ApplicationWindow,
     application: &adw::Application,
     coordinator: &Rc<RefCell<CoordinatorHandle>>,
-    busy_banner: &adw::Banner,
+    toasts: &adw::ToastOverlay,
     data_dir: &Path,
     config_dir: &Path,
     settings_cell: &Rc<RefCell<Option<Rc<Settings>>>>,
@@ -616,7 +648,9 @@ fn make_sink(
     let window = window.clone();
     let application = application.clone();
     let coordinator = Rc::clone(coordinator);
-    let busy_banner = busy_banner.clone();
+    let toasts = toasts.clone();
+    // One Busy toast at a time, however many sends bounce off a full queue.
+    let busy_shown = Rc::new(Cell::new(false));
     let data_dir: PathBuf = data_dir.to_owned();
     let config_dir: PathBuf = config_dir.to_owned();
     let settings_cell = Rc::clone(settings_cell);
@@ -668,13 +702,18 @@ fn make_sink(
             }
             ShellAction::Quit => Command::Shutdown,
         };
+        let clip = matches!(command, Command::CreateClip(_));
         let sent = coordinator.borrow().send(command);
-        if !sent {
-            busy_banner.set_revealed(true);
-            let busy_banner = busy_banner.clone();
-            gtk4::glib::timeout_add_local_once(Duration::from_secs(2), move || {
-                busy_banner.set_revealed(false);
-            });
+        if !sent && !busy_shown.replace(true) {
+            let toast = adw::Toast::new("The app is busy, try again in a moment.");
+            toast.set_timeout(3);
+            let busy_shown = Rc::clone(&busy_shown);
+            toast.connect_dismissed(move |_| busy_shown.set(false));
+            toasts.add_toast(toast);
+        } else if sent && clip {
+            let toast = adw::Toast::new("Clip queued");
+            toast.set_timeout(3);
+            toasts.add_toast(toast);
         }
         sent
     });
