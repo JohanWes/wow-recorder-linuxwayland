@@ -73,7 +73,8 @@ struct Inner {
     /// Collapsing the control row in fullscreen gives the video the whole
     /// surface, which is what closes the letterbox bars.
     bottom_bar: gtk4::Revealer,
-    fullscreen: Cell<bool>,
+    /// Bumped on every fullscreen change; only the newest idle tick runs.
+    fullscreen_generation: Cell<u64>,
     last_motion: Cell<Instant>,
     last_pointer: Cell<(f64, f64)>,
 
@@ -267,7 +268,7 @@ impl Player {
             meter,
             reveal_button,
             bottom_bar,
-            fullscreen: Cell::new(false),
+            fullscreen_generation: Cell::new(0),
             last_motion: Cell::new(Instant::now()),
             last_pointer: Cell::new((f64::NAN, f64::NAN)),
             video_dimensions_handler: RefCell::new(None),
@@ -1013,15 +1014,17 @@ impl Inner {
     // -- fullscreen idle -----------------------------------------------------
 
     fn set_fullscreen(self: &Rc<Self>, fullscreen: bool) {
-        self.fullscreen.set(fullscreen);
         self.last_motion.set(Instant::now());
         self.reveal_bottom_bar();
+        // A quick off/on toggle must not leave the previous tick running.
+        let generation = self.fullscreen_generation.get().wrapping_add(1);
+        self.fullscreen_generation.set(generation);
         if !fullscreen {
             return;
         }
         let this = Rc::clone(self);
         gtk4::glib::timeout_add_local(IDLE_TICK, move || {
-            if !this.fullscreen.get() {
+            if this.fullscreen_generation.get() != generation {
                 return gtk4::glib::ControlFlow::Break;
             }
             if this.last_motion.get().elapsed() >= IDLE_HIDE {
