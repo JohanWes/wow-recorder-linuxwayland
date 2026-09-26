@@ -2,7 +2,7 @@
 
 [package]
 name = "warcraft-recorder"
-version = "1.0.10"
+version = "1.0.11"
 edition = "2024"
 license = "GPL-3.0-or-later"
 publish = false

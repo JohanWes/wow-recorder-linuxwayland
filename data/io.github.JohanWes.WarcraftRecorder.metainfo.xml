@@ -34,6 +34,19 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.11" date="2026-09-26">
+      <description>
+        <p>
+          Much lighter and snappier: the app uses far less memory at idle
+          and in the tray, starts faster, and the download is smaller. The
+          library keeps focus and selection across refreshes, the combat
+          meter animates smoothly, and busy state is shown as toasts. A raid
+          pull or Mythic+ run that started while the previous activity was
+          still ending is now recorded instead of dropped, and several
+          capture, cleanup and memory-leak issues are fixed.
+        </p>
+      </description>
+    </release>
     <release version="1.0.10" date="2026-09-09">
       <description>
         <p>

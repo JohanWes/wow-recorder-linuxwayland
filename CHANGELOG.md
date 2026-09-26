@@ -7,7 +7,7 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
-## Unreleased
+## 1.0.11 - 2026-09-26
 
 ### Changed
 - Damage meters load on demand for the selected recording instead of staying
