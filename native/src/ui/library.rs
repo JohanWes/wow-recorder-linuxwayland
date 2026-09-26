@@ -493,6 +493,8 @@ impl Library {
         stack.add_named(&empty, Some("empty"));
         stack.add_named(&filtered_empty, Some("filtered-empty"));
         stack.set_visible_child_name("loading");
+        stack.set_transition_type(gtk4::StackTransitionType::Crossfade);
+        stack.set_transition_duration(180);
 
         // Toolbar: search entry, date-range popover, clear.
         let search = gtk4::SearchEntry::new();
@@ -561,6 +563,7 @@ impl Library {
         bulk_inner.append(&protect_button);
         bulk_inner.append(&delete_button);
         let bulk_bar = gtk4::Revealer::new();
+        bulk_bar.set_transition_type(gtk4::RevealerTransitionType::SlideUp);
         bulk_bar.set_child(Some(&bulk_inner));
         bulk_bar.set_reveal_child(false);
 
@@ -980,23 +983,25 @@ impl Inner {
         dialog.present(Some(&self.widget_root()));
     }
 
-    fn send_mutation(self: &Rc<Self>, command: Command) {
-        if (self.sink)(ShellAction::Command(command)) {
+    fn send_mutation(self: &Rc<Self>, command: Command) -> bool {
+        let sent = (self.sink)(ShellAction::Command(command));
+        if sent {
             self.state.mutation_pending.set(true);
             self.protect_button.set_sensitive(false);
             self.delete_button.set_sensitive(false);
         }
+        sent
     }
 
     // --- per-row actions ----------------------------------------------------
 
-    fn toggle_protect(self: &Rc<Self>, row: &RowModel) {
+    fn toggle_protect(self: &Rc<Self>, row: &RowModel) -> bool {
         // A single-row star applies to that activity's viewpoints, using the
         // same all-protected toggle rule as the bulk bar.
         self.send_mutation(Command::SetProtected {
             ids: row.correlated_ids.clone(),
             value: !row.all_protected,
-        });
+        })
     }
 
     fn edit_tag(self: &Rc<Self>, row: &RowModel) {
@@ -1074,7 +1079,6 @@ impl Inner {
             // Progress, recorder-state, and active-timeline snapshots do not
             // change the library.  In particular, do not rebuild suggestion
             // sets or touch the virtualized store while FFmpeg reports work.
-            self.state.mutation_pending.set(false);
             self.update_bulk_bar(&self.selected_rows());
             return;
         }
@@ -1331,9 +1335,12 @@ impl Inner {
             // recycled cells always act on the row they currently show.
             let this = Rc::clone(&this);
             let weak_item = item.downgrade();
-            button.connect_clicked(move |_| {
-                if let Some(row) = bound_row(&weak_item) {
-                    this.toggle_protect(&row);
+            button.connect_clicked(move |button| {
+                // Flip at once; the snapshot's rebind confirms it.
+                if let Some(row) = bound_row(&weak_item)
+                    && this.toggle_protect(&row)
+                {
+                    show_star(button, !row.all_protected);
                 }
             });
             item.set_child(Some(&button));
@@ -1341,17 +1348,7 @@ impl Inner {
         factory.connect_bind(|_, item| {
             let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
             let button = item.child().and_downcast::<gtk4::Button>().unwrap();
-            let row = row_of(&item.item().unwrap());
-            // Reflect the toggle action: a filled star means every correlated
-            // viewpoint is protected, matching `toggle_protect`'s value.
-            button.set_icon_name(if row.all_protected {
-                "starred-symbolic"
-            } else {
-                "non-starred-symbolic"
-            });
-            let label = protect_label(row.all_protected);
-            button.set_tooltip_text(Some(label));
-            button.update_property(&[gtk4::accessible::Property::Label(label)]);
+            show_star(&button, row_of(&item.item().unwrap()).all_protected);
         });
         let column = gtk4::ColumnViewColumn::new(Some("★"), Some(factory));
         column.set_fixed_width(40);
@@ -1432,7 +1429,9 @@ impl Inner {
             });
             group.add_action(&action);
         };
-        add("protect", |this, row| this.toggle_protect(&row));
+        add("protect", |this, row| {
+            this.toggle_protect(&row);
+        });
         add("tag", |this, row| this.edit_tag(&row));
         add("reveal", |this, row| this.reveal(&row));
         add("delete", |this, row| this.confirm_delete(vec![row]));
@@ -1508,6 +1507,19 @@ fn bound_row(item: &glib::WeakRef<gtk4::ListItem>) -> Option<Rc<RowModel>> {
     item.upgrade()
         .and_then(|item| item.item())
         .map(|item| row_of(&item))
+}
+
+/// A filled star means every correlated viewpoint is protected, matching
+/// `toggle_protect`'s value; the tooltip names the action a click takes.
+fn show_star(button: &gtk4::Button, all_protected: bool) {
+    button.set_icon_name(if all_protected {
+        "starred-symbolic"
+    } else {
+        "non-starred-symbolic"
+    });
+    let label = protect_label(all_protected);
+    button.set_tooltip_text(Some(label));
+    button.update_property(&[gtk4::accessible::Property::Label(label)]);
 }
 
 fn protect_label(all_protected: bool) -> &'static str {
