@@ -268,7 +268,6 @@ impl Timeline {
         widget.set_content_height(TRACK_HEIGHT);
         widget.set_hexpand(true);
         widget.set_focusable(true);
-        widget.add_css_class("wr-timeline");
         widget.set_has_tooltip(true);
         let state = Rc::new(State {
             duration_ms: Cell::new(0),
