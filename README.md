@@ -28,7 +28,7 @@ sessions.
 - **Background recording** from a tray icon. Closing or minimizing the window
   hides it to the tray by default, and Settings can start the app minimized.
 
-![Combat meter with a player's spell breakdown, target filter and spell tooltip](data/screenshots/damage-meter-demo.gif)
+![Combat meter over a playing raid recording: a player's spells and tooltip, a target filter, and a death recap that seeks the video](data/screenshots/damage-meter-demo.avif)
 
 ## Install
 

@@ -7,6 +7,12 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## Unreleased
+
+### Fixed
+- The damage meter's right-click menu shows its Target entry in full instead
+  of cutting it off behind a scrollbar.
+
 ## 1.0.11 - 2026-09-26
 
 ### Changed

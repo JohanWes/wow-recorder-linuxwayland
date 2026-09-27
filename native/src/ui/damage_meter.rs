@@ -1066,13 +1066,11 @@ impl Inner {
             );
             segment_section.append_item(&item);
         }
-        menu.append_section(None, &segment_section);
 
         let (names, markers) = self.target_choices();
         if matches!(self.view.get(), View::Metric(_)) && !(names.is_empty() && markers.is_empty()) {
             // Only names and markers present in the selected segment; a dead
             // entry would be a filter with no rows.
-            let target_section = gtk4::gio::Menu::new();
             let targets = gtk4::gio::Menu::new();
             let all = gtk4::gio::MenuItem::new(Some("All targets"), None);
             all.set_action_and_target_value(Some("meter.target"), Some(&"all".to_variant()));
@@ -1094,9 +1092,11 @@ impl Inner {
                 );
                 targets.append_item(&item);
             }
-            target_section.append_submenu(Some("Target"), &targets);
-            menu.append_section(None, &target_section);
+            // Not a section of its own: GTK 4.22 measures a trailing
+            // submenu-only section one separator short, clipping the row.
+            segment_section.append_submenu(Some("Target"), &targets);
         }
+        menu.append_section(None, &segment_section);
 
         menu
     }
