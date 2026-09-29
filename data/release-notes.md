@@ -4,6 +4,11 @@ Commit subjects per release, written by `scripts/generate-release-notes.sh` and
 compiled into the binary: the "What's new" dialog reads the section matching the
 running version. Only `## <version>` headings and `- ` lines are parsed.
 
+## 1.0.12
+- Show the damage meter's Target menu entry in full
+- Give app icon an orange legendary border
+- Draw the tray icon from the app's own icon so it matches the running build
+
 ## 1.0.11
 - Write native sidecars as compact JSON
 - Move spell data to a separate mmapped gresource and align embedded bundle

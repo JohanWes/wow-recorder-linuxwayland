@@ -34,6 +34,16 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.12" date="2026-09-29">
+      <description>
+        <p>
+          The app icon, sidebar logo and tray icon now carry an orange
+          legendary-item border, and the tray always shows the icon of the
+          build that is running. The combat meter's right-click menu shows
+          its Target entry in full instead of hiding it behind a scrollbar.
+        </p>
+      </description>
+    </release>
     <release version="1.0.11" date="2026-09-26">
       <description>
         <p>

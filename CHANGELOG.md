@@ -7,7 +7,7 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
-## Unreleased
+## 1.0.12 - 2026-09-29
 
 ### Changed
 - The app icon, sidebar logo and tray icon have an orange legendary-item
