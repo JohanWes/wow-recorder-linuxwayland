@@ -127,8 +127,9 @@ fn tray_icons() -> Vec<ksni::Icon> {
             let pixels = pixbuf.read_pixel_bytes();
             let mut data = Vec::with_capacity((width * height * 4) as usize);
             for row in pixels.chunks(stride).take(height as usize) {
-                for rgba in row[..width as usize * 4].chunks_exact(4) {
-                    data.extend_from_slice(&[rgba[3], rgba[0], rgba[1], rgba[2]]);
+                let (rgba, _) = row[..width as usize * 4].as_chunks::<4>();
+                for [r, g, b, a] in rgba {
+                    data.extend_from_slice(&[*a, *r, *g, *b]);
                 }
             }
             Some(ksni::Icon {
