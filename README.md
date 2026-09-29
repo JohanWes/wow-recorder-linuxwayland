@@ -5,7 +5,7 @@ detects each activity and saves a video with a metadata file beside it. It is a
 native Rust and GTK4 application, distributed as a Flatpak for Wayland
 sessions.
 
-![Warcraft Recorder library with a selected Mythic+ recording](data/screenshots/warcraft-recorder-library.png)
+![Intro: a recorded raid kill, the recording library, the combat meter with target filter and death recap, and the app's footprint](data/screenshots/warcraft-recorder-intro.avif)
 
 ## Features
 
