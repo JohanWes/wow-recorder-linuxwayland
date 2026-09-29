@@ -1,4 +1,4 @@
-# Warcraft Recorder
+# <img src="data/icons/io.github.JohanWes.WarcraftRecorder.svg" width="44" alt=""> Warcraft Recorder
 
 Warcraft Recorder records World of Warcraft on Linux. It reads the combat log,
 detects each activity and saves a video with a metadata file beside it. It is a

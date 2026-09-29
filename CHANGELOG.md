@@ -11,7 +11,8 @@ project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
 ### Changed
 - The app icon, sidebar logo and tray icon have an orange legendary-item
-  border.
+  border. The tray now draws the icon built into the app instead of looking
+  it up in the installed icon theme, so it always matches the running build.
 
 ### Fixed
 - The damage meter's right-click menu shows its Target entry in full instead

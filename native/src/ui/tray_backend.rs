@@ -6,10 +6,12 @@ use std::sync::{Arc, mpsc::SyncSender};
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::StandardItem;
 
-#[cfg(not(feature = "development"))]
-const ICON_NAME: &str = "io.github.JohanWes.WarcraftRecorder";
-#[cfg(feature = "development")]
-const ICON_NAME: &str = "io.github.JohanWes.WarcraftRecorder.Devel";
+/// The product mark from the embedded UI bundle. The tray sends it as pixmaps
+/// rather than a theme icon name, so the panel always shows the icon this
+/// build ships instead of whatever an installed Flatpak exported.
+const ICON_RESOURCE: &str =
+    "/io/github/JohanWes/WarcraftRecorder/icons/scalable/apps/warcraft-recorder.svg";
+const ICON_SIZES: [i32; 6] = [16, 22, 24, 32, 48, 64];
 
 /// The only event carried over the bounded channel is Open; it is idempotent
 /// (present the window) so dropping it under saturation is harmless. Quit is a
@@ -34,6 +36,7 @@ struct RecorderTray {
     wake: Arc<dyn Fn() + Send + Sync>,
     title: String,
     status: ksni::Status,
+    icons: Vec<ksni::Icon>,
 }
 
 impl TrayBackend {
@@ -50,6 +53,7 @@ impl TrayBackend {
             wake,
             title: "Warcraft Recorder".into(),
             status: ksni::Status::Active,
+            icons: tray_icons(),
         };
 
         let mut service = tray.assume_sni_available(true);
@@ -104,6 +108,38 @@ impl RecorderTray {
     }
 }
 
+/// Rasterizes the product mark at the usual panel sizes as ARGB32 in network
+/// byte order. Needs the UI resources registered, which `ui::register` does
+/// before the tray starts.
+fn tray_icons() -> Vec<ksni::Icon> {
+    ICON_SIZES
+        .into_iter()
+        .filter_map(|size| {
+            let pixbuf =
+                gtk4::gdk_pixbuf::Pixbuf::from_resource_at_scale(ICON_RESOURCE, size, size, true)
+                    .map_err(|error| tracing::warn!(%error, size, "cannot render tray icon"))
+                    .ok()?;
+            if pixbuf.n_channels() != 4 {
+                return None;
+            }
+            let (width, height) = (pixbuf.width(), pixbuf.height());
+            let stride = pixbuf.rowstride() as usize;
+            let pixels = pixbuf.read_pixel_bytes();
+            let mut data = Vec::with_capacity((width * height * 4) as usize);
+            for row in pixels.chunks(stride).take(height as usize) {
+                for rgba in row[..width as usize * 4].chunks_exact(4) {
+                    data.extend_from_slice(&[rgba[3], rgba[0], rgba[1], rgba[2]]);
+                }
+            }
+            Some(ksni::Icon {
+                width,
+                height,
+                data,
+            })
+        })
+        .collect()
+}
+
 impl ksni::Tray for RecorderTray {
     fn id(&self) -> String {
         "warcraft-recorder".into()
@@ -117,8 +153,8 @@ impl ksni::Tray for RecorderTray {
         self.status
     }
 
-    fn icon_name(&self) -> String {
-        ICON_NAME.into()
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        self.icons.clone()
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
@@ -172,6 +208,7 @@ mod tests {
             wake: Arc::new(|| {}),
             title: "Warcraft Recorder".into(),
             status: ksni::Status::Active,
+            icons: Vec::new(),
         };
 
         tray.request_open(); // fills the single slot
