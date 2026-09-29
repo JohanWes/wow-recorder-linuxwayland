@@ -9,6 +9,10 @@ project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
 ## Unreleased
 
+### Changed
+- The app icon, sidebar logo and tray icon have an orange legendary-item
+  border.
+
 ### Fixed
 - The damage meter's right-click menu shows its Target entry in full instead
   of cutting it off behind a scrollbar.

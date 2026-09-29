@@ -2,7 +2,11 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
   <rect width="128" height="128" rx="24" fill="#272421"/>
-  <path d="M28 40h47a12 12 0 0 1 12 12v24a12 12 0 0 1-12 12H28a12 12 0 0 1-12-12V52a12 12 0 0 1 12-12Z" fill="#e8e4df"/>
-  <path d="m87 56 20-12a4 4 0 0 1 6 3v34a4 4 0 0 1-6 3L87 72Z" fill="#c74d36"/>
-  <circle cx="51" cy="64" r="14" fill="#c74d36"/>
+  <g transform="translate(64 64) scale(0.86) translate(-64 -64)">
+    <path d="M28 40h47a12 12 0 0 1 12 12v24a12 12 0 0 1-12 12H28a12 12 0 0 1-12-12V52a12 12 0 0 1 12-12Z" fill="#e8e4df"/>
+    <path d="m87 56 20-12a4 4 0 0 1 6 3v34a4 4 0 0 1-6 3L87 72Z" fill="#c74d36"/>
+    <circle cx="51" cy="64" r="14" fill="#c74d36"/>
+  </g>
+  <rect x="4" y="4" width="120" height="120" rx="20" fill="none" stroke="#ff8000" stroke-width="8"/>
+  <rect x="10" y="10" width="108" height="108" rx="15" fill="none" stroke="#ffc266" stroke-opacity="0.45" stroke-width="2"/>
 </svg>

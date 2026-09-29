@@ -23,6 +23,12 @@ fn main() {
         let entry = entry.expect("icon asset entry");
         println!("cargo:rerun-if-changed={}", entry.path().display());
     }
+    // The product mark, embedded as the sidebar logo.
+    println!(
+        "cargo:rerun-if-changed={}",
+        data.join("icons/io.github.JohanWes.WarcraftRecorder.svg")
+            .display()
+    );
     // The spell database: the JSON plus every bundled spell icon.
     if let Ok(entries) = std::fs::read_dir(data.join("spells")) {
         for entry in entries.flatten() {
