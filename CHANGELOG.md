@@ -7,6 +7,20 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## Unreleased
+
+### Changed
+- The replay buffer only runs while World of Warcraft is running. It starts
+  when WoW writes to its Logs folder and stops after 10 minutes without any
+  write there, so the GPU's video encoder is no longer busy while the game is
+  closed. Manual and test recordings still work with WoW closed.
+
+### Fixed
+- Playing a recording no longer loads the whole file into memory (about
+  5 GB for a long Mythic+ key). GStreamer's AV1 parser leaves most frames of
+  these recordings untimestamped, so playbin3's time-limited demuxer queue
+  never filled; it now also has a 64 MiB byte limit.
+
 ## 1.0.12 - 2026-09-29
 
 ### Changed

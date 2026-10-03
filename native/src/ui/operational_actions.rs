@@ -41,7 +41,11 @@ pub fn manual_view(snapshot: &AppSnapshot) -> ManualView {
     ManualView {
         visible: snapshot.config.interface.selected_category == Category::Manual
             && snapshot.config.manual.enabled,
-        start_enabled: snapshot.status == RecorderStatus::Ready,
+        // Starting arms the recorder when WoW is not running.
+        start_enabled: matches!(
+            snapshot.status,
+            RecorderStatus::Ready | RecorderStatus::WaitingForWow
+        ),
         stop_visible: manual_active,
         elapsed_anchor_ms: match snapshot.status {
             RecorderStatus::Recording {
@@ -487,7 +491,7 @@ mod tests {
                 RecorderStatus::WaitingForWow,
                 Category::Manual,
                 true,
-                (true, false, false),
+                (true, true, false),
             ),
         ];
         for (status, selected, manual, (visible, start, stop)) in cases {

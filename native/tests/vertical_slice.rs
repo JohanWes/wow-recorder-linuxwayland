@@ -62,6 +62,23 @@ impl Harness {
 
     /// Build a coordinator over an existing directory tree.
     fn attach(root: PathBuf, library: PathBuf, capture_root: PathBuf, log_file: PathBuf) -> Self {
+        // Startup publishes the scanned library before it arms, so settle on
+        // the post-arm snapshot rather than the first one out.
+        Self::attach_until(root, library, capture_root, log_file, |snapshot| {
+            !matches!(
+                snapshot.status,
+                RecorderStatus::SetupRequired | RecorderStatus::WaitingForWow
+            )
+        })
+    }
+
+    fn attach_until(
+        root: PathBuf,
+        library: PathBuf,
+        capture_root: PathBuf,
+        log_file: PathBuf,
+        settled: impl FnMut(&AppSnapshot) -> bool,
+    ) -> Self {
         let (commands, commands_rx) = mpsc::sync_channel(64);
         let (snapshot_tx, snapshots) = mpsc::sync_channel(1);
         let mut coordinator =
@@ -78,14 +95,7 @@ impl Harness {
             latest: Arc::new(empty_snapshot()),
             replay_index: 0,
         };
-        // Startup publishes the scanned library before it arms, so settle on
-        // the post-arm snapshot rather than the first one out.
-        harness.pump(|snapshot| {
-            !matches!(
-                snapshot.status,
-                RecorderStatus::SetupRequired | RecorderStatus::WaitingForWow
-            )
-        });
+        harness.pump(settled);
         harness
     }
 
@@ -793,6 +803,35 @@ fn missing_replay_falls_back_to_the_regular_recording() {
         "a death before the media start should be clipped: {:?}",
         entry.timeline
     );
+}
+
+#[test]
+fn replay_buffer_waits_for_wow_to_run() {
+    let (root, library, capture_root, log_file) = spawn_tree("standby");
+    let config_path = root.join("config.json");
+    let mut config = Config::load(&config_path).unwrap();
+    config.capture.capture_target_token = Some("token".to_owned());
+    config.save(&config_path).unwrap();
+    // WoW last wrote its Logs folder an hour ago.
+    let an_hour_ago = std::time::SystemTime::now() - Duration::from_secs(3_600);
+    fs::File::options()
+        .write(true)
+        .open(&log_file)
+        .unwrap()
+        .set_modified(an_hour_ago)
+        .unwrap();
+    let log_dir = log_file.parent().unwrap().to_owned();
+    let mut harness = Harness::attach_until(root, library, capture_root, log_file, |snapshot| {
+        snapshot.status == RecorderStatus::WaitingForWow
+    });
+    for _ in 0..20 {
+        harness.coordinator.tick();
+    }
+    assert_eq!(harness.latest.status, RecorderStatus::WaitingForWow);
+
+    // Launching WoW rewrites its client logs; the next check arms.
+    fs::write(log_dir.join("gx.log"), b"App is foreground\n").unwrap();
+    harness.pump(|snapshot| snapshot.status == RecorderStatus::Ready);
 }
 
 #[test]

@@ -45,6 +45,10 @@ use crate::storage::{EntryUpdate, LibraryIndex, Storage, now_unix_ms};
 /// inside a flush gap and discarded before its player is identified.
 const RETAIL_DATA_TIMEOUT_MS: i64 = 10 * 60_000;
 const CLASSIC_DATA_TIMEOUT_MS: i64 = 2 * 60_000;
+/// WoW counts as running while anything in its Logs folder was written this
+/// recently; `gx.log` alone gets a GPU status report every 5 minutes.
+const WOW_IDLE_MS: i64 = 10 * 60_000;
+const WOW_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// Commands handled per tick before the loop returns to polling.
 const COMMAND_BATCH: usize = 16;
 /// Bounded problem list surfaced in the snapshot.
@@ -296,6 +300,11 @@ pub struct Coordinator {
     engine: ActivityEngine,
     recorder: Recorder,
     armed: bool,
+    /// Capture is off on purpose because WoW is not running; the replay
+    /// buffer starts again with the game.
+    standby: bool,
+    last_arm_ms: i64,
+    next_wow_check: Instant,
     storage: Storage,
     tailers: Vec<LogTailer>,
     /// Per flavour: wall-clock and log time of the newest observed event.
@@ -373,6 +382,9 @@ impl Coordinator {
             engine: ActivityEngine::new(),
             recorder: Recorder::new(),
             armed: false,
+            standby: false,
+            last_arm_ms: 0,
+            next_wow_check: Instant::now(),
             storage,
             tailers: Vec::new(),
             last_event: HashMap::new(),
@@ -441,7 +453,13 @@ impl Coordinator {
 
         let tailers_ready = self.open_tailers();
         if self.setup_problems.is_empty() && tailers_ready {
-            self.arm();
+            // Without a stored capture target the portal picker has to show
+            // now. Otherwise `check_wow_running` arms once the game runs.
+            if self.config.capture.capture_target_token.is_none() {
+                self.arm();
+            } else {
+                self.standby = true;
+            }
         }
         self.dirty = true;
         // Make the armed recorder visible before the event loop takes over.
@@ -576,6 +594,8 @@ impl Coordinator {
             );
             return;
         }
+        self.standby = false;
+        self.last_arm_ms = now_unix_ms();
         let config = self.capture_config();
         match self.recorder.arm(&config) {
             Ok(()) => {
@@ -601,6 +621,34 @@ impl Coordinator {
         self.armed = false;
         if let Err(error) = self.recorder.shutdown() {
             self.push_recorder_problem(&error);
+        }
+    }
+
+    /// Run the replay buffer only while WoW is running. A deliberate arm
+    /// (first run, Retry, a manual or test recording) counts as activity, so
+    /// it is not undone on the next check.
+    fn check_wow_running(&mut self, now_ms: i64) {
+        if Instant::now() < self.next_wow_check {
+            return;
+        }
+        self.next_wow_check = Instant::now() + WOW_CHECK_INTERVAL;
+        let last_write_ms = latest_log_write_ms(&self.config);
+        if self.standby {
+            if now_ms - last_write_ms < WOW_IDLE_MS {
+                tracing::info!("WoW is running: arming");
+                self.arm();
+                self.dirty = true;
+            }
+        } else if self.armed
+            && !self.capture_in_flight()
+            && self.deferred_begin.is_none()
+            && self.pending_test_end.is_none()
+            && now_ms - last_write_ms.max(self.last_arm_ms) >= WOW_IDLE_MS
+        {
+            tracing::info!("WoW is not running: capture standby");
+            self.disarm();
+            self.standby = true;
+            self.dirty = true;
         }
     }
 
@@ -817,6 +865,11 @@ impl Coordinator {
             });
             return;
         }
+        // Log data arrived before the WoW check noticed the game: record
+        // anyway, just without the replay lead-in.
+        if self.standby {
+            self.arm();
+        }
         let capacity_ms = u64::from(self.config.capture.replay_buffer_seconds) * 1_000;
         let lead_in_ms = i64::from(self.config.capture.extra_lead_in_seconds) * 1_000;
         let requested_replay_ms = (late_by_ms + lead_in_ms).clamp(0, capacity_ms as i64) as u64;
@@ -917,6 +970,9 @@ impl Coordinator {
     // --- Manual and test recordings ---
 
     fn start_manual(&mut self) {
+        if !self.armed && !self.capture_in_flight() {
+            self.arm();
+        }
         if self.capture_in_flight() || !self.armed || !self.config.manual.enabled {
             self.push_problem(
                 "A manual recording could not be started.",
@@ -963,6 +1019,9 @@ impl Coordinator {
     /// Inject the minimum events for the chosen category, then release the end
     /// event once the test duration has elapsed.
     fn run_test(&mut self, category: &Category) {
+        if !self.armed && !self.capture_in_flight() {
+            self.arm();
+        }
         if self.capture_in_flight() || self.pending_test_end.is_some() || !self.armed {
             self.push_problem(
                 "A test recording could not be started.",
@@ -1007,6 +1066,7 @@ impl Coordinator {
             self.feed(event);
         }
         self.check_data_timeout(now_ms);
+        self.check_wow_running(now_ms);
         if self
             .active
             .as_ref()
@@ -1507,7 +1567,8 @@ impl Coordinator {
                 );
             }
         }
-        if runtime_ready && (capture_changed || storage_changed) {
+        // In standby the new settings simply apply on the next arm.
+        if runtime_ready && (capture_changed || storage_changed) && !self.standby {
             self.arm();
         }
         if !runtime_ready {
@@ -1515,7 +1576,7 @@ impl Coordinator {
         } else if limit_changed || storage_changed {
             self.enforce_limit();
         }
-        if (capture_changed || storage_changed) && !self.armed {
+        if (capture_changed || storage_changed) && !self.armed && !self.standby {
             // The saved config stands; only the runtime is down.
             self.push_problem(
                 "Screen capture did not restart with the new settings.",
@@ -1839,6 +1900,28 @@ fn enabled_log_sources(config: &Config) -> Vec<(&'static str, GameFlavor, PathBu
     .filter(|(_, _, flavor)| flavor.enabled && !flavor.log_dir.path.as_os_str().is_empty())
     .map(|(field, game, flavor)| (field, game, flavor.log_dir.path.clone()))
     .collect()
+}
+
+/// Newest modification time, in Unix milliseconds, of anything in the enabled
+/// Logs folders. WoW writes its client logs there from launch to exit, unlike
+/// the combat log, which only exists while combat logging is on.
+fn latest_log_write_ms(config: &Config) -> i64 {
+    enabled_log_sources(config)
+        .iter()
+        .filter_map(|(_, _, source)| {
+            let dir = if source.is_file() {
+                source.parent()?
+            } else {
+                source
+            };
+            std::fs::read_dir(dir).ok()
+        })
+        .flatten()
+        .filter_map(|entry| entry.ok()?.metadata().ok()?.modified().ok())
+        .filter_map(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_millis() as i64)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Whether the `Config.wtf` beside the Logs folder carries

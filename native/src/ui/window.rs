@@ -680,10 +680,12 @@ fn make_sink(
             ShellAction::TestRecording => {
                 let sink = sink_for_dialogs.borrow().clone();
                 if let Some(sink) = sink {
-                    let ready = latest_snapshot
-                        .borrow()
-                        .as_ref()
-                        .is_some_and(|snapshot| snapshot.status == RecorderStatus::Ready);
+                    let ready = latest_snapshot.borrow().as_ref().is_some_and(|snapshot| {
+                        matches!(
+                            snapshot.status,
+                            RecorderStatus::Ready | RecorderStatus::WaitingForWow
+                        )
+                    });
                     present_test_dialog(window.upcast_ref(), sink, ready);
                 }
                 return true;
