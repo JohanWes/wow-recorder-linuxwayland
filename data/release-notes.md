@@ -4,6 +4,11 @@ Commit subjects per release, written by `scripts/generate-release-notes.sh` and
 compiled into the binary: the "What's new" dialog reads the section matching the
 running version. Only `## <version>` headings and `- ` lines are parsed.
 
+## 1.0.13
+- Update intro video with smoother meter transitions
+- Run replay buffer only while World of Warcraft runs
+- Cap player demuxer queue so playback stops loading whole files
+
 ## 1.0.12
 - Show the damage meter's Target menu entry in full
 - Give app icon an orange legendary border

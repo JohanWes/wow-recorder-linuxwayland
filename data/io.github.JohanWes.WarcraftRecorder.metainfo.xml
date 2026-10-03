@@ -34,6 +34,16 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.13" date="2026-10-03">
+      <description>
+        <p>
+          The replay buffer now only runs while World of Warcraft is
+          running, so the GPU's video encoder is idle while the game is
+          closed. Playing a long recording no longer loads the whole file
+          into memory.
+        </p>
+      </description>
+    </release>
     <release version="1.0.12" date="2026-09-29">
       <description>
         <p>

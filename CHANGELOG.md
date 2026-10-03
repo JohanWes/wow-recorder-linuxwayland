@@ -7,7 +7,7 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
-## Unreleased
+## 1.0.13 - 2026-10-03
 
 ### Changed
 - The replay buffer only runs while World of Warcraft is running. It starts
