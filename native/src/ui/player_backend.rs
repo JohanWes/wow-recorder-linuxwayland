@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use clapper_gtk::prelude::AvExt;
+use gstreamer as gst;
+use gstreamer::prelude::*;
 use gtk4::glib::prelude::Cast;
+
+/// Per-stream byte limit for playbin3's demuxer queue. The default is
+/// unlimited: the queue is sized by time, and GStreamer's AV1 parser only
+/// timestamps the first frame of these recordings, so the queue never counts
+/// itself full and reads the whole file into memory (5 GB for a long key).
+const DEMUX_QUEUE_BYTES: u32 = 64 * 1024 * 1024;
 
 /// How precisely a seek has to land, which decides how much decoding GStreamer
 /// does before it can present a frame.
@@ -34,6 +42,7 @@ impl PlayerBackend {
         clapper::init()?;
         let video = clapper_gtk::Video::new();
         let player = video.player().ok_or("ClapperGtk did not create a player")?;
+        cap_demux_queue(&player)?;
         Ok(Self { video, player })
     }
 
@@ -148,5 +157,43 @@ impl PlayerBackend {
 
     pub fn connect_seek_done(&self, callback: impl Fn() + 'static) {
         self.player.connect_seek_done(move |_| callback());
+    }
+}
+
+/// Clapper hides its pipeline, so a pass-through video filter is the way in:
+/// its first downstream event proves the chain is complete, and the walk up
+/// from there reaches playbin3 and every multiqueue inside it.
+fn cap_demux_queue(player: &clapper::Player) -> Result<(), &'static str> {
+    let filter = gst::ElementFactory::make("identity")
+        .build()
+        .map_err(|_| "GStreamer has no identity element")?;
+    let pad = filter
+        .static_pad("sink")
+        .ok_or("identity element has no sink pad")?;
+    pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, |pad, _| {
+        let mut object: Option<gst::Object> = pad.parent_element().map(Cast::upcast);
+        while let Some(parent) = object.as_ref().and_then(|object| object.parent()) {
+            object = Some(parent);
+        }
+        if let Some(pipeline) = object.and_then(|object| object.downcast::<gst::Bin>().ok()) {
+            // Every later recording gets a fresh source bin and queue, so the
+            // signal does the real work; connect first so none slips between.
+            pipeline.connect_deep_element_added(|_, _, element| cap_if_multiqueue(element));
+            for element in pipeline.iterate_recurse().into_iter().flatten() {
+                cap_if_multiqueue(&element);
+            }
+        }
+        gst::PadProbeReturn::Remove
+    });
+    player.set_video_filter(Some(&filter));
+    Ok(())
+}
+
+fn cap_if_multiqueue(element: &gst::Element) {
+    if element
+        .factory()
+        .is_some_and(|factory| factory.name() == "multiqueue")
+    {
+        element.set_property("max-size-bytes", DEMUX_QUEUE_BYTES);
     }
 }

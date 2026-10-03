@@ -1447,6 +1447,7 @@ version = "1.0.12"
 dependencies = [
  "clapper-player",
  "clapper-player-gtk",
+ "gstreamer",
  "gtk4",
  "ksni",
  "libadwaita",
