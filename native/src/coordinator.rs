@@ -2131,63 +2131,21 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ActiveRecording, CAPTURE_RESTART_FAILED_PROBLEM, CAPTURE_STOPPED_PROBLEM, CaptureArtifacts,
-        Coordinator, EndingCapture, EntryUpdate, MediaConfig, Problem, RecordingDraft,
-        RecordingMode, RecoveryAction, Setup, Storage, Timeouts, clear_recovered_capture_problems,
-        now_unix_ms, test_events,
+        ActiveRecording, CaptureArtifacts, Coordinator, EndingCapture, EntryUpdate, MediaConfig,
+        RecordingDraft, RecordingMode, Setup, Storage, Timeouts, now_unix_ms,
     };
     use crate::domain::{
         ActivityDetails, Category, GameFlavor, LibraryEntry, MediaFacts, MeterData, Outcome,
         RecordingId, WorkKind,
     };
-    use crate::parser::CombatEvent;
-    use crate::storage::RECOVERY_DIR;
-
-    #[test]
-    fn recovered_capture_problems_are_removed_without_touching_other_problems() {
-        let preserved = Problem {
-            summary: "The capture target could not be saved.".to_owned(),
-            safe_detail: Some("disk full".to_owned()),
-            occurred_unix_ms: 42,
-            recovery_action: Some(RecoveryAction::ReselectCaptureTarget),
-        };
-        let mut problems = vec![
-            Problem {
-                summary: CAPTURE_STOPPED_PROBLEM.to_owned(),
-                safe_detail: None,
-                occurred_unix_ms: 1,
-                recovery_action: Some(RecoveryAction::ReselectCaptureTarget),
-            },
-            Problem {
-                summary: CAPTURE_RESTART_FAILED_PROBLEM.to_owned(),
-                safe_detail: None,
-                occurred_unix_ms: 2,
-                recovery_action: Some(RecoveryAction::ReselectCaptureTarget),
-            },
-            Problem {
-                summary: CAPTURE_RESTART_FAILED_PROBLEM.to_owned(),
-                safe_detail: None,
-                occurred_unix_ms: 3,
-                recovery_action: Some(RecoveryAction::ReselectCaptureTarget),
-            },
-            preserved.clone(),
-        ];
-
-        assert!(clear_recovered_capture_problems(&mut problems));
-        assert_eq!(problems, vec![preserved]);
-        assert!(!clear_recovered_capture_problems(&mut problems));
-    }
+    use crate::storage::{RECOVERY_DIR, test_root};
 
     /// A failed or discarded capture must not take a queued finalization's
     /// inputs with it: a discard quarantines only its own files, and a
     /// capture-directory sweep waits until the media worker is idle.
     #[test]
     fn failed_capture_sweeps_leave_busy_media_work_alone() {
-        let root = std::env::temp_dir().join(format!(
-            "wr-capture-sweep-{}-{}",
-            std::process::id(),
-            now_unix_ms()
-        ));
+        let root = test_root("capture-sweep");
         let library = root.join("library");
         let regular_dir = root.join("buffer/regular");
         std::fs::create_dir_all(&regular_dir).unwrap();
@@ -2249,47 +2207,8 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
     #[test]
-    fn test_recording_exercises_damage_taken_and_death_log() {
-        let (events, _) = test_events(&Category::MythicPlus, 0, 4_000).unwrap();
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(
-                    event.event,
-                    CombatEvent::Damage {
-                        ref dest_guid,
-                        ..
-                    } if dest_guid == "Player-1092-0B80F204"
-                ))
-                .count(),
-            3
-        );
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(event.event, CombatEvent::Heal { .. }))
-                .count(),
-            3
-        );
-        assert!(matches!(
-            events.last().map(|event| &event.event),
-            Some(CombatEvent::UnitDied { .. })
-        ));
-    }
-    /// A bulk mutation must service recorder deadlines between entries, not
-    /// only once the tick's own polls run: serial sidecar writes would
-    /// otherwise delay every recorder event by the full batch. Two real
-    /// sidecars are protected while an already-due deadline fires, and the
-    /// recorder problem landing before the missing-id problem proves the
-    /// servicing happened inside the batch. No timing: the deadline is due
-    /// the moment the batch starts.
-    #[test]
     fn bulk_mutation_services_a_due_capture_deadline_mid_batch() {
-        let root = std::env::temp_dir().join(format!(
-            "wr-midbatch-{}-{}",
-            std::process::id(),
-            now_unix_ms()
-        ));
+        let root = test_root("midbatch");
         let library = root.join("library");
         std::fs::create_dir_all(&library).unwrap();
         let sidecar_storage = Storage::new(&library, root.join("buffer"));

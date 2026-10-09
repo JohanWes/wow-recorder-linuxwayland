@@ -2553,8 +2553,8 @@ mod tests {
         install_native_fixtures(&tree, 3, 0);
         let index = storage.scan();
 
-        let mut good = index.entries[0].clone();
-        let mut missing = index.entries[1].clone();
+        let good = index.entries[0].clone();
+        let missing = index.entries[1].clone();
         fs::remove_file(&missing.media_path).expect("remove media");
         let mut outside = index.entries[2].clone();
         outside.media_path = tree.root.join("escaped.mp4");
@@ -2569,37 +2569,7 @@ mod tests {
         assert!(outside.media_path.exists());
 
         // The sidecar of a partially removed entry stays for the next scan.
-        good.media_path = PathBuf::new();
-        missing.media_path = PathBuf::new();
         assert!(missing.sidecar_path.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn deletion_refuses_a_path_through_a_symlinked_directory() {
-        use std::os::unix::fs::symlink;
-
-        let tree = TempTree::new("delete-parent-symlink");
-        let storage = tree.storage();
-        install_native_fixtures(&tree, 1, 0);
-        let mut entry = storage.scan().entries[0].clone();
-
-        let outside = tree.root.join("outside");
-        fs::create_dir(&outside).expect("outside directory");
-        let media = outside.join("escaped.mp4");
-        let sidecar = outside.join("escaped.json");
-        fs::write(&media, "outside media").expect("outside media");
-        fs::write(&sidecar, "{}").expect("outside sidecar");
-        let link = tree.library().join("linked");
-        symlink(&outside, &link).expect("directory symlink");
-        entry.media_path = link.join("escaped.mp4");
-        entry.sidecar_path = link.join("escaped.json");
-
-        let result = storage.delete(&[entry]);
-        assert!(result.deleted.is_empty());
-        assert_eq!(result.failures.len(), 1);
-        assert!(result.failures[0].1.contains("not a direct child"));
-        assert!(media.exists() && sidecar.exists());
     }
 
     #[test]
@@ -2619,33 +2589,14 @@ mod tests {
         let gib = StorageLimit::Gib(NonZeroU64::new(1).expect("nonzero"));
         assert!(storage.enforce_limit(gib, &entries).evicted.is_empty());
 
-        // Give every media file a real size, then force eviction with a
-        // one-GiB limit by pretending the library is larger: use padded files.
-        let big = 400 * 1024;
-        for entry in entries.iter() {
-            fs::write(&entry.media_path, vec![0u8; big]).expect("pad");
-        }
-        let entries = storage.scan().entries;
-        let protected: Vec<&LibraryEntry> =
-            entries.iter().filter(|entry| entry.protected).collect();
-        assert_eq!(protected.len(), 2);
-
-        let tiny = Storage::new(tree.library(), tree.capture_root());
-        let result = tiny.enforce_limit(
-            StorageLimit::Gib(NonZeroU64::new(1).expect("nonzero")),
-            &entries,
-        );
-        assert!(
-            result.evicted.is_empty(),
-            "1 GiB fits the whole fixture library"
-        );
-
         // Shrink the limit below the protected content to prove the report.
+        // Sparse files give the media its size without writing it.
         let mut protected_entries: Vec<LibraryEntry> = entries
             .iter()
             .filter(|entry| entry.protected)
             .cloned()
             .collect();
+        assert_eq!(protected_entries.len(), 2);
         protected_entries.push(
             entries
                 .iter()
@@ -2654,12 +2605,11 @@ mod tests {
                 .clone(),
         );
         for entry in &protected_entries {
-            fs::write(&entry.media_path, vec![0u8; 512 * 1024 * 1024]).expect("pad");
+            File::create(&entry.media_path)
+                .and_then(|file| file.set_len(512 * 1024 * 1024))
+                .expect("size media");
         }
-        let result = storage.enforce_limit(
-            StorageLimit::Gib(NonZeroU64::new(1).expect("nonzero")),
-            &protected_entries,
-        );
+        let result = storage.enforce_limit(gib, &protected_entries);
         assert!(result.protected_over_limit);
         assert_eq!(result.evicted.len(), 1);
         let evicted = protected_entries

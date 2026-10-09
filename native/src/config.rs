@@ -724,8 +724,7 @@ mod tests {
     use super::*;
 
     fn temporary_directory(name: &str) -> PathBuf {
-        let path =
-            env::temp_dir().join(format!("warcraft-recorder-{name}-{}", uuid::Uuid::new_v4()));
+        let path = crate::storage::test_root(name);
         fs::create_dir(&path).expect("create test directory");
         path
     }
