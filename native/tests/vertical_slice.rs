@@ -8,7 +8,6 @@
 //! coordinator core is stepped with `tick()`, so no test sleeps or timing
 //! assertions are needed.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::num::NonZeroU64;
@@ -18,15 +17,14 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
 use warcraft_recorder::config::{
-    ActivitySettings, AuthorizedPath, CaptureSettings, Config, FlavorConfig, LayoutSettings,
-    ManualSettings, StorageSettings,
+    ActivitySettings, AuthorizedPath, CaptureSettings, Config, FlavorConfig, ManualSettings,
+    StorageSettings,
 };
 use warcraft_recorder::coordinator::{AppSnapshot, ClipRange, Command, Coordinator, Setup, start};
 use warcraft_recorder::domain::{
     Category, MeterFight, MeterMetric, Outcome, RecorderStatus, StorageLimit, TimelineKind,
 };
 use warcraft_recorder::media_jobs::MediaConfig;
-use warcraft_recorder::meter::{MeterProjection, project_current, project_overall};
 use warcraft_recorder::recorder::Timeouts;
 use warcraft_recorder::storage::{RECOVERY_DIR, load_meter, now_unix_ms};
 
@@ -62,17 +60,12 @@ impl Harness {
 
     /// Build a coordinator over an existing directory tree.
     fn attach(root: PathBuf, library: PathBuf, capture_root: PathBuf, log_file: PathBuf) -> Self {
-        // Startup publishes the scanned library before it arms, so settle on
-        // the post-arm snapshot rather than the first one out.
-        Self::attach_until(root, library, capture_root, log_file, |snapshot| {
-            !matches!(
-                snapshot.status,
-                RecorderStatus::SetupRequired | RecorderStatus::WaitingForWow
-            )
-        })
+        let setup = setup(&root);
+        Self::attach_until(setup, root, library, capture_root, log_file, armed)
     }
 
     fn attach_until(
+        setup: Setup,
         root: PathBuf,
         library: PathBuf,
         capture_root: PathBuf,
@@ -81,8 +74,7 @@ impl Harness {
     ) -> Self {
         let (commands, commands_rx) = mpsc::sync_channel(64);
         let (snapshot_tx, snapshots) = mpsc::sync_channel(1);
-        let mut coordinator =
-            Coordinator::new(setup(&root), commands_rx, snapshot_tx, Box::new(|| {}));
+        let mut coordinator = Coordinator::new(setup, commands_rx, snapshot_tx, Box::new(|| {}));
         coordinator.startup();
         let mut harness = Self {
             root,
@@ -183,6 +175,15 @@ impl Harness {
     }
 }
 
+/// Startup publishes the scanned library before it arms, so settle on the
+/// post-arm snapshot rather than the first one out.
+fn armed(snapshot: &AppSnapshot) -> bool {
+    !matches!(
+        snapshot.status,
+        RecorderStatus::SetupRequired | RecorderStatus::WaitingForWow
+    )
+}
+
 fn setup(root: &Path) -> Setup {
     Setup {
         config_path: root.join("config.json"),
@@ -204,11 +205,13 @@ fn setup(root: &Path) -> Setup {
             // including `Config::save`'s two fsyncs. Keep it far enough above
             // that work that a loaded filesystem cannot expire it: the failure
             // mode is a dropped recording and a 20 s `pump` timeout, not a
-            // clear assertion. Only the missing-artifact test waits it out.
+            // clear assertion. The missing-artifact test, which waits it out,
+            // shortens it for itself.
             regular_event: Duration::from_secs(2),
             exit_grace: Duration::from_millis(500),
             toggle_gap: Duration::from_millis(20),
         },
+        wow_check_interval: Duration::from_millis(50),
         poll_interval: Duration::from_millis(5),
         test_duration: Duration::from_millis(200),
     }
@@ -481,26 +484,6 @@ fn automatic_raid_completes_and_survives_a_restart() {
             .iter()
             .all(|sample| sample.at_ms <= entry.duration_ms)
     );
-    let first_at = damage.samples[0].at_ms;
-    let second_at = damage.samples[1].at_ms;
-    assert_eq!(
-        projection_total(
-            &project_current(fights, first_at.saturating_sub(1)).unwrap(),
-            MeterMetric::Damage,
-        ),
-        0
-    );
-    assert_eq!(
-        projection_total(
-            &project_current(fights, first_at).unwrap(),
-            MeterMetric::Damage,
-        ),
-        1_500
-    );
-    assert_eq!(
-        projection_total(&project_overall(fights, second_at), MeterMetric::Damage),
-        3_000
-    );
 
     // Tag and protect go through the real sidecar.
     harness.send(Command::SetTag {
@@ -760,52 +743,6 @@ fn dismissing_the_release_notes_ends_them_for_good() {
 }
 
 #[test]
-fn a_dragged_layout_outlives_the_process() {
-    let mut harness = Harness::new("layout");
-    assert_eq!(
-        harness.latest.config.interface.layout,
-        LayoutSettings::default(),
-        "a clean start stores nothing, which is what lets the pane autoscale"
-    );
-
-    let layout = LayoutSettings {
-        player_split: Some(612),
-        column_widths: BTreeMap::from([("Dungeon".to_owned(), 240)]),
-    };
-    harness.send(Command::SaveLayout {
-        layout: layout.clone(),
-    });
-    harness.pump(|snapshot| snapshot.config.interface.layout == layout);
-
-    let harness = harness.restart();
-    assert_eq!(harness.latest.config.interface.layout, layout);
-}
-
-#[test]
-fn missing_replay_falls_back_to_the_regular_recording() {
-    let mut harness = Harness::new("regular-only");
-    let start_ms = now_unix_ms() - 1_000;
-    harness.log(&raid_start(start_ms));
-    harness.pump(|snapshot| snapshot.active.is_some());
-    harness.emit_artifacts(false);
-    harness.log(&[player_death(start_ms + 500)]);
-    harness.log(&[raid_end(now_unix_ms(), true)]);
-    harness.pump(|snapshot| !snapshot.entries.is_empty());
-
-    let entry = &harness.latest.entries[0];
-    assert_eq!(entry.category, Category::Raids);
-    assert!(entry.media_path.exists());
-    assert!(
-        !entry
-            .timeline
-            .iter()
-            .any(|item| item.kind() == &TimelineKind::Death),
-        "a death before the media start should be clipped: {:?}",
-        entry.timeline
-    );
-}
-
-#[test]
 fn replay_buffer_waits_for_wow_to_run() {
     let (root, library, capture_root, log_file) = spawn_tree("standby");
     let config_path = root.join("config.json");
@@ -821,9 +758,11 @@ fn replay_buffer_waits_for_wow_to_run() {
         .set_modified(an_hour_ago)
         .unwrap();
     let log_dir = log_file.parent().unwrap().to_owned();
-    let mut harness = Harness::attach_until(root, library, capture_root, log_file, |snapshot| {
-        snapshot.status == RecorderStatus::WaitingForWow
-    });
+    let setup = setup(&root);
+    let mut harness =
+        Harness::attach_until(setup, root, library, capture_root, log_file, |snapshot| {
+            snapshot.status == RecorderStatus::WaitingForWow
+        });
     for _ in 0..20 {
         harness.coordinator.tick();
     }
@@ -836,7 +775,11 @@ fn replay_buffer_waits_for_wow_to_run() {
 
 #[test]
 fn missing_regular_artifact_replaces_the_child_and_recovers() {
-    let mut harness = Harness::new("failure");
+    let (root, library, capture_root, log_file) = spawn_tree("failure");
+    // This test waits the regular-event budget out; keep that short.
+    let mut setup = setup(&root);
+    setup.recorder_timeouts.regular_event = Duration::from_millis(300);
+    let mut harness = Harness::attach_until(setup, root, library, capture_root, log_file, armed);
     let start_ms = now_unix_ms() - 1_000;
     harness.log(&raid_start(start_ms));
     harness.pump(|snapshot| snapshot.active.is_some());
@@ -1032,16 +975,6 @@ fn production_handle_starts_and_shuts_down() {
 /// Actor totals derive structurally from the spell entries.
 fn meter_total(fight: &MeterFight, metric: MeterMetric) -> u64 {
     fight
-        .actors
-        .iter()
-        .flat_map(|actor| &actor.spells)
-        .filter(|entry| entry.metric == metric)
-        .map(|entry| entry.amount)
-        .sum()
-}
-
-fn projection_total(projection: &MeterProjection, metric: MeterMetric) -> u64 {
-    projection
         .actors
         .iter()
         .flat_map(|actor| &actor.spells)

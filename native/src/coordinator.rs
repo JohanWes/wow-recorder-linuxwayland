@@ -209,6 +209,8 @@ pub struct Setup {
     /// Year used to expand the combat log's month/day timestamps.
     pub year: i32,
     pub recorder_timeouts: Timeouts,
+    /// How often the log folder is checked for a running WoW.
+    pub wow_check_interval: Duration,
     /// Idle pacing for one coordinator tick.
     pub poll_interval: Duration,
     /// Test-recording length; raids run four times as long.
@@ -232,6 +234,7 @@ impl Setup {
             },
             year,
             recorder_timeouts: Timeouts::default(),
+            wow_check_interval: WOW_CHECK_INTERVAL,
             poll_interval: Duration::from_millis(50),
             test_duration: Duration::from_secs(5),
         })
@@ -630,7 +633,7 @@ impl Coordinator {
         if Instant::now() < self.next_wow_check {
             return;
         }
-        self.next_wow_check = Instant::now() + WOW_CHECK_INTERVAL;
+        self.next_wow_check = Instant::now() + self.setup.wow_check_interval;
         let last_write_ms = latest_log_write_ms(&self.config);
         if self.standby {
             if now_ms - last_write_ms < WOW_IDLE_MS {
@@ -2165,6 +2168,7 @@ mod tests {
                     media: MediaConfig::default(),
                     year: 2026,
                     recorder_timeouts: Timeouts::default(),
+                    wow_check_interval: Duration::from_secs(5),
                     poll_interval: Duration::from_millis(5),
                     test_duration: Duration::from_millis(200),
                 },
@@ -2259,6 +2263,7 @@ mod tests {
                     media: MediaConfig::default(),
                     year: 2026,
                     recorder_timeouts: Timeouts::default(),
+                    wow_check_interval: Duration::from_secs(5),
                     poll_interval: Duration::from_millis(5),
                     test_duration: Duration::from_millis(200),
                 },
