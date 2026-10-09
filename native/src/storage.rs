@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -245,20 +245,27 @@ impl Storage {
     }
 
     fn load_sidecar(&self, path: &Path) -> Result<LoadedSidecar, String> {
-        let text = fs::read_to_string(path).map_err(|error| format!("unreadable: {error}"))?;
-        // Native sidecars are the common case, so they are parsed once; the
-        // probe only runs to tell a broken native sidecar from a legacy one.
         // The meter is most of a sidecar and only the player needs it
-        // (`load_meter`): it is streamed past, never materialized.
-        let sidecar = match serde_json::from_str::<NativeSidecar<IgnoredAny>>(&text) {
-            Ok(sidecar) => sidecar,
-            Err(native_error) => {
-                let probe: SidecarProbe = serde_json::from_str(&text)
-                    .map_err(|error| format!("invalid JSON: {error}"))?;
-                if probe.schema_version {
-                    return Err(format!("invalid native sidecar: {native_error}"));
+        // (`load_meter`): compact native sidecars are read up to it, anything
+        // else is streamed past it.
+        let sidecar = match read_native_head(path) {
+            Some(sidecar) => sidecar,
+            None => {
+                let text =
+                    fs::read_to_string(path).map_err(|error| format!("unreadable: {error}"))?;
+                // The probe only runs to tell a broken native sidecar from a
+                // legacy one.
+                match serde_json::from_str::<NativeSidecar<IgnoredAny>>(&text) {
+                    Ok(sidecar) => sidecar,
+                    Err(native_error) => {
+                        let probe: SidecarProbe = serde_json::from_str(&text)
+                            .map_err(|error| format!("invalid JSON: {error}"))?;
+                        if probe.schema_version {
+                            return Err(format!("invalid native sidecar: {native_error}"));
+                        }
+                        return load_legacy_sidecar(path, &text);
+                    }
                 }
-                return load_legacy_sidecar(path, &text);
             }
         };
         if sidecar.schema_version > SIDECAR_SCHEMA_VERSION {
@@ -722,6 +729,30 @@ impl Storage {
         let mut reason_file = File::create(reason_path(&destination))?;
         writeln!(reason_file, "{reason}\noriginal path: {}", path.display())?;
         Ok(destination)
+    }
+}
+
+/// `to_json` writes compact JSON in field order with the meter last, so a
+/// native sidecar's library fields are everything before the first
+/// `,"meter":`. Reading stops there; `None` (legacy, pretty-printed, or a head
+/// that does not parse) means the caller reads the whole file.
+fn read_native_head(path: &Path) -> Option<NativeSidecar<IgnoredAny>> {
+    const MARKER: &[u8] = b",\"meter\":";
+    let mut file = File::open(path).ok()?;
+    let mut head = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut chunk).ok().filter(|read| *read > 0)?;
+        let from = head.len().saturating_sub(MARKER.len() - 1);
+        head.extend_from_slice(&chunk[..read]);
+        if !head.starts_with(b"{\"schema_version\":") {
+            return None;
+        }
+        if let Some(found) = head[from..].windows(MARKER.len()).position(|w| w == MARKER) {
+            head.truncate(from + found);
+            head.push(b'}');
+            return serde_json::from_slice(&head).ok();
+        }
     }
 }
 
