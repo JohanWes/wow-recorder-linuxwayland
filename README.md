@@ -86,7 +86,7 @@ Measured on an AMD Ryzen 7 9800X3D with a Radeon RX 9070:
 | Startup scan, 38 recordings | about 55 ms, about 1 MB above the empty baseline |
 | Installed size | about 38 MB |
 | First download | about 18 MB |
-| Typical update | about 5 MB |
+| Typical update | about 2 MB |
 
 The installed size covers the app binary (about 5 MB), the spell database and
 the bundled FFmpeg, `gpu-screen-recorder` and Clapper. The GNOME runtime is
