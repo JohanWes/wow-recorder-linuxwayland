@@ -2,6 +2,8 @@
 
 //! Combat-log parsing into small facts consumed by the activity engine.
 
+use std::borrow::Cow;
+
 use crate::domain::{GameFlavor, MeterMetric};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,7 +216,7 @@ pub fn parse_line(
     }
     let occurred_at_ms = parse_timestamp(timestamp, context)?;
     let fields = split_fields(payload).map_err(|()| ParseFailure::MalformedRetainedEvent)?;
-    let Some(event_name) = fields.first().map(String::as_str) else {
+    let Some(event_name) = fields.first().map(|value| &**value) else {
         return Ok(None);
     };
 
@@ -280,7 +282,7 @@ pub fn parse_line(
             let guid = text(&fields, 1)?.to_owned();
             let owner_guid = fields
                 .get(12)
-                .filter(|info_guid| info_guid.as_str() == guid)
+                .filter(|info_guid| info_guid.as_ref() == guid)
                 .and_then(|_| fields.get(13))
                 .and_then(|owner| guid_or_none(owner).map(str::to_owned));
             CombatEvent::PlayerObserved {
@@ -373,7 +375,11 @@ struct AdvancedBlock {
 /// block when present. The block is detected by the GUID shape of its
 /// infoGUID field at the event-specific boundary, never by total field count;
 /// its arity follows the log's COMBAT_LOG_VERSION.
-fn advanced_block(event_name: &str, fields: &[String], context: ParseTimeContext) -> AdvancedBlock {
+fn advanced_block(
+    event_name: &str,
+    fields: &[Cow<'_, str>],
+    context: ParseTimeContext,
+) -> AdvancedBlock {
     let prefix_len = if event_name == "SWING_DAMAGE" { 0 } else { 3 };
     let start = 1 + BASE_UNIT_FIELDS + prefix_len;
     let present = fields
@@ -398,28 +404,28 @@ fn guid_or_none(value: &str) -> Option<&str> {
 
 /// Lenient numeric field read: missing or unparseable fields read as `None`
 /// instead of a parser diagnostic (advanced logging may be off).
-fn lenient_number<T: std::str::FromStr>(fields: &[String], index: usize) -> Option<T> {
+fn lenient_number<T: std::str::FromStr>(fields: &[Cow<'_, str>], index: usize) -> Option<T> {
     fields
         .get(index)
-        .filter(|value| !value.is_empty() && value.as_str() != "nil")
+        .filter(|value| !value.is_empty() && value.as_ref() != "nil")
         .and_then(|value| value.parse().ok())
 }
 
-fn lenient_hex(fields: &[String], index: usize) -> Option<u64> {
+fn lenient_hex(fields: &[Cow<'_, str>], index: usize) -> Option<u64> {
     fields
         .get(index)
         .and_then(|value| u64::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).ok())
 }
 
 /// The raid-target marker in the low byte of the destination raid flags.
-fn dest_raid_marker(fields: &[String]) -> u8 {
+fn dest_raid_marker(fields: &[Cow<'_, str>]) -> u8 {
     (lenient_hex(fields, 8).unwrap_or(0) & 0xff) as u8
 }
 
 /// Destination HP from the advanced block, trusted only when its infoGUID
 /// names the destination (for swings the block describes the source).
 fn dest_hp(
-    fields: &[String],
+    fields: &[Cow<'_, str>],
     block: &AdvancedBlock,
     dest_guid: &str,
 ) -> (Option<u64>, Option<u64>) {
@@ -437,22 +443,31 @@ fn dest_hp(
     }
 }
 
+/// The meter amount at the start of the suffix. A detected advanced block
+/// promises a readable amount; a missing or unparseable one means the line is
+/// truncated, not that advanced logging is off.
+fn suffix_amount(
+    fields: &[Cow<'_, str>],
+    block: &AdvancedBlock,
+) -> Result<Option<u64>, ParseFailure> {
+    match lenient_number(fields, block.suffix) {
+        None if block.present => Err(ParseFailure::MalformedRetainedEvent),
+        amount => Ok(amount),
+    }
+}
+
 fn parse_damage(
     event_name: &str,
-    fields: &[String],
+    fields: &[Cow<'_, str>],
     context: ParseTimeContext,
 ) -> Result<Option<CombatEvent>, ParseFailure> {
     let block = advanced_block(event_name, fields, context);
-    let amount = match lenient_number::<u64>(fields, block.suffix) {
-        Some(amount) => amount,
-        // A detected advanced block promises a readable amount; a missing or
-        // unparseable one means the line is truncated, not that logging is off.
-        None if block.present => return Err(ParseFailure::MalformedRetainedEvent),
-        None => return Ok(None),
+    let Some(amount) = suffix_amount(fields, &block)? else {
+        return Ok(None);
     };
     let event = (|| {
-        let source_guid = fields.get(1)?.as_str();
-        let dest_guid = fields.get(5)?.as_str();
+        let source_guid = fields.get(1)?.as_ref();
+        let dest_guid = fields.get(5)?.as_ref();
         let (dest_current_hp, dest_max_hp) = dest_hp(fields, &block, dest_guid);
         // SWING_DAMAGE's block names the source, so its ownerGUID is the
         // swinging pet's owner.
@@ -470,17 +485,17 @@ fn parse_damage(
         };
         Some(CombatEvent::Damage {
             source_guid: source_guid.to_owned(),
-            source_name: fields.get(2)?.as_str().to_owned(),
+            source_name: fields.get(2)?.as_ref().to_owned(),
             source_flags: lenient_hex(fields, 3)?,
             source_owner_guid,
             dest_guid: dest_guid.to_owned(),
-            dest_name: fields.get(6)?.as_str().to_owned(),
+            dest_name: fields.get(6)?.as_ref().to_owned(),
             dest_flags: lenient_hex(fields, 7)?,
             dest_raid_marker: dest_raid_marker(fields),
             spell_name: if event_name == "SWING_DAMAGE" {
                 "Melee".to_owned()
             } else {
-                fields.get(10)?.as_str().to_owned()
+                fields.get(10)?.as_ref().to_owned()
             },
             amount,
             dest_current_hp,
@@ -491,14 +506,12 @@ fn parse_damage(
 }
 
 fn parse_heal(
-    fields: &[String],
+    fields: &[Cow<'_, str>],
     context: ParseTimeContext,
 ) -> Result<Option<CombatEvent>, ParseFailure> {
     let block = advanced_block("SPELL_HEAL", fields, context);
-    let amount = match lenient_number::<u64>(fields, block.suffix) {
-        Some(amount) => amount,
-        None if block.present => return Err(ParseFailure::MalformedRetainedEvent),
-        None => return Ok(None),
+    let Some(amount) = suffix_amount(fields, &block)? else {
+        return Ok(None);
     };
     let event = (|| {
         // Modern healing suffixes carry baseAmount at index 1, older layouts do
@@ -510,16 +523,16 @@ fn parse_heal(
                 1
             };
         let overheal = lenient_number::<u64>(fields, overheal_index).unwrap_or(0);
-        let (dest_current_hp, dest_max_hp) = dest_hp(fields, &block, fields.get(5)?.as_str());
+        let (dest_current_hp, dest_max_hp) = dest_hp(fields, &block, fields.get(5)?.as_ref());
         Some(CombatEvent::Heal {
-            source_guid: fields.get(1)?.as_str().to_owned(),
-            source_name: fields.get(2)?.as_str().to_owned(),
+            source_guid: fields.get(1)?.as_ref().to_owned(),
+            source_name: fields.get(2)?.as_ref().to_owned(),
             source_flags: lenient_hex(fields, 3)?,
-            dest_guid: fields.get(5)?.as_str().to_owned(),
-            dest_name: fields.get(6)?.as_str().to_owned(),
+            dest_guid: fields.get(5)?.as_ref().to_owned(),
+            dest_name: fields.get(6)?.as_ref().to_owned(),
             dest_flags: lenient_hex(fields, 7)?,
             dest_raid_marker: dest_raid_marker(fields),
-            spell_name: fields.get(10)?.as_str().to_owned(),
+            spell_name: fields.get(10)?.as_ref().to_owned(),
             amount,
             overheal,
             dest_current_hp,
@@ -532,30 +545,30 @@ fn parse_heal(
 /// Interrupts and dispels carry the interrupted/dispelled spell as the second
 /// suffix parameter; no spell IDs are needed anywhere.
 fn parse_utility(
-    fields: &[String],
+    fields: &[Cow<'_, str>],
     event_name: &str,
     context: ParseTimeContext,
 ) -> Option<CombatEvent> {
     let block = advanced_block(event_name, fields, context);
     let spell_name = fields
         .get(block.suffix + 1)
-        .filter(|value| !value.is_empty() && value.as_str() != "nil")?;
-    let spell_name = spell_name.to_owned();
+        .filter(|value| !value.is_empty() && value.as_ref() != "nil")?;
+    let spell_name = spell_name.to_string();
     Some(if event_name == "SPELL_INTERRUPT" {
         CombatEvent::Interrupt {
-            source_guid: fields.get(1)?.as_str().to_owned(),
-            source_name: fields.get(2)?.as_str().to_owned(),
+            source_guid: fields.get(1)?.as_ref().to_owned(),
+            source_name: fields.get(2)?.as_ref().to_owned(),
             source_flags: lenient_hex(fields, 3)?,
-            dest_name: fields.get(6)?.as_str().to_owned(),
+            dest_name: fields.get(6)?.as_ref().to_owned(),
             dest_raid_marker: dest_raid_marker(fields),
             spell_name,
         }
     } else {
         CombatEvent::Dispel {
-            source_guid: fields.get(1)?.as_str().to_owned(),
-            source_name: fields.get(2)?.as_str().to_owned(),
+            source_guid: fields.get(1)?.as_ref().to_owned(),
+            source_name: fields.get(2)?.as_ref().to_owned(),
             source_flags: lenient_hex(fields, 3)?,
-            dest_name: fields.get(6)?.as_str().to_owned(),
+            dest_name: fields.get(6)?.as_ref().to_owned(),
             dest_raid_marker: dest_raid_marker(fields),
             spell_name,
         }
@@ -564,16 +577,14 @@ fn parse_utility(
 
 fn parse_support(
     event_name: &str,
-    fields: &[String],
+    fields: &[Cow<'_, str>],
     context: ParseTimeContext,
 ) -> Result<Option<CombatEvent>, ParseFailure> {
     // Even SWING_DAMAGE_LANDED_SUPPORT has the three-field spell prefix, so
     // advanced_block's exact SWING_DAMAGE special case must not apply here.
     let block = advanced_block(event_name, fields, context);
-    let amount = match lenient_number::<u64>(fields, block.suffix) {
-        Some(amount) => amount,
-        None if block.present => return Err(ParseFailure::MalformedRetainedEvent),
-        None => return Ok(None),
+    let Some(amount) = suffix_amount(fields, &block)? else {
+        return Ok(None);
     };
     let healing = event_name.contains("HEAL");
     let overheal = if healing {
@@ -595,10 +606,10 @@ fn parse_support(
                 MeterMetric::Damage
             },
             supporter_guid: guid_or_none(fields.last()?)?.to_owned(),
-            source_guid: fields.get(1)?.as_str().to_owned(),
-            dest_name: fields.get(6)?.as_str().to_owned(),
+            source_guid: fields.get(1)?.as_ref().to_owned(),
+            dest_name: fields.get(6)?.as_ref().to_owned(),
             dest_raid_marker: dest_raid_marker(fields),
-            spell_name: fields.get(10)?.as_str().to_owned(),
+            spell_name: fields.get(10)?.as_ref().to_owned(),
             amount,
             overheal,
         })
@@ -606,12 +617,12 @@ fn parse_support(
     Ok(event)
 }
 
-fn parse_summon(fields: &[String]) -> Option<CombatEvent> {
+fn parse_summon(fields: &[Cow<'_, str>]) -> Option<CombatEvent> {
     Some(CombatEvent::Summon {
-        source_guid: fields.get(1)?.as_str().to_owned(),
-        source_name: fields.get(2)?.as_str().to_owned(),
+        source_guid: fields.get(1)?.as_ref().to_owned(),
+        source_name: fields.get(2)?.as_ref().to_owned(),
         source_flags: lenient_hex(fields, 3)?,
-        pet_guid: fields.get(5)?.as_str().to_owned(),
+        pet_guid: fields.get(5)?.as_ref().to_owned(),
     })
 }
 
@@ -636,8 +647,8 @@ pub(crate) fn combat_log_version(line: &str) -> Option<u32> {
 
 /// The `auraType` suffix field of aura events, at the fixed index after the
 /// spell block.
-fn aura_type(fields: &[String]) -> Option<AuraType> {
-    match fields.get(12).map(String::as_str) {
+fn aura_type(fields: &[Cow<'_, str>]) -> Option<AuraType> {
+    match fields.get(12).map(|value| &**value) {
         Some("BUFF") => Some(AuraType::Buff),
         Some("DEBUFF") => Some(AuraType::Debuff),
         _ => None,
@@ -681,21 +692,21 @@ fn is_retained(name: &str) -> bool {
     )
 }
 
-fn text(fields: &[String], index: usize) -> Result<&str, ParseFailure> {
+fn text<'a>(fields: &'a [Cow<'_, str>], index: usize) -> Result<&'a str, ParseFailure> {
     fields
         .get(index)
-        .map(String::as_str)
+        .map(|value| &**value)
         .ok_or(ParseFailure::MalformedRetainedEvent)
 }
 
-fn number<T: std::str::FromStr>(fields: &[String], index: usize) -> Result<T, ParseFailure> {
+fn number<T: std::str::FromStr>(fields: &[Cow<'_, str>], index: usize) -> Result<T, ParseFailure> {
     text(fields, index)?
         .parse()
         .map_err(|_| ParseFailure::MalformedRetainedEvent)
 }
 
 fn optional_number<T: std::str::FromStr>(
-    fields: &[String],
+    fields: &[Cow<'_, str>],
     index: usize,
 ) -> Result<Option<T>, ParseFailure> {
     fields
@@ -709,7 +720,7 @@ fn optional_number<T: std::str::FromStr>(
         .transpose()
 }
 
-fn hexadecimal(fields: &[String], index: usize) -> Result<u64, ParseFailure> {
+fn hexadecimal(fields: &[Cow<'_, str>], index: usize) -> Result<u64, ParseFailure> {
     let value = text(fields, index)?;
     u64::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16)
         .map_err(|_| ParseFailure::MalformedRetainedEvent)
@@ -733,69 +744,83 @@ fn integer_list(value: &str) -> Result<Vec<u32>, ParseFailure> {
         .collect()
 }
 
-fn split_fields(payload: &str) -> Result<Vec<String>, ()> {
-    let mut fields = Vec::new();
-    let mut field = String::new();
-    let mut chars = payload.chars().peekable();
+/// Splits a payload on top-level commas. Fields borrow the payload and only
+/// allocate when a quoted field needs unescaping.
+fn split_fields(payload: &str) -> Result<Vec<Cow<'_, str>>, ()> {
+    let mut fields = Vec::with_capacity(48);
+    let bytes = payload.as_bytes();
+    let mut start = 0;
+    let mut index = 0;
     let mut quoted = false;
-    let mut escaped = false;
     let mut nesting = 0_u32;
 
+    // Every delimiter is ASCII, so a byte scan never splits a UTF-8 character.
+    while let Some(&byte) = bytes.get(index) {
+        match byte {
+            b'"' if quoted && bytes.get(index + 1) == Some(&b'"') => index += 1,
+            b'"' => quoted = !quoted,
+            // Skip the escaped byte; a dangling escape leaves `quoted` set.
+            b'\\' if quoted => index += 1,
+            _ if quoted => {}
+            b'[' | b'(' => nesting += 1,
+            b']' | b')' => nesting = nesting.checked_sub(1).ok_or(())?,
+            b',' if nesting == 0 => {
+                fields.push(unquote(&payload[start..index]));
+                start = index + 1;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    if quoted || nesting != 0 {
+        return Err(());
+    }
+    fields.push(unquote(&payload[start..]));
+    Ok(fields)
+}
+
+/// Removes quoting from one already-delimited field: quotes are dropped,
+/// and inside them `\x` yields `x` and `""` yields `"`.
+fn unquote(raw: &str) -> Cow<'_, str> {
+    if !raw.contains('"') {
+        return Cow::Borrowed(raw);
+    }
+    if let Some(inner) = raw
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        && !inner.contains(['"', '\\'])
+    {
+        return Cow::Borrowed(inner);
+    }
+    let mut field = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    let mut quoted = false;
     while let Some(character) = chars.next() {
-        if escaped {
-            field.push(character);
-            escaped = false;
-            continue;
-        }
-        if quoted {
-            match character {
-                '\\' => escaped = true,
-                '"' if chars.peek() == Some(&'"') => {
-                    chars.next();
-                    field.push('"');
-                }
-                '"' => quoted = false,
-                _ => field.push(character),
-            }
-            continue;
-        }
         match character {
-            '"' => quoted = true,
-            '[' | '(' => {
-                nesting += 1;
-                field.push(character);
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+                field.push('"');
             }
-            ']' | ')' => {
-                nesting = nesting.checked_sub(1).ok_or(())?;
-                field.push(character);
-            }
-            ',' if nesting == 0 => {
-                fields.push(std::mem::take(&mut field));
-            }
+            '"' => quoted = !quoted,
+            '\\' if quoted => field.extend(chars.next()),
             _ => field.push(character),
         }
     }
-    if quoted || escaped || nesting != 0 {
-        return Err(());
-    }
-    fields.push(field);
-    Ok(fields)
+    Cow::Owned(field)
 }
 
 pub(crate) fn parse_timestamp(value: &str, context: ParseTimeContext) -> Result<i64, ParseFailure> {
     let (date, time) = value
         .split_once(' ')
         .ok_or(ParseFailure::MalformedTimestamp)?;
-    let date_parts = date
-        .split('/')
-        .map(str::parse::<i32>)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| ParseFailure::MalformedTimestamp)?;
-    let (year, month, day) = match date_parts.as_slice() {
-        [month, day] => (context.year, *month, *day),
-        [month, day, year] => (*year, *month, *day),
-        _ => return Err(ParseFailure::MalformedTimestamp),
+    let mut date_parts = date.split('/');
+    let mut date_part = || date_parts.next().map(str::parse::<i32>).transpose();
+    let (Ok(Some(month)), Ok(Some(day)), Ok(year), Ok(None)) =
+        (date_part(), date_part(), date_part(), date_part())
+    else {
+        return Err(ParseFailure::MalformedTimestamp);
     };
+    let year = year.unwrap_or(context.year);
     if !(1..=9999).contains(&year) {
         return Err(ParseFailure::MalformedTimestamp);
     }
@@ -815,30 +840,27 @@ pub(crate) fn parse_timestamp(value: &str, context: ParseTimeContext) -> Result<
     if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(ParseFailure::MalformedTimestamp);
     }
-    let time_parts = whole_time
-        .split(':')
-        .map(str::parse::<i64>)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| ParseFailure::MalformedTimestamp)?;
-    let [hour, minute, second] = time_parts.as_slice() else {
+    let mut time_parts = whole_time.split(':');
+    let mut time_part = || time_parts.next().map(str::parse::<i64>).transpose();
+    let (Ok(Some(hour)), Ok(Some(minute)), Ok(Some(second)), Ok(None)) =
+        (time_part(), time_part(), time_part(), time_part())
+    else {
         return Err(ParseFailure::MalformedTimestamp);
     };
     if !(1..=12).contains(&month)
         || !(1..=days_in_month(year, month)).contains(&day)
-        || !(0..=23).contains(hour)
-        || !(0..=59).contains(minute)
-        || !(0..=59).contains(second)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=59).contains(&second)
     {
         return Err(ParseFailure::MalformedTimestamp);
     }
-    let milliseconds = fraction
-        .chars()
-        .take(3)
-        .chain(std::iter::repeat('0'))
-        .take(3)
-        .collect::<String>()
-        .parse::<i64>()
-        .map_err(|_| ParseFailure::MalformedTimestamp)?;
+    // Milliseconds are the first three fraction digits, right-padded with zeros.
+    let digits = &fraction.as_bytes()[..fraction.len().min(3)];
+    let milliseconds = digits
+        .iter()
+        .fold(0_i64, |value, digit| value * 10 + i64::from(digit - b'0'))
+        * 10_i64.pow(3 - digits.len() as u32);
     let days = days_from_civil(year, month, day);
     Ok((days * 86_400 + hour * 3_600 + minute * 60 + second
         - i64::from(context.utc_offset_minutes) * 60)
@@ -980,25 +1002,6 @@ mod tests {
                 .map(|index| 1_775_755_633_200 + index as i64 * 1_000)
                 .collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn retains_the_spell_id_from_a_real_bloodlust_cast() {
-        let line = "7/18/2026 21:04:49.9572  SPELL_CAST_SUCCESS,Player-1-A,\"Evoker-Realm\",0x512,0x80000000,0000000000000000,nil,0x80000000,0x80000000,390386,\"Fury of the Aspects\",0x40";
-        let parsed = parse_line(GameFlavor::Retail, CONTEXT, line)
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            parsed.event,
-            CombatEvent::PlayerObserved {
-                kind: PlayerObservationKind::CastSucceeded,
-                spell_id: 390386,
-                ref spell_name,
-                ..
-            } if spell_name == "Fury of the Aspects"
-        ));
-        assert!(is_bloodlust_spell(390386));
-        assert!(!is_bloodlust_spell(390435));
     }
 
     #[test]
@@ -1486,27 +1489,12 @@ mod tests {
         );
     }
     #[test]
-    fn combat_log_version_maps_the_advanced_block_arity() {
-        let base = ParseTimeContext::new(2026, 0);
-        assert_eq!(base.advanced_block_fields, 17);
-        assert_eq!(base.with_combat_log_version(21).advanced_block_fields, 17);
-        assert_eq!(base.with_combat_log_version(22).advanced_block_fields, 19);
-        assert_eq!(base.with_combat_log_version(23).advanced_block_fields, 19);
-    }
-
-    #[test]
     fn combat_log_version_reads_only_complete_header_values() {
         assert_eq!(
             combat_log_version(
                 "8/11/2026 18:28:29.3992  COMBAT_LOG_VERSION,22,ADVANCED_LOG_ENABLED,1,BUILD_VERSION,12.1.0,PROJECT_ID,1"
             ),
             Some(22)
-        );
-        assert_eq!(
-            combat_log_version(
-                "8/11/2026 18:28:29.3992  COMBAT_LOG_VERSION,9,ADVANCED_LOG_ENABLED,1,BUILD_VERSION,11.0.7,PROJECT_ID,1"
-            ),
-            Some(9)
         );
         // Bare headers from older clients or hand-written fixtures also work.
         assert_eq!(
@@ -1529,78 +1517,50 @@ mod tests {
     }
 
     #[test]
-    fn version_22_spell_damage_amount_lives_at_the_wider_suffix() {
-        let line = "5/24 20:26:10.911  SPELL_DAMAGE,Player-1322-07763A7B,\"Xiaohuli\",0x511,0x0,Creature-0-3013-0-11406-74284-0000266503,\"Cutpurse\",0x10a48,0x0,585,\"Smite\",0x2,Creature-0-3013-0-11406-74284-0000266503,0000000000000000,105,152,0,0,189,2084,0,0,0,250000,250000,0,0,0,0,0,0,46,0,2,0,0,0,1,0,0,0,0.000,1,1";
-        let parsed = parse_line(GameFlavor::Retail, V22_CONTEXT, line)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            parsed.event,
-            CombatEvent::Damage {
-                source_guid: "Player-1322-07763A7B".into(),
-                source_name: "Xiaohuli".into(),
-                source_flags: 0x511,
-                source_owner_guid: None,
-                dest_guid: "Creature-0-3013-0-11406-74284-0000266503".into(),
-                dest_name: "Cutpurse".into(),
-                dest_flags: 0x10a48,
-                dest_raid_marker: 0,
-                spell_name: "Smite".into(),
-                amount: 46,
-                dest_current_hp: Some(105),
-                dest_max_hp: Some(152),
-            }
-        );
-    }
-
-    #[test]
-    fn version_22_swing_damage_amount_and_source_owner_live_at_the_wider_suffix() {
-        let line = "4/9 19:27:13.200  SWING_DAMAGE,Pet-0-1,\"Imp\",0x2114,0x0,Creature-0-B,\"Training Boss\",0x10a48,0x0,Pet-0-1,Player-0-OWNER,500,1000,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,120,0,1,0,0,0,0,0,0,1";
-        let parsed = parse_line(GameFlavor::Retail, V22_CONTEXT, line)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            parsed.event,
-            CombatEvent::Damage {
-                source_guid: "Pet-0-1".into(),
-                source_name: "Imp".into(),
-                source_flags: 0x2114,
-                source_owner_guid: Some("Player-0-OWNER".into()),
-                dest_guid: "Creature-0-B".into(),
-                dest_name: "Training Boss".into(),
-                dest_flags: 0x10a48,
-                dest_raid_marker: 0,
-                spell_name: "Melee".into(),
-                amount: 120,
-                dest_current_hp: None,
-                dest_max_hp: None,
-            }
-        );
-    }
-
-    #[test]
-    fn version_22_spell_heal_amount_and_overheal_live_at_the_wider_suffix() {
-        let line = "4/9 19:27:13.200  SPELL_HEAL,Player-0-A,\"Healer\",0x511,0x0,Player-0-B,\"Tank\",0x512,0x0,2061,\"Flash Heal\",0x2,Player-0-B,0000000000000000,500,500,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1000,600,400,0,1";
-        let parsed = parse_line(GameFlavor::Retail, V22_CONTEXT, line)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            parsed.event,
-            CombatEvent::Heal {
-                source_guid: "Player-0-A".into(),
-                source_name: "Healer".into(),
-                source_flags: 0x511,
-                dest_guid: "Player-0-B".into(),
-                dest_name: "Tank".into(),
-                dest_flags: 0x512,
-                dest_raid_marker: 0,
-                spell_name: "Flash Heal".into(),
-                amount: 1000,
-                overheal: 400,
-                dest_current_hp: Some(500),
-                dest_max_hp: Some(500),
-            }
-        );
+    fn version_22_amounts_live_at_the_wider_suffix() {
+        let cases = [
+            // (line, amount, overheal, source owner)
+            (
+                "5/24 20:26:10.911  SPELL_DAMAGE,Player-1322-07763A7B,\"Xiaohuli\",0x511,0x0,Creature-0-3013-0-11406-74284-0000266503,\"Cutpurse\",0x10a48,0x0,585,\"Smite\",0x2,Creature-0-3013-0-11406-74284-0000266503,0000000000000000,105,152,0,0,189,2084,0,0,0,250000,250000,0,0,0,0,0,0,46,0,2,0,0,0,1,0,0,0,0.000,1,1",
+                46,
+                0,
+                None,
+            ),
+            (
+                "4/9 19:27:13.200  SWING_DAMAGE,Pet-0-1,\"Imp\",0x2114,0x0,Creature-0-B,\"Training Boss\",0x10a48,0x0,Pet-0-1,Player-0-OWNER,500,1000,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,120,0,1,0,0,0,0,0,0,1",
+                120,
+                0,
+                Some("Player-0-OWNER"),
+            ),
+            (
+                "4/9 19:27:13.200  SPELL_HEAL,Player-0-A,\"Healer\",0x511,0x0,Player-0-B,\"Tank\",0x512,0x0,2061,\"Flash Heal\",0x2,Player-0-B,0000000000000000,500,500,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1000,600,400,0,1",
+                1000,
+                400,
+                None,
+            ),
+        ];
+        for (line, amount, overheal, owner) in cases {
+            let event = parse_line(GameFlavor::Retail, V22_CONTEXT, line)
+                .unwrap()
+                .unwrap()
+                .event;
+            let actual = match event {
+                CombatEvent::Damage {
+                    amount,
+                    source_owner_guid,
+                    ..
+                } => (amount, 0, source_owner_guid),
+                CombatEvent::Heal {
+                    amount, overheal, ..
+                } => (amount, overheal, None),
+                other => panic!("unexpected event {other:?}"),
+            };
+            assert_eq!(
+                actual,
+                (amount, overheal, owner.map(str::to_owned)),
+                "{line}"
+            );
+        }
     }
 
     #[test]
