@@ -956,7 +956,7 @@ fn text_tail(text: &str) -> String {
 fn parse_audio_devices(text: &str) -> AudioDevices {
     let device = |id: &str, detail: &str| AudioDevice {
         id: id.to_string(),
-        label: format!("{id} - {detail}"),
+        label: if detail.is_empty() { id } else { detail }.to_string(),
     };
     let mut devices = AudioDevices {
         outputs: vec![device("default_output", "Default output device")],
@@ -1341,18 +1341,24 @@ mod tests {
             ids(&devices.inputs),
             ["default_input", "device:alsa_input.usb-mic"]
         );
-        assert_eq!(
-            devices.inputs[1].label,
-            "device:alsa_input.usb-mic - Fake USB Microphone"
-        );
+        assert_eq!(devices.inputs[1].label, "Fake USB Microphone");
+        assert_eq!(devices.outputs[0].label, "Default output device");
         recorder.shutdown().unwrap();
 
-        // Duplicates collapse and lines without a description are ignored.
-        let parsed = parse_audio_devices("bluez_output.x|Headset\nbluez_output.x|Headset\nnoise\n");
+        // Duplicates collapse, lines without `|` are ignored, and an empty
+        // description falls back to the id.
+        let parsed = parse_audio_devices(
+            "bluez_output.x|Headset\nbluez_output.x|Headset\nnoise\nbluez_output.y|\n",
+        );
         assert_eq!(
             ids(&parsed.outputs),
-            ["default_output", "device:bluez_output.x"]
+            [
+                "default_output",
+                "device:bluez_output.x",
+                "device:bluez_output.y"
+            ]
         );
+        assert_eq!(parsed.outputs[2].label, "device:bluez_output.y");
         assert_eq!(ids(&parsed.inputs), ["default_input"]);
     }
 

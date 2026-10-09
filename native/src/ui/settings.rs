@@ -1546,11 +1546,11 @@ mod tests {
         let devices = [
             AudioDevice {
                 id: "default_output".to_owned(),
-                label: "default_output - Default output device".to_owned(),
+                label: "Default output device".to_owned(),
             },
             AudioDevice {
                 id: "device:alpha".to_owned(),
-                label: "device:alpha - Speakers".to_owned(),
+                label: "Speakers".to_owned(),
             },
         ];
         let (model, index) = audio_model(&devices, "device:alpha");
