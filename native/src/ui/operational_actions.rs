@@ -19,7 +19,7 @@ use warcraft_recorder::domain::{Category, RecorderStatus};
 use warcraft_recorder::storage::now_unix_ms;
 
 use super::status::ElapsedLabel;
-use super::{ActionSink, ShellAction, TEST_CATEGORIES};
+use super::{ActionSink, ShellAction, TEST_CATEGORIES, category_label};
 
 /// What the Manual toolbar shows, derived from one snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,7 +139,7 @@ impl ManualBar {
             self.was_active.set(view.stop_visible);
             self.start_requested_ms.set(None);
             if sounds {
-                bell(&self.widget);
+                bell();
             }
         } else if let Some(requested_ms) = self.start_requested_ms.get()
             && snapshot.problems.iter().any(|problem| {
@@ -149,15 +149,15 @@ impl ManualBar {
         {
             self.start_requested_ms.set(None);
             if sounds {
-                bell(&self.widget);
+                bell();
             }
         }
     }
 }
 
-fn bell(widget: &impl IsA<gtk4::Widget>) {
+/// The bell is per display, not per widget.
+fn bell() {
     if let Some(display) = gtk4::gdk::Display::default() {
-        let _ = widget; // the bell is per display, not per widget
         display.beep();
     }
 }
@@ -166,7 +166,7 @@ fn bell(widget: &impl IsA<gtk4::Widget>) {
 /// explanation, and one Start that sends `RunTest`.
 pub fn present_test_dialog(parent: &gtk4::Widget, sink: ActionSink, ready: bool) {
     let dialog = adw::AlertDialog::new(Some("Test recording"), Some(TEST_EXPLANATION));
-    let labels: Vec<&str> = TEST_CATEGORIES.iter().map(|(_, label, _)| *label).collect();
+    let labels: Vec<&str> = TEST_CATEGORIES.iter().map(category_label).collect();
     let combo = gtk4::DropDown::from_strings(&labels);
     combo.set_tooltip_text(Some("Test recording category"));
     dialog.set_extra_child(Some(&combo));
@@ -181,7 +181,7 @@ pub fn present_test_dialog(parent: &gtk4::Widget, sink: ActionSink, ready: bool)
         ));
     }
     dialog.connect_response(Some("start"), move |_, _| {
-        if let Some((category, _, _)) = TEST_CATEGORIES.get(combo.selected() as usize) {
+        if let Some(category) = TEST_CATEGORIES.get(combo.selected() as usize) {
             sink(ShellAction::Command(Command::RunTest {
                 category: category.clone(),
             }));

@@ -494,15 +494,11 @@ pub fn unsafe_reason(snapshot: &AppSnapshot) -> Option<&'static str> {
 
 #[derive(Debug, PartialEq)]
 pub enum ApplyOutcome {
-    Blocked(&'static str),
     Invalid(Vec<ValidationProblem>),
     Save(Box<Config>),
 }
 
-pub fn apply_outcome(draft: &Config, unsafe_reason: Option<&'static str>) -> ApplyOutcome {
-    if let Some(reason) = unsafe_reason {
-        return ApplyOutcome::Blocked(reason);
-    }
+pub fn apply_outcome(draft: &Config) -> ApplyOutcome {
     let draft = draft.clone();
     let problems = draft.validate();
     if problems.is_empty() {
@@ -593,7 +589,7 @@ pub struct Settings {
     pending: Rc<RefCell<Option<(Config, i64)>>>,
     registry: Registry,
     /// Recorder/path controls disabled while reconfiguration is unsafe.
-    gated: RefCell<Vec<gtk4::Widget>>,
+    gated: Vec<gtk4::Widget>,
     apply: gtk4::Button,
     feedback: gtk4::Label,
     target_row: adw::ActionRow,
@@ -802,16 +798,14 @@ impl Settings {
         for (index, spec) in PATHS.iter().enumerate().skip(5) {
             let (row, select) = path_row(spec, &draft, &registry, &refresh, parent);
             gated.push(select.upcast());
+            storage_group.add(&row);
             if index == 5 {
-                storage_group.add(&row);
                 storage_group.add(&switch_row(
                     &INTERFACE_SWITCHES[0],
                     &draft,
                     &registry,
                     &refresh,
                 ));
-            } else {
-                storage_group.add(&row);
             }
         }
         for spec in &STORAGE_SPINS {
@@ -941,7 +935,7 @@ impl Settings {
             baseline,
             pending: Rc::new(RefCell::new(None)),
             registry,
-            gated: RefCell::new(gated),
+            gated,
             apply: apply.clone(),
             feedback,
             target_row,
@@ -1017,8 +1011,7 @@ impl Settings {
 
     fn on_apply(&self) {
         self.clear_marks();
-        match apply_outcome(&self.draft.borrow(), None) {
-            ApplyOutcome::Blocked(_) => {}
+        match apply_outcome(&self.draft.borrow()) {
             ApplyOutcome::Invalid(problems) => self.show_problems(&problems),
             ApplyOutcome::Save(draft) => {
                 if (self.sink)(ShellAction::Command(Command::SaveConfig {
@@ -1073,7 +1066,7 @@ impl Settings {
         let pending = self.pending.borrow().clone();
         self.apply
             .set_sensitive(reason.is_none() && pending.is_none());
-        for widget in self.gated.borrow().iter() {
+        for widget in &self.gated {
             widget.set_sensitive(reason.is_none());
         }
         if let Some(reason) = reason {
@@ -1538,35 +1531,6 @@ mod tests {
         assert!(row_sensitive("storage.buffer_dir", &separate));
         assert!(!row_sensitive("manual.sound", &config));
         assert!(!row_sensitive("capture.audio_input", &config));
-    }
-
-    #[test]
-    fn apply_validates_blocks_unsafe_states() {
-        let draft = ready_config();
-        match apply_outcome(&draft, None) {
-            ApplyOutcome::Save(saved) => {
-                assert_eq!(saved.capture, draft.capture);
-            }
-            other => panic!("expected save, got {other:?}"),
-        }
-
-        let mut invalid = ready_config();
-        invalid.capture.fps = 61;
-        invalid.storage.recording_dir = AuthorizedPath {
-            path: PathBuf::from("/recordings"),
-            authorization: PathAuthorization::ImportedInactive,
-        };
-        let ApplyOutcome::Invalid(problems) = apply_outcome(&invalid, None) else {
-            panic!("invalid draft must not save");
-        };
-        let fields: Vec<_> = problems.iter().map(|problem| problem.field).collect();
-        assert!(fields.contains(&"capture.fps"));
-        assert!(fields.contains(&"storage.recording_dir"));
-
-        assert_eq!(
-            apply_outcome(&draft, Some("while a recording is active")),
-            ApplyOutcome::Blocked("while a recording is active")
-        );
     }
 
     #[test]

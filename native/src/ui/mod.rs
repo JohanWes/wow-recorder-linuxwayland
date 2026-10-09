@@ -295,13 +295,13 @@ pub const CATEGORIES: [(Category, &str, &str); 10] = [
 ];
 
 /// Test-recording choices, in menu order.
-pub const TEST_CATEGORIES: [(Category, &str, &str); 6] = [
-    (Category::TwoVTwo, "2v2", "2v2"),
-    (Category::ThreeVThree, "3v3", "3v3"),
-    (Category::SoloShuffle, "Solo Shuffle", "solo-shuffle"),
-    (Category::Raids, "Raids", "raids"),
-    (Category::Battlegrounds, "Battlegrounds", "battlegrounds"),
-    (Category::MythicPlus, "Mythic+", "mythic-plus"),
+pub const TEST_CATEGORIES: [Category; 6] = [
+    Category::TwoVTwo,
+    Category::ThreeVThree,
+    Category::SoloShuffle,
+    Category::Raids,
+    Category::Battlegrounds,
+    Category::MythicPlus,
 ];
 
 pub fn category_label(category: &Category) -> &str {
