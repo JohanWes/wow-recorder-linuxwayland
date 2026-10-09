@@ -25,6 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::de::{IgnoredAny, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 use crate::activity::RecordingDraft;
 use crate::domain::{
@@ -410,8 +411,6 @@ impl Storage {
         self.check_owned(&entry.sidecar_path)
             .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
         let text = fs::read_to_string(&entry.sidecar_path)?;
-        let probe: SidecarProbe = serde_json::from_str(&text)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
 
         let mut updated = entry.clone();
         match change {
@@ -425,9 +424,26 @@ impl Storage {
             }
         }
 
+        // The entry does not hold the meter, so patch the document on disk
+        // rather than rebuilding it from the entry. The meter is copied
+        // through as raw JSON; only a sidecar without one takes the probe.
+        let temp = temp_sibling(&entry.sidecar_path);
+        if let Ok(mut sidecar) = serde_json::from_str::<NativeSidecar<Option<&RawValue>>>(&text)
+            && sidecar.meter.is_some()
+        {
+            sidecar.protected = updated.protected;
+            sidecar.tag = updated.tag.clone();
+            write_atomic(
+                &temp,
+                Some(&entry.sidecar_path),
+                sidecar.to_json()?.as_bytes(),
+            )?;
+            return Ok(updated);
+        }
+        let probe: SidecarProbe = serde_json::from_str(&text)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+
         let json = if probe.schema_version {
-            // The entry does not hold the meter, so patch the document on
-            // disk rather than rebuilding it from the entry.
             let mut sidecar: NativeSidecar = serde_json::from_str(&text)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
             sidecar.protected = updated.protected;
@@ -460,7 +476,6 @@ impl Storage {
             pretty_json(&Value::Object(object))?
         };
 
-        let temp = temp_sibling(&entry.sidecar_path);
         write_atomic(&temp, Some(&entry.sidecar_path), json.as_bytes())?;
         Ok(updated)
     }
@@ -933,7 +948,8 @@ impl<'de> Deserialize<'de> for MediaFile {
 // --- Native sidecar ---
 
 /// `M` is the meter payload: `MeterData` to read or write it, `IgnoredAny`
-/// for the library scan, a reference when writing a meter held elsewhere.
+/// for the library scan, a reference when writing a meter held elsewhere,
+/// `Option<&RawValue>` to patch a sidecar without parsing its meter.
 #[derive(Debug, Serialize, Deserialize)]
 struct NativeSidecar<M = MeterData> {
     schema_version: u32,
