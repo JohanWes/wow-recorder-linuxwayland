@@ -3,7 +3,7 @@
 //! Headless vertical slice: config, log polling, activity detection, recorder
 //! control, storage, and media jobs behind the real coordinator.
 //!
-//! The recorder and FFmpeg are replaced by shell fakes; every
+//! The recorder and FFmpeg are replaced by fakes; every
 //! other type is the production one operating on a temp directory. The
 //! coordinator core is stepped with `tick()`, so no test sleeps or timing
 //! assertions are needed.
@@ -49,7 +49,6 @@ struct Harness {
     commands: SyncSender<Command>,
     snapshots: Receiver<Arc<AppSnapshot>>,
     latest: Arc<AppSnapshot>,
-    replay_index: u32,
 }
 
 impl Harness {
@@ -87,7 +86,6 @@ impl Harness {
             commands,
             snapshots,
             latest: Arc::new(empty_snapshot()),
-            replay_index: 0,
         };
         harness.pump(settled);
         harness
@@ -143,31 +141,6 @@ impl Harness {
         }
     }
 
-    /// Stand in for gpu-screen-recorder saving its two artifacts and calling
-    /// the `-sc` hook.
-    fn emit_artifacts(&mut self, replay: bool) {
-        self.replay_index += 1;
-        let index = self.replay_index;
-        let events = self.root.join("recorder/gsr-events.tsv");
-        let mut file = fs::OpenOptions::new().append(true).open(&events).unwrap();
-        if replay {
-            let path = self.capture_root.join(format!("replay/Replay_{index}.mkv"));
-            fs::write(&path, b"replay media").unwrap();
-            writeln!(file, "{}\treplay\t{}", now_unix_ms(), path.display()).unwrap();
-        }
-        let path = self.capture_root.join(format!("regular/Video_{index}.mkv"));
-        fs::write(&path, b"regular media").unwrap();
-        // The regular hook fires after the subsequent stop signal; this
-        // fixture emits both artifacts before it drives that signal.
-        writeln!(
-            file,
-            "{}\tregular\t{}",
-            now_unix_ms() + 1_000,
-            path.display()
-        )
-        .unwrap();
-    }
-
     fn entries_of(&self, category: &Category) -> Vec<&warcraft_recorder::domain::LibraryEntry> {
         self.latest
             .entries
@@ -190,7 +163,8 @@ fn setup(root: &Path) -> Setup {
     Setup {
         config_path: root.join(CONFIG_FILENAME),
         data_dir: root.join("recorder"),
-        gsr_binary: fixture_bin("fake-gsr.sh"),
+        ipc_socket: root.join("recorder/gsr.sock"),
+        gsr_binary: fixture_bin("fake-gsr.py"),
         media: MediaConfig {
             ffmpeg: fixture_bin("fake-ffmpeg.sh"),
             utc_offset_minutes: 0,
@@ -201,17 +175,14 @@ fn setup(root: &Path) -> Setup {
         year: current_year(),
         recorder_timeouts: Timeouts {
             arm_stability: Duration::from_millis(150),
-            replay_event: Duration::from_millis(400),
-            // Ends are asynchronous now, so this budget spans however long a
-            // test spends between the stop request and the fake hook's event,
-            // including `Config::save`'s two fsyncs. Keep it far enough above
-            // that work that a loaded filesystem cannot expire it: the failure
-            // mode is a dropped recording and a 20 s `pump` timeout, not a
-            // clear assertion. The missing-artifact test, which waits it out,
-            // shortens it for itself.
-            regular_event: Duration::from_secs(2),
+            replay_reply: Duration::from_millis(400),
+            // Ends are asynchronous, so this budget spans however long a test
+            // holds the fake's stop reply, including `Config::save`'s two
+            // fsyncs. Keep it far enough above that work that a loaded
+            // filesystem cannot expire it: the failure mode is a dropped
+            // recording and a 20 s `pump` timeout, not a clear assertion.
+            stop_reply: Duration::from_secs(2),
             exit_grace: Duration::from_millis(500),
-            toggle_gap: Duration::from_millis(20),
         },
         wow_check_interval: Duration::from_millis(50),
         poll_interval: Duration::from_millis(5),
@@ -427,7 +398,6 @@ fn automatic_raid_completes_and_survives_a_restart() {
     assert_eq!(active.requested_replay_ms, 10_000);
     assert_eq!(active.category, Category::Raids);
 
-    harness.emit_artifacts(true);
     harness.log(&[
         spell_damage(start_ms + 250),
         spell_heal(start_ms + 300),
@@ -541,7 +511,6 @@ fn force_ended_solo_shuffle_is_abandoned_and_saved() {
         Category::SoloShuffle
     );
 
-    harness.emit_artifacts(true);
     harness.send(Command::ForceEnd);
     harness.pump(|snapshot| !snapshot.entries.is_empty());
 
@@ -567,7 +536,6 @@ fn manual_and_test_recordings_reuse_the_capture_pipeline() {
         harness.latest.active.as_ref().unwrap().category,
         Category::Manual
     );
-    harness.emit_artifacts(true);
     harness.send(Command::StopManual);
     harness.pump(|snapshot| !snapshot.entries.is_empty());
     let manual = harness.latest.entries[0].clone();
@@ -588,7 +556,6 @@ fn manual_and_test_recordings_reuse_the_capture_pipeline() {
             }
         )
     });
-    harness.emit_artifacts(true);
     harness.pump(|snapshot| snapshot.entries.len() == 2);
     let raid = load_meter(&harness.entries_of(&Category::Raids)[0].sidecar_path).unwrap();
     assert_eq!(raid.fights.len(), 1);
@@ -604,7 +571,6 @@ fn finalization_precedes_queued_user_jobs() {
     let start_ms = now_unix_ms() - 1_000;
     harness.log(&raid_start(start_ms));
     harness.pump(|snapshot| snapshot.active.is_some());
-    harness.emit_artifacts(true);
     harness.log(&[raid_end(now_unix_ms(), true)]);
     harness.pump(|snapshot| !snapshot.entries.is_empty());
     let source = harness.latest.entries[0].clone();
@@ -613,7 +579,6 @@ fn finalization_precedes_queued_user_jobs() {
     // single dispatch: both jobs are queued before dispatch chooses a job.
     harness.log(&raid_start(now_unix_ms() - 1_000));
     harness.pump(|snapshot| snapshot.active.is_some());
-    harness.emit_artifacts(true);
     harness.log(&[raid_end(now_unix_ms(), true)]);
     harness.send(Command::CreateClip(ClipRange {
         source: source.id.clone(),
@@ -639,7 +604,9 @@ fn commands_are_served_while_a_capture_is_ending() {
     harness.log(&raid_start(now_unix_ms() - 1_000));
     harness.pump(|snapshot| snapshot.active.is_some());
 
-    // End the activity without the hook reporting any artifact yet.
+    // End the activity while the fake holds back the stop reply.
+    let hold = harness.root.join("recorder/fake-hold");
+    fs::write(&hold, b"").unwrap();
     harness.log(&[raid_end(now_unix_ms(), true)]);
     harness.pump(|snapshot| snapshot.active.is_none());
     assert!(
@@ -659,7 +626,7 @@ fn commands_are_served_while_a_capture_is_ending() {
     );
 
     // The artifacts finally land: the recording finalizes as usual.
-    harness.emit_artifacts(true);
+    fs::remove_file(&hold).unwrap();
     harness.pump(|snapshot| !snapshot.entries.is_empty());
     assert_eq!(harness.latest.entries[0].category, Category::Raids);
 }
@@ -672,7 +639,6 @@ fn a_superseding_encounter_keeps_both_pulls() {
     harness.log(&raid_start(now_unix_ms() - 1_000));
     harness.pump(|snapshot| snapshot.active.is_some());
     let first = harness.latest.active.clone().unwrap().id;
-    harness.emit_artifacts(true);
 
     harness.log(&raid_start(now_unix_ms()));
     harness.pump(|snapshot| {
@@ -682,7 +648,6 @@ fn a_superseding_encounter_keeps_both_pulls() {
             .is_some_and(|active| active.id != first)
     });
     let second = harness.latest.active.clone().unwrap().id;
-    harness.emit_artifacts(true);
     harness.log(&[raid_end(now_unix_ms(), true)]);
     harness.pump(|snapshot| snapshot.entries.len() == 2);
 
@@ -776,16 +741,13 @@ fn replay_buffer_waits_for_wow_to_run() {
 }
 
 #[test]
-fn missing_regular_artifact_replaces_the_child_and_recovers() {
-    let (root, library, capture_root, log_file) = spawn_tree("failure");
-    // This test waits the regular-event budget out; keep that short.
-    let mut setup = setup(&root);
-    setup.recorder_timeouts.regular_event = Duration::from_millis(300);
-    let mut harness = Harness::attach_until(setup, root, library, capture_root, log_file, armed);
-    let start_ms = now_unix_ms() - 1_000;
-    harness.log(&raid_start(start_ms));
+fn missing_regular_artifact_is_reported_and_the_next_capture_saves() {
+    let mut harness = Harness::new("failure");
+    let no_regular = harness.root.join("recorder/fake-no-regular");
+    fs::write(&no_regular, b"").unwrap();
+    harness.log(&raid_start(now_unix_ms() - 1_000));
     harness.pump(|snapshot| snapshot.active.is_some());
-    // GSR never reports either artifact.
+    // GSR refuses the stop, so there is no regular recording.
     harness.log(&[raid_end(now_unix_ms(), true)]);
     harness.pump(|snapshot| !snapshot.problems.is_empty());
     assert!(harness.latest.entries.is_empty());
@@ -798,20 +760,11 @@ fn missing_regular_artifact_replaces_the_child_and_recovers() {
         "problems: {:?}",
         harness.latest.problems
     );
-    // A missing regular recording means the toggle desynced; replace the child.
-    harness.pump(|snapshot| {
-        snapshot
-            .problems
-            .iter()
-            .any(|problem| problem.summary.contains("stopped unexpectedly"))
-    });
-    // The replacement re-arms, so the next recording still saves instead of
-    // every later capture going silent.
+    // The same child serves the next recording.
+    fs::remove_file(&no_regular).unwrap();
     harness.pump(|snapshot| snapshot.status == RecorderStatus::Ready);
-    let start_ms = now_unix_ms() - 1_000;
-    harness.log(&raid_start(start_ms));
+    harness.log(&raid_start(now_unix_ms() - 1_000));
     harness.pump(|snapshot| snapshot.active.is_some());
-    harness.emit_artifacts(true);
     harness.log(&[raid_end(now_unix_ms(), true)]);
     harness.pump(|snapshot| !snapshot.entries.is_empty());
     let entry = &harness.latest.entries[0];
@@ -860,7 +813,6 @@ fn completion_updates_the_library_without_a_full_rescan() {
     let start_ms = now_unix_ms() - 1_000;
     harness.log(&raid_start(start_ms));
     harness.pump(|snapshot| snapshot.active.is_some());
-    harness.emit_artifacts(true);
     harness.log(&[raid_end(now_unix_ms(), true)]);
     harness.pump(|snapshot| snapshot.entries.len() == 2);
 
@@ -909,7 +861,6 @@ fn completion_eviction_updates_the_index_without_a_full_rescan() {
     let start_ms = now_unix_ms() - 1_000;
     harness.log(&raid_start(start_ms));
     harness.pump(|snapshot| snapshot.active.is_some());
-    harness.emit_artifacts(true);
     harness.log(&[raid_end(now_unix_ms(), true)]);
     harness.pump(|snapshot| snapshot.entries.len() == 2);
     let raid = harness.latest.entries[0].clone();
@@ -933,7 +884,6 @@ fn completion_eviction_updates_the_index_without_a_full_rescan() {
 
     harness.log(&raid_start(now_unix_ms()));
     harness.pump(|snapshot| snapshot.active.is_some());
-    harness.emit_artifacts(true);
     harness.log(&[raid_end(now_unix_ms(), true)]);
     let raid_id = raid.id.clone();
     harness.pump(|snapshot| {

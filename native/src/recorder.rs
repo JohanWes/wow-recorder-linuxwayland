@@ -3,27 +3,27 @@
 //! gpu-screen-recorder lifecycle adapter.
 //!
 //! One long-lived GSR replay-buffer child, at most one active recording, and
-//! the signal/hook protocol: a save signal sized to the pre-roll (see
-//! `ReplaySave`) saves the replay, SIGRTMIN toggles the regular recording, and
-//! a generated `-sc` hook script appends
-//! `epoch_ms<TAB>kind<TAB>path` records that `poll`/`end` correlate against the
-//! configured replay/regular directories.
+//! GSR's `-ipc` socket: one JSON request per line (`save-replay` sized to the
+//! pre-roll, `start-replay-recording`, `stop-replay-recording`), answered by
+//! replies that carry the saved paths. `poll` drains them without blocking.
 //!
-//! - The hook receives `$1 = saved artifact path, $2 = event kind`.
 //! - Restart delays are 2, 4, 8, 16, then capped 30 seconds indefinitely. The
 //!   attempt counter resets on a deliberate `arm`, or when the child that
 //!   exited had stayed up for `STABLE_CHILD`: a crash loop keeps backing off,
 //!   an occasional exit during a long session starts over at 2 seconds.
-//! - Crash recovery of interrupted recordings is not Recorder's job; the only
-//!   persistent state is the truncate-on-arm events file.
+//! - Crash recovery of interrupted recordings is not Recorder's job; it keeps
+//!   no persistent state.
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom};
-use std::os::unix::fs::PermissionsExt;
+use std::io::{self, Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::config::CaptureSettings;
 use crate::domain::{Category, Codec, RecordingId, ReplayStorage};
@@ -36,9 +36,11 @@ use crate::storage::now_unix_ms;
 pub struct CaptureConfig {
     /// GSR executable; the production value is `gpu-screen-recorder` on PATH.
     pub gsr_binary: PathBuf,
-    /// App-private directory for the portal token, hook script, events file,
-    /// and recorder log.
+    /// App-private directory for the portal token and recorder log.
     pub data_dir: PathBuf,
+    /// GSR's IPC socket. Unix socket paths are limited to 107 bytes, so this
+    /// lives under the runtime directory rather than `data_dir`.
+    pub ipc_socket: PathBuf,
     /// Capture root containing the `replay`, `regular`, and `staging`
     /// subdirectories.
     pub capture_root: PathBuf,
@@ -57,41 +59,6 @@ pub struct StartRequest {
     pub id: RecordingId,
     /// Detection delay plus lead-in, already clamped by the coordinator.
     pub requested_replay_ms: u64,
-}
-
-/// The smallest GSR replay save covering a pre-roll. GSR adds its keyframe
-/// interval to a partial save, so each one holds at least its nominal length
-/// and the finalize trim stays exact. Saving the whole buffer only to keep a
-/// few seconds would write hundreds of megabytes per capture.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReplaySave {
-    None,
-    Last10s,
-    Last30s,
-    Last60s,
-    Full,
-}
-
-impl ReplaySave {
-    pub fn for_pre_roll(requested_replay_ms: u64) -> Self {
-        match requested_replay_ms {
-            0 => Self::None,
-            1..=10_000 => Self::Last10s,
-            10_001..=30_000 => Self::Last30s,
-            30_001..=60_000 => Self::Last60s,
-            _ => Self::Full,
-        }
-    }
-
-    fn signal(self) -> Option<i32> {
-        match self {
-            Self::None => None,
-            Self::Last10s => Some(process::sigrtmin() + 1),
-            Self::Last30s => Some(process::sigrtmin() + 2),
-            Self::Last60s => Some(process::sigrtmin() + 3),
-            Self::Full => Some(libc::SIGUSR1),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,28 +142,25 @@ pub enum RecorderEvent {
 /// Bounded waits. Tests shrink them; production uses the defaults.
 #[derive(Clone, Copy, Debug)]
 pub struct Timeouts {
-    /// Post-spawn stability check before arm is considered successful.
+    /// Post-spawn window in which GSR must stay alive and accept the IPC
+    /// connection before arm is considered successful.
     pub arm_stability: Duration,
-    /// Wait for the hook's replay event after the save signal.
-    pub replay_event: Duration,
-    /// Wait for the hook's regular event after the stop SIGRTMIN.
-    pub regular_event: Duration,
+    /// Wait for the `save-replay` reply, counted from `begin`.
+    pub replay_reply: Duration,
+    /// Wait for the `stop-replay-recording` reply before escalating to SIGINT.
+    pub stop_reply: Duration,
     /// Wait for the old child to exit during reselection/shutdown before
     /// escalating.
     pub exit_grace: Duration,
-    /// Minimum spacing between the SIGRTMIN toggles GSR reads once per
-    /// capture-loop iteration.
-    pub toggle_gap: Duration,
 }
 
 impl Default for Timeouts {
     fn default() -> Self {
         Self {
             arm_stability: Duration::from_millis(500),
-            replay_event: Duration::from_secs(20),
-            regular_event: Duration::from_secs(30),
+            replay_reply: Duration::from_secs(20),
+            stop_reply: Duration::from_secs(30),
             exit_grace: Duration::from_secs(2),
-            toggle_gap: Duration::from_millis(250),
         }
     }
 }
@@ -208,47 +172,114 @@ const STABLE_CHILD: Duration = Duration::from_secs(60);
 /// The portal token only changes after a target selection, so `poll` need
 /// not reread it every coordinator tick.
 const TOKEN_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+/// GSR applies `start-replay-recording` on its next capture-loop iteration
+/// and refuses a stop that arrives first. A refused stop is retried while the
+/// start is younger than this; after that no recording exists.
+const START_GRACE: Duration = Duration::from_secs(1);
+const IPC_CONNECT_RETRY: Duration = Duration::from_millis(25);
 
-struct GsrEvent {
-    timestamp_ms: i64,
-    kind: String,
-    path: PathBuf,
+/// The connection to GSR's `-ipc` socket. Requests are tiny and the socket is
+/// otherwise idle, so writes on the nonblocking stream never wait.
+struct Ipc {
+    stream: UnixStream,
+    buf: Vec<u8>,
+    next_id: i64,
+}
+
+#[derive(Deserialize)]
+struct Reply {
+    id: i64,
+    result: String,
+    /// The saved path on success, the error message otherwise.
+    data: Option<String>,
+}
+
+impl Ipc {
+    fn connect(path: &Path) -> Option<Self> {
+        let stream = UnixStream::connect(path).ok()?;
+        stream.set_nonblocking(true).ok()?;
+        Some(Self {
+            stream,
+            buf: Vec::new(),
+            next_id: 0,
+        })
+    }
+
+    fn send(&mut self, name: &str, data: Option<Value>) -> io::Result<i64> {
+        self.next_id += 1;
+        let id = self.next_id;
+        let mut request = json!({ "id": id, "name": name });
+        if let Some(data) = data {
+            request["data"] = data;
+        }
+        let mut line = request.to_string().into_bytes();
+        line.push(b'\n');
+        self.stream.write_all(&line)?;
+        tracing::info!(id, name, "sent GSR request");
+        Ok(id)
+    }
+
+    /// Append every complete reply line to `replies`; `Err` once GSR closed
+    /// the socket or it failed. Replies read before that are still appended.
+    fn drain(&mut self, replies: &mut Vec<Reply>) -> io::Result<()> {
+        let mut chunk = [0u8; 4096];
+        let result = loop {
+            match self.stream.read(&mut chunk) {
+                Ok(0) => break Err(io::ErrorKind::UnexpectedEof.into()),
+                Ok(read) => self.buf.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => break Err(error),
+            }
+        };
+        while let Some(end) = self.buf.iter().position(|&byte| byte == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=end).collect();
+            match serde_json::from_slice::<Reply>(&line) {
+                Ok(reply) => replies.push(reply),
+                Err(error) => tracing::warn!(%error, "ignored a malformed GSR reply"),
+            }
+        }
+        result
+    }
 }
 
 struct ActiveCapture {
     id: RecordingId,
     requested_replay_ms: u64,
     regular_started_at_ms: i64,
-    /// `None` when no replay save was requested: the end resolves on the
-    /// regular event alone.
-    replay_deadline: Option<Instant>,
+    begun_at: Instant,
+    /// The unanswered `save-replay` request; `None` once it was answered or
+    /// when the pre-roll is zero.
+    save_id: Option<i64>,
+    replay_deadline: Instant,
+    replay: Option<PathBuf>,
 }
 
-/// A requested end whose hook events have not all arrived yet. `poll` resolves
-/// it so the coordinator thread never sleeps through GSR's flush and mux.
+/// A requested end whose replies have not all arrived yet. `poll` resolves it
+/// so the coordinator thread never sleeps through GSR's flush and mux.
 struct PendingEnd {
-    config: CaptureConfig,
     active: ActiveCapture,
-    regular_deadline: Instant,
+    stop_id: i64,
+    stop_deadline: Instant,
     regular_stopped_at_ms: i64,
     regular: Option<PathBuf>,
+    /// GSR refused the stop after `START_GRACE`: there is no recording.
+    stop_failed: bool,
     sigint_sent: bool,
 }
 
 pub struct Recorder {
     config: Option<CaptureConfig>,
     child: Option<Child>,
+    ipc: Option<Ipc>,
     spawned_at: Option<Instant>,
     desired_running: bool,
     restart_attempts: u32,
     restart_at_ms: Option<i64>,
-    events_offset: u64,
-    pending: Vec<GsrEvent>,
     active: Option<ActiveCapture>,
     ending: Option<PendingEnd>,
     last_token: Option<String>,
     token_checked_at: Option<Instant>,
-    last_toggle_at: Option<Instant>,
     timeouts: Timeouts,
 }
 
@@ -267,31 +298,21 @@ impl Recorder {
         Self {
             config: None,
             child: None,
+            ipc: None,
             spawned_at: None,
             desired_running: false,
             restart_attempts: 0,
             restart_at_ms: None,
-            events_offset: 0,
-            pending: Vec::new(),
             active: None,
             ending: None,
             last_token: None,
             token_checked_at: None,
-            last_toggle_at: None,
             timeouts,
         }
     }
 
     fn token_path(config: &CaptureConfig) -> PathBuf {
         config.data_dir.join("gsr-portal.token")
-    }
-
-    fn hook_path(config: &CaptureConfig) -> PathBuf {
-        config.data_dir.join("gsr-hook.sh")
-    }
-
-    fn events_path(config: &CaptureConfig) -> PathBuf {
-        config.data_dir.join("gsr-events.tsv")
     }
 
     fn log_path(config: &CaptureConfig) -> PathBuf {
@@ -306,8 +327,8 @@ impl Recorder {
         config.capture_root.join("regular")
     }
 
-    /// Validate GSR, prepare directories/hook/events/token, spawn the replay
-    /// buffer, and confirm it stays alive. A deliberate arm resets the restart
+    /// Validate GSR, prepare directories/log/token, spawn the replay buffer,
+    /// and confirm it stays alive and connected. A deliberate arm resets the restart
     /// attempt counter.
     pub fn arm(&mut self, config: &CaptureConfig) -> Result<(), RecorderError> {
         if config.settings.audio_output.contains('|')
@@ -346,6 +367,7 @@ impl Recorder {
         }
         self.desired_running = false;
         self.restart_at_ms = None;
+        self.ipc = None;
         if let Some(mut child) = self.child.take() {
             process::terminate(&mut child, self.timeouts.exit_grace)?;
         }
@@ -363,12 +385,10 @@ impl Recorder {
             )?;
         }
 
-        let events_path = Self::events_path(config);
-        write_hook_script(&Self::hook_path(config), &events_path)?;
-        fs::write(&events_path, b"")?;
+        // Leftovers of the hook protocol that preceded the IPC socket.
+        let _ = fs::remove_file(config.data_dir.join("gsr-hook.sh"));
+        let _ = fs::remove_file(config.data_dir.join("gsr-events.tsv"));
         fs::write(Self::log_path(config), b"")?;
-        self.events_offset = 0;
-        self.pending.clear();
 
         let token_path = Self::token_path(config);
         if let Some(token) = &config.settings.capture_target_token
@@ -389,6 +409,12 @@ impl Recorder {
     }
 
     fn spawn_child(&mut self, config: &CaptureConfig) -> Result<(), RecorderError> {
+        // A child killed outright leaves its socket behind.
+        match fs::remove_file(&config.ipc_socket) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let log = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -409,47 +435,70 @@ impl Recorder {
                 log_tail: String::new(),
             })?;
 
-        std::thread::sleep(self.timeouts.arm_stability);
-        if let Some(status) = child.try_wait()? {
-            let log_tail = process::read_log_tail(&Self::log_path(config));
-            if status.code() == Some(GSR_EXIT_SELECTION_DENIED) {
-                return Err(RecorderError::SelectionDenied { log_tail });
+        // GSR binds the socket before the portal dialog, so connected does
+        // not mean capturing; healthy is alive and connected at the deadline.
+        let deadline = Instant::now() + self.timeouts.arm_stability;
+        let mut ipc = None;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                let log_tail = process::read_log_tail(&Self::log_path(config));
+                if status.code() == Some(GSR_EXIT_SELECTION_DENIED) {
+                    return Err(RecorderError::SelectionDenied { log_tail });
+                }
+                return Err(RecorderError::SpawnFailed {
+                    message: format!("gpu-screen-recorder exited immediately: {status}"),
+                    log_tail,
+                });
             }
-            return Err(RecorderError::SpawnFailed {
-                message: format!("gpu-screen-recorder exited immediately: {status}"),
-                log_tail,
-            });
+            if ipc.is_none() {
+                ipc = Ipc::connect(&config.ipc_socket);
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(IPC_CONNECT_RETRY);
         }
+        let Some(ipc) = ipc else {
+            let _ = process::terminate(&mut child, self.timeouts.exit_grace);
+            return Err(RecorderError::SpawnFailed {
+                message: "gpu-screen-recorder IPC socket did not appear".to_string(),
+                log_tail: process::read_log_tail(&Self::log_path(config)),
+            });
+        };
         self.child = Some(child);
+        self.ipc = Some(ipc);
         self.spawned_at = Some(Instant::now());
         Ok(())
     }
 
-    /// Register the replay wait, save the pre-roll (`ReplaySave`, none for a
-    /// zero pre-roll), and start the regular recording (SIGRTMIN). Never waits
-    /// for media. Returns the regular recording's wall-clock start.
+    /// Save the pre-roll (whole seconds, none for a zero pre-roll) and start
+    /// the regular recording. Never waits for media: the replies arrive
+    /// through `poll`. Returns the regular recording's wall-clock start.
     pub fn begin(&mut self, request: StartRequest) -> Result<i64, RecorderError> {
-        // A pending end still owns the hook events GSR has yet to write, and
-        // `resolve_end` clears whatever is left over. Starting here would let
-        // it swallow the new capture's replay event, costing it the entire
-        // pre-roll. The coordinator defers instead, and this keeps that
-        // invariant local to the recorder.
+        // A pending end still waits on replies of its own; the coordinator
+        // defers the next capture instead, and this keeps that invariant
+        // local to the recorder.
         if self.active.is_some() || self.ending.is_some() {
             return Err(RecorderError::Busy);
         }
-        let child = self.live_child()?;
+        self.live_child()?;
         let regular_started_at_ms = now_unix_ms();
-        let save = ReplaySave::for_pre_roll(request.requested_replay_ms).signal();
-        if let Some(signal) = save {
-            process::send_signal(child, signal)?;
-        }
-        process::send_signal(child, process::sigrtmin())?;
-        self.last_toggle_at = Some(Instant::now());
+        let seconds = request.requested_replay_ms.div_ceil(1_000);
+        let save_id = if seconds > 0 {
+            Some(self.send("save-replay", Some(json!({ "seconds": seconds })))?)
+        } else {
+            None
+        };
+        self.send("start-replay-recording", None)?;
+        let begun_at = Instant::now();
         self.active = Some(ActiveCapture {
             id: request.id,
             requested_replay_ms: request.requested_replay_ms,
             regular_started_at_ms,
-            replay_deadline: save.map(|_| Instant::now() + self.timeouts.replay_event),
+            begun_at,
+            save_id,
+            replay_deadline: begun_at + self.timeouts.replay_reply,
+            replay: None,
         });
         Ok(regular_started_at_ms)
     }
@@ -471,34 +520,42 @@ impl Recorder {
             Some(active) if &active.id != id => return Err(RecorderError::WrongId),
             Some(_) => {}
         }
-        // GSR reads the toggle as a flag, once per capture-loop iteration, so
-        // two inside one iteration collapse into one and invert it for good. A
-        // discard ends a capture from the batch that began it, so only that
-        // case ever waits here.
-        if let Some(sent_at) = self.last_toggle_at {
-            let remaining = self.timeouts.toggle_gap.saturating_sub(sent_at.elapsed());
-            if !remaining.is_zero() {
-                std::thread::sleep(remaining);
-            }
-        }
-        let child = self.live_child()?;
-        // The stop timestamp is sampled before the signal: the hook event
-        // that arrives later is admitted against this bound, never a clock
-        // read taken while the end resolves.
+        self.live_child()?;
         let regular_stopped_at_ms = now_unix_ms();
-        process::send_signal(child, process::sigrtmin())?;
-        self.last_toggle_at = Some(Instant::now());
-        let config = self.config.clone().expect("armed with config");
+        let stop_id = self.send("stop-replay-recording", None)?;
         let active = self.active.take().expect("checked above");
         self.ending = Some(PendingEnd {
-            config,
             active,
-            regular_deadline: Instant::now() + self.timeouts.regular_event,
+            stop_id,
+            stop_deadline: Instant::now() + self.timeouts.stop_reply,
             regular_stopped_at_ms,
             regular: None,
+            stop_failed: false,
             sigint_sent: false,
         });
         Ok(())
+    }
+
+    /// Send one request. A failed write means GSR is gone or wedged, which is
+    /// handled like its death.
+    fn send(&mut self, name: &str, data: Option<Value>) -> Result<i64, RecorderError> {
+        let ipc = self.ipc.as_mut().ok_or(RecorderError::NotArmed)?;
+        ipc.send(name, data).map_err(|error| {
+            self.lose_ipc();
+            error.into()
+        })
+    }
+
+    /// GSR only closes a client when it exits or the client misbehaves, so a
+    /// child still alive behind a dead socket is wedged: SIGINT it and let
+    /// the exit branch of `poll` restart it.
+    fn lose_ipc(&mut self) {
+        self.ipc = None;
+        if let Some(child) = self.child.as_mut()
+            && matches!(child.try_wait(), Ok(None))
+        {
+            let _ = process::send_signal(child, libc::SIGINT);
+        }
     }
 
     /// Whether a replay-buffer child is currently available.
@@ -514,7 +571,7 @@ impl Recorder {
     /// Shutdown only: drive the requested end to its conclusion so the
     /// finalization is queued before GSR is killed.
     ///
-    /// `deadline` keeps quitting responsive. The full 30 s regular wait is
+    /// `deadline` keeps quitting responsive. The full 30 s stop wait is
     /// right for a running app but not for a window the user just closed: a
     /// quit that appears hung invites a force-kill, which orphans GSR and
     /// leaves it capturing the screen forever. On expiry the end resolves with
@@ -527,7 +584,7 @@ impl Recorder {
                 break;
             }
             if Instant::now() >= deadline {
-                self.resolve_end(None, &mut events);
+                self.resolve_end(&mut events);
                 break;
             }
             std::thread::sleep(Duration::from_millis(25));
@@ -537,95 +594,112 @@ impl Recorder {
 
     /// One nonblocking step of a requested end. The regular recording is
     /// awaited first against its own deadline, then the replay pre-roll
-    /// against the absolute deadline taken at `begin`, if one was saved.
+    /// against the absolute deadline taken at `begin`, if one was requested.
     fn poll_pending_end(&mut self, events: &mut Vec<RecorderEvent>) {
-        let Some(config) = self.ending.as_ref().map(|ending| ending.config.clone()) else {
+        self.dispatch_replies();
+        let now = Instant::now();
+        let Some(ending) = self.ending.as_mut() else {
             return;
         };
-        let _ = self.read_new_events(&config);
-        let now = Instant::now();
-
-        if self
-            .ending
-            .as_ref()
-            .is_some_and(|ending| ending.regular.is_none())
-        {
-            let regular_stopped_at_ms = self
-                .ending
-                .as_ref()
-                .map(|ending| ending.regular_stopped_at_ms)
-                .expect("checked above");
-            let regular = self.take_event(
-                "regular",
-                &Self::regular_dir(&config),
-                regular_stopped_at_ms,
-            );
-            let ending = self.ending.as_mut().expect("checked above");
-            ending.regular = regular;
-            if ending.regular.is_none() {
-                if now < ending.regular_deadline {
-                    return;
-                }
-                // The toggle inverted, and it cannot be read back: replace the
-                // child. Its exit resolves this end, and poll reports that
-                // first so the coordinator disarms before a deferred capture
-                // can start on a child that is going away.
-                if !ending.sigint_sent {
-                    ending.sigint_sent = true;
-                    ending.regular_deadline = now + self.timeouts.exit_grace;
-                    if let Some(child) = self.child.as_ref() {
-                        let _ = process::send_signal(child, libc::SIGINT);
-                    }
-                    return;
-                }
-                // The child ignored SIGINT. Consume any valid replay event so
-                // it is not counted as noise; the coordinator sweeps the file.
-                let replay_bound = ending.active.regular_started_at_ms;
-                let _ = self.take_event("replay", &Self::replay_dir(&config), replay_bound);
-                self.resolve_end(None, events);
+        if ending.regular.is_none() && !ending.stop_failed {
+            if now < ending.stop_deadline {
                 return;
             }
-        }
-
-        let active = &self
-            .ending
-            .as_ref()
-            .expect("regular resolution keeps the pending end")
-            .active;
-        // Without a save, any replay event is noise for `resolve_end`.
-        let Some(replay_deadline) = active.replay_deadline else {
-            self.resolve_end(None, events);
+            // No reply: SIGINT finalizes a running recording and still
+            // answers the stop. Its exit resolves this end, and poll reports
+            // that first so the coordinator disarms before a deferred capture
+            // can start on a child that is going away.
+            if !ending.sigint_sent {
+                ending.sigint_sent = true;
+                ending.stop_deadline = now + self.timeouts.exit_grace;
+                if let Some(child) = self.child.as_ref() {
+                    let _ = process::send_signal(child, libc::SIGINT);
+                }
+                return;
+            }
+        } else if ending.regular.is_some()
+            && ending.active.save_id.is_some()
+            && now < ending.active.replay_deadline
+        {
             return;
-        };
-        let replay_bound = active.regular_started_at_ms;
-        let replay = self.take_event("replay", &Self::replay_dir(&config), replay_bound);
-        if replay.is_none() && now < replay_deadline {
-            return;
         }
-        self.resolve_end(replay, events);
+        self.resolve_end(events);
     }
 
-    fn resolve_end(&mut self, replay: Option<PathBuf>, events: &mut Vec<RecorderEvent>) {
+    /// Resolve the pending end with whatever arrived. A save reply that
+    /// arrives later is ignored by its id; the sweep removes its file.
+    fn resolve_end(&mut self, events: &mut Vec<RecorderEvent>) {
         let Some(ending) = self.ending.take() else {
             return;
         };
-        // Any event still pending after the session was noise (wrong kind,
-        // stale, duplicate, or outside the managed directories).
-        if !self.pending.is_empty() {
-            tracing::debug!(
-                count = self.pending.len(),
-                "ignored unexpected GSR hook events"
-            );
-            self.pending.clear();
-        }
         let artifacts = ending.regular.map(|regular| CaptureArtifacts {
-            replay,
+            replay: ending.active.replay,
             regular,
             requested_replay_ms: ending.active.requested_replay_ms,
             regular_started_at_ms: ending.active.regular_started_at_ms,
             regular_stopped_at_ms: ending.regular_stopped_at_ms,
         });
         events.push(RecorderEvent::CaptureEnded { artifacts });
+    }
+
+    /// Apply GSR's replies to the active capture or the pending end. `poll`
+    /// runs this before reading the child's exit status, so a reply flushed
+    /// while GSR exits is not lost.
+    fn dispatch_replies(&mut self) {
+        let Some(ipc) = self.ipc.as_mut() else {
+            return;
+        };
+        let mut replies = Vec::new();
+        let drained = ipc.drain(&mut replies);
+        for reply in replies {
+            self.apply_reply(reply);
+        }
+        if let Err(error) = drained {
+            tracing::warn!(%error, "GSR IPC connection lost");
+            self.lose_ipc();
+        }
+    }
+
+    fn apply_reply(&mut self, reply: Reply) {
+        let ok = reply.result == "ok";
+        tracing::info!(
+            id = reply.id,
+            result = %reply.result,
+            data = reply.data.as_deref().unwrap_or(""),
+            "GSR reply"
+        );
+        // The save can answer before or after the end was requested.
+        let capture = match (self.active.as_mut(), self.ending.as_mut()) {
+            (Some(active), _) => Some(active),
+            (None, Some(ending)) => Some(&mut ending.active),
+            (None, None) => None,
+        };
+        if let Some(capture) = capture
+            && capture.save_id == Some(reply.id)
+        {
+            capture.save_id = None;
+            capture.replay = reply.data.filter(|_| ok).map(PathBuf::from);
+            return;
+        }
+        let Some(ending) = self
+            .ending
+            .as_mut()
+            .filter(|ending| ending.stop_id == reply.id)
+        else {
+            return;
+        };
+        if let (true, Some(path)) = (ok, reply.data) {
+            ending.regular = Some(PathBuf::from(path));
+        } else if ending.active.begun_at.elapsed() < START_GRACE {
+            ending.regular_stopped_at_ms = now_unix_ms();
+            if let Ok(id) = self.send("stop-replay-recording", None)
+                && let Some(ending) = self.ending.as_mut()
+            {
+                ending.stop_id = id;
+            }
+        } else {
+            ending.stop_failed = true;
+        }
     }
 
     /// Token contract: stop the child, invalidate the token only after it
@@ -636,6 +710,7 @@ impl Recorder {
         config: &CaptureConfig,
     ) -> Result<CaptureTargetSelection, RecorderError> {
         let token_path = Self::token_path(config);
+        self.ipc = None;
         if let Some(mut child) = self.child.take() {
             process::terminate(&mut child, self.timeouts.exit_grace)?;
         }
@@ -730,23 +805,24 @@ impl Recorder {
     /// calls this on its loop; Recorder keeps no timer thread.
     pub fn poll(&mut self, now_ms: i64) -> Vec<RecorderEvent> {
         let mut events = Vec::new();
+        self.dispatch_replies();
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     self.child = None;
+                    self.ipc = None;
                     self.active = None;
                     // A capture waiting to be written will never be: nothing
                     // is left to write it. Expire both waits so
                     // `poll_pending_end` resolves in this same batch, instead
                     // of holding the coordinator's ending state, and the
                     // recovery actions it blocks, against a dead child. The
-                    // replay deadline matters too: a child that wrote the
-                    // regular event and then died would otherwise keep the end
-                    // open for the rest of its pre-roll wait.
+                    // replay wait matters too: a child that answered the stop
+                    // and then died would otherwise keep the end open for the
+                    // rest of its pre-roll wait.
                     if let Some(ending) = self.ending.as_mut() {
-                        let now = Instant::now();
-                        ending.regular_deadline = now;
-                        ending.active.replay_deadline = ending.active.replay_deadline.map(|_| now);
+                        ending.stop_deadline = Instant::now();
+                        ending.active.save_id = None;
                         ending.sigint_sent = true;
                     }
                     events.push(RecorderEvent::ChildExited {
@@ -818,6 +894,7 @@ impl Recorder {
         self.restart_at_ms = None;
         self.active = None;
         self.ending = None;
+        self.ipc = None;
         if let Some(mut child) = self.child.take() {
             process::terminate(&mut child, self.timeouts.exit_grace)?;
         }
@@ -829,74 +906,11 @@ impl Recorder {
             Some(child) => child.try_wait()?.is_none(),
             None => false,
         };
-        if alive {
+        if alive && self.ipc.is_some() {
             Ok(self.child.as_ref().expect("alive"))
         } else {
             Err(RecorderError::NotArmed)
         }
-    }
-
-    fn read_new_events(&mut self, config: &CaptureConfig) -> io::Result<()> {
-        let path = Self::events_path(config);
-        let Ok(mut file) = fs::File::open(&path) else {
-            return Ok(());
-        };
-        let size = file.metadata()?.len();
-        if size <= self.events_offset {
-            return Ok(());
-        }
-        file.seek(SeekFrom::Start(self.events_offset))?;
-        let mut buffer = String::new();
-        file.read_to_string(&mut buffer)?;
-        // Only consume complete lines; a partially written record stays for
-        // the next read.
-        let complete = match buffer.rfind('\n') {
-            Some(last_newline) => &buffer[..=last_newline],
-            None => return Ok(()),
-        };
-        self.events_offset += complete.len() as u64;
-        for line in complete.lines().filter(|line| !line.is_empty()) {
-            let mut fields = line.splitn(3, '\t');
-            let timestamp = fields.next().unwrap_or("");
-            let kind = fields.next().unwrap_or("");
-            let path = fields.next().unwrap_or("");
-            let Ok(timestamp_ms) = timestamp.parse::<i64>() else {
-                tracing::debug!("ignored GSR hook event with a malformed timestamp");
-                continue;
-            };
-            if path.is_empty() || !matches!(kind, "regular" | "replay") {
-                tracing::debug!(kind, "ignored unexpected GSR hook event");
-                continue;
-            }
-            self.pending.push(GsrEvent {
-                timestamp_ms,
-                kind: kind.to_string(),
-                path: PathBuf::from(path),
-            });
-        }
-        Ok(())
-    }
-
-    /// Consume the already-read hook event of `kind` written into `directory`
-    /// with a timestamp at or after `lower_bound_ms`. Candidates are scanned
-    /// in arrival order, skipping stale or wrong-directory events of the same
-    /// kind; on a miss nothing is removed or counted here, and `resolve_end`
-    /// remains the sole cleanup/count point for the pending end.
-    fn take_event(&mut self, kind: &str, directory: &Path, lower_bound_ms: i64) -> Option<PathBuf> {
-        let canonical_dir = directory.canonicalize().ok()?;
-        let matched = self.pending.iter().position(|event| {
-            event.kind == kind
-                && event.timestamp_ms >= lower_bound_ms
-                && event
-                    .path
-                    .parent()
-                    .and_then(|parent| parent.canonicalize().ok())
-                    .is_some_and(|parent| parent == canonical_dir)
-        });
-        if let Some(index) = matched {
-            return Some(self.pending.remove(index).path);
-        }
-        None
     }
 }
 
@@ -943,8 +957,8 @@ fn build_gsr_args(config: &CaptureConfig) -> Vec<OsString> {
         Recorder::replay_dir(config).into_os_string(),
         "-ro".into(),
         Recorder::regular_dir(config).into_os_string(),
-        "-sc".into(),
-        Recorder::hook_path(config).into_os_string(),
+        "-ipc".into(),
+        config.ipc_socket.clone().into_os_string(),
         "-v".into(),
         "no".into(),
     ];
@@ -963,17 +977,6 @@ fn build_gsr_args(config: &CaptureConfig) -> Vec<OsString> {
         args.push(audio.join("|").into());
     }
     args
-}
-
-/// GSR invokes the hook as `<script> <saved path> <kind>`. The events-file
-/// path is embedded literally; hook output is never executed.
-fn write_hook_script(hook_path: &Path, events_path: &Path) -> io::Result<()> {
-    let script = format!(
-        "#!/bin/sh\n# generated by Warcraft Recorder; $1 = saved artifact path, $2 = event kind\nprintf '%s\\t%s\\t%s\\n' \"$(date +%s%3N)\" \"$2\" \"$1\" >> \"{}\"\n",
-        events_path.display()
-    );
-    fs::write(hook_path, script)?;
-    fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
 }
 
 fn read_token(path: &Path) -> Option<String> {
@@ -1028,68 +1031,39 @@ mod tests {
     use super::*;
 
     fn fake_gsr() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/native/bin/fake-gsr.sh")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/native/bin/fake-gsr.py")
     }
 
     fn test_timeouts() -> Timeouts {
         Timeouts {
             arm_stability: Duration::from_millis(150),
-            replay_event: Duration::from_millis(300),
-            regular_event: Duration::from_millis(300),
+            replay_reply: Duration::from_millis(300),
+            stop_reply: Duration::from_millis(300),
             exit_grace: Duration::from_millis(500),
-            toggle_gap: Duration::from_millis(20),
         }
     }
 
     fn test_config(name: &str) -> CaptureConfig {
         let root = crate::storage::test_root(&format!("recorder-{name}"));
+        let data_dir = root.join("data dir with späce");
         CaptureConfig {
             gsr_binary: fake_gsr(),
-            data_dir: root.join("data dir with späce"),
+            ipc_socket: data_dir.join("gsr.sock"),
+            data_dir,
             capture_root: root.join("capture"),
             settings: CaptureSettings::default(),
         }
     }
 
-    fn append_event_at(config: &CaptureConfig, timestamp_ms: i64, kind: &str, path: &Path) {
-        use std::io::Write;
-        let mut file = fs::OpenOptions::new()
-            .append(true)
-            .open(Recorder::events_path(config))
-            .unwrap();
-        writeln!(file, "{timestamp_ms}\t{kind}\t{}", path.display()).unwrap();
+    /// Every request the fake GSR received.
+    fn requests(config: &CaptureConfig) -> Vec<Value> {
+        fs::read_to_string(config.data_dir.join("fake-requests"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
     }
 
-    /// Append an event stamped with the current wall clock.
-    fn append_event(config: &CaptureConfig, kind: &str, path: &Path) {
-        append_event_at(config, now_unix_ms(), kind, path);
-    }
-
-    fn touch(path: &Path) {
-        fs::write(path, b"media").unwrap();
-    }
-
-    /// Signals the fake GSR has handled, once it has handled the start toggle.
-    /// A save signal is sent before the toggle, so it shows up by then too.
-    fn received_signals(config: &CaptureConfig) -> Vec<String> {
-        let path = config.data_dir.join("fake-signals");
-        let toggle = process::sigrtmin().to_string();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let signals: Vec<String> = fs::read_to_string(&path)
-                .unwrap_or_default()
-                .lines()
-                .map(str::to_owned)
-                .collect();
-            if signals.contains(&toggle) || Instant::now() >= deadline {
-                return signals;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    /// Drive a requested end to its bounded conclusion, the way shutdown does,
-    /// and return whatever artifacts it produced.
     fn end_artifacts(recorder: &mut Recorder) -> Option<CaptureArtifacts> {
         recorder
             .finish_end_blocking(Instant::now() + Duration::from_secs(5))
@@ -1108,7 +1082,9 @@ mod tests {
         config.settings.audio_input = Some("device:mic".to_string());
         let args = build_gsr_args(&config);
         // The data dir contains a space and a non-ASCII byte; it stays one arg.
-        assert!(args.contains(&config.data_dir.join("gsr-hook.sh").into_os_string()));
+        let ipc = args.iter().position(|arg| arg == "-ipc").unwrap();
+        assert_eq!(args[ipc + 1], config.data_dir.join("gsr.sock"));
+        assert!(!args.contains(&OsString::from("-sc")));
         assert_eq!(
             args[args.len() - 2..],
             ["-a".into(), "device:out put|device:mic".into()] as [OsString; 2]
@@ -1125,18 +1101,16 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_returns_replay_and_regular_artifacts() {
+    fn lifecycle_saves_exact_seconds_and_returns_both_paths() {
         let mut recorder = Recorder::with_timeouts(test_timeouts());
         let config = test_config("lifecycle");
         recorder.arm(&config).unwrap();
-        // Arm truncated the events file and spawned a live child.
-        assert_eq!(fs::read(Recorder::events_path(&config)).unwrap(), b"");
 
         let id = RecordingId::new();
         recorder
             .begin(StartRequest {
                 id: id.clone(),
-                requested_replay_ms: 12_000,
+                requested_replay_ms: 12_345,
             })
             .unwrap();
         // A second begin cannot disturb the active session.
@@ -1153,57 +1127,36 @@ mod tests {
             Err(RecorderError::WrongId)
         ));
 
-        let replay = Recorder::replay_dir(&config).join("Replay_1.mkv");
-        let regular = Recorder::regular_dir(&config).join("Video_1.mkv");
-        touch(&replay);
-        touch(&regular);
-        // Noise: wrong kind, outside directory, and duplicates are ignored.
-        append_event(&config, "screenshot", &replay);
-        append_event(&config, "replay", &config.capture_root.join("Replay_x.mkv"));
-        append_event(&config, "replay", &replay);
-        append_event(&config, "replay", &replay);
-
+        // GSR has not applied the start yet, so it refuses this stop; the
+        // recorder retries until it is accepted.
         recorder.request_end(&id).unwrap();
-        // The regular post-save event arrives after the stop signal; its
-        // timestamp must clear the stop bound.
-        append_event(&config, "regular", &regular);
         assert!(recorder.is_ending());
-        let artifacts = end_artifacts(&mut recorder);
-        let artifacts = artifacts.expect("regular artifact");
-        assert_eq!(artifacts.replay.as_deref(), Some(replay.as_path()));
-        assert_eq!(artifacts.regular, regular);
-        assert_eq!(artifacts.requested_replay_ms, 12_000);
+        let artifacts = end_artifacts(&mut recorder).expect("regular artifact");
+        assert_eq!(
+            artifacts.replay,
+            Some(Recorder::replay_dir(&config).join("Replay_1.mkv"))
+        );
+        assert_eq!(
+            artifacts.regular,
+            Recorder::regular_dir(&config).join("Video_1.mkv")
+        );
         assert!(artifacts.regular_stopped_at_ms >= artifacts.regular_started_at_ms);
-        // A 12 s pre-roll asked GSR for its 30 s save, not the whole buffer.
-        let signals = received_signals(&config);
-        assert!(signals.contains(&(process::sigrtmin() + 2).to_string()));
-        assert!(!signals.contains(&"USR1".to_string()));
+        let requests = requests(&config);
+        assert_eq!(requests[0]["name"], "save-replay");
+        assert_eq!(requests[0]["data"]["seconds"], 13);
+        assert_eq!(requests[1]["name"], "start-replay-recording");
+        let stops = requests
+            .iter()
+            .filter(|request| request["name"] == "stop-replay-recording")
+            .count();
+        assert!(stops > 1, "the refused stop was not retried: {requests:?}");
         recorder.shutdown().unwrap();
     }
 
     #[test]
-    fn replay_save_is_the_smallest_covering_the_pre_roll() {
-        for (requested_replay_ms, save) in [
-            (0, ReplaySave::None),
-            (1, ReplaySave::Last10s),
-            (10_000, ReplaySave::Last10s),
-            (10_001, ReplaySave::Last30s),
-            (30_000, ReplaySave::Last30s),
-            (60_000, ReplaySave::Last60s),
-            (60_001, ReplaySave::Full),
-        ] {
-            assert_eq!(
-                ReplaySave::for_pre_roll(requested_replay_ms),
-                save,
-                "{requested_replay_ms}"
-            );
-        }
-    }
-
-    #[test]
-    fn zero_pre_roll_saves_nothing_and_ends_on_the_regular_event() {
+    fn zero_pre_roll_sends_no_save() {
         let mut recorder = Recorder::with_timeouts(Timeouts {
-            replay_event: Duration::from_secs(60),
+            replay_reply: Duration::from_secs(60),
             ..test_timeouts()
         });
         let config = test_config("no-replay");
@@ -1216,43 +1169,32 @@ mod tests {
                 requested_replay_ms: 0,
             })
             .unwrap();
-        // A replay event that belongs to nothing must not attach.
-        let replay = Recorder::replay_dir(&config).join("Replay_1.mkv");
-        let regular = Recorder::regular_dir(&config).join("Video_1.mkv");
-        touch(&replay);
-        touch(&regular);
-        append_event(&config, "replay", &replay);
         recorder.request_end(&id).unwrap();
-        append_event(&config, "regular", &regular);
-
-        // One poll resolves it: nothing waits out the replay deadline.
-        let artifacts = recorder
-            .poll(now_unix_ms())
-            .into_iter()
-            .find_map(|event| match event {
-                RecorderEvent::CaptureEnded { artifacts } => artifacts,
-                _ => None,
-            })
-            .expect("ended on the regular event");
+        // The stop reply alone resolves it; nothing waits out the replay wait
+        // or `end_artifacts`' own 5 s bound.
+        let started = Instant::now();
+        let artifacts = end_artifacts(&mut recorder).expect("regular artifact");
+        assert!(started.elapsed() < Duration::from_secs(4));
         assert_eq!(artifacts.replay, None);
-        assert_eq!(artifacts.regular, regular);
-        // Only the start/stop toggles reached GSR.
-        let toggle = process::sigrtmin().to_string();
-        let signals = received_signals(&config);
-        assert!(signals.contains(&toggle));
+        assert_eq!(
+            artifacts.regular,
+            Recorder::regular_dir(&config).join("Video_1.mkv")
+        );
         assert!(
-            signals.iter().all(|signal| *signal == toggle),
-            "{signals:?}"
+            requests(&config)
+                .iter()
+                .all(|request| request["name"] != "save-replay")
         );
         recorder.shutdown().unwrap();
     }
 
     #[test]
-    fn missing_replay_is_tolerated_and_missing_regular_is_an_error() {
+    fn save_error_is_regular_only_and_a_stuck_stop_replaces_the_child() {
         let mut recorder = Recorder::with_timeouts(test_timeouts());
         let config = test_config("missing");
         recorder.arm(&config).unwrap();
 
+        fs::write(config.data_dir.join("fake-no-replay"), "").unwrap();
         let id = RecordingId::new();
         recorder
             .begin(StartRequest {
@@ -1260,17 +1202,12 @@ mod tests {
                 requested_replay_ms: 5_000,
             })
             .unwrap();
-        let regular = Recorder::regular_dir(&config).join("Video_1.mkv");
-        touch(&regular);
         recorder.request_end(&id).unwrap();
-        // The regular post-save event arrives after the stop signal; its
-        // timestamp must clear the stop bound.
-        append_event(&config, "regular", &regular);
         let artifacts = end_artifacts(&mut recorder).expect("regular artifact");
         assert_eq!(artifacts.replay, None);
-        assert_eq!(artifacts.regular, regular);
 
-        // Second recording produces no regular event at all.
+        // A stop GSR never answers escalates to SIGINT, so the child goes.
+        fs::write(config.data_dir.join("fake-hold"), "").unwrap();
         let id = RecordingId::new();
         recorder
             .begin(StartRequest {
@@ -1279,11 +1216,7 @@ mod tests {
             })
             .unwrap();
         recorder.request_end(&id).unwrap();
-        assert!(
-            end_artifacts(&mut recorder).is_none(),
-            "a session with no regular event resolves to no artifacts"
-        );
-        // The toggle desynced, so the child is replaced, not reused.
+        assert!(end_artifacts(&mut recorder).is_none());
         assert!(matches!(
             recorder.begin(StartRequest {
                 id: RecordingId::new(),
@@ -1291,44 +1224,6 @@ mod tests {
             }),
             Err(RecorderError::NotArmed)
         ));
-        recorder.shutdown().unwrap();
-    }
-
-    #[test]
-    fn stale_same_directory_regular_does_not_win_and_current_artifacts_do() {
-        let mut recorder = Recorder::with_timeouts(test_timeouts());
-        let config = test_config("stale");
-        recorder.arm(&config).unwrap();
-
-        let id = RecordingId::new();
-        let started_at_ms = recorder
-            .begin(StartRequest {
-                id: id.clone(),
-                requested_replay_ms: 12_000,
-            })
-            .unwrap();
-        let stale_regular = Recorder::regular_dir(&config).join("Video_stale.mkv");
-        let current_regular = Recorder::regular_dir(&config).join("Video_current.mkv");
-        let replay = Recorder::replay_dir(&config).join("Replay_1.mkv");
-        touch(&stale_regular);
-        touch(&current_regular);
-        touch(&replay);
-        // A stale regular event from a previous session shares the canonical
-        // regular directory, so only its timestamp distinguishes it.
-        append_event_at(&config, 0, "regular", &stale_regular);
-        // The pre-roll event arrives exactly when the recording began.
-        append_event_at(&config, started_at_ms, "replay", &replay);
-
-        recorder.request_end(&id).unwrap();
-        let stopped_at_ms = recorder.ending.as_ref().unwrap().regular_stopped_at_ms;
-        // The current regular event arrives exactly at the stop bound; the
-        // inclusive lower bound must admit it.
-        append_event_at(&config, stopped_at_ms, "regular", &current_regular);
-
-        let artifacts = end_artifacts(&mut recorder).expect("current regular artifact");
-        assert_eq!(artifacts.regular, current_regular);
-        assert_eq!(artifacts.replay.as_deref(), Some(replay.as_path()));
-        assert_eq!(artifacts.regular_stopped_at_ms, stopped_at_ms);
         recorder.shutdown().unwrap();
     }
 

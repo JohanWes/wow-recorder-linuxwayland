@@ -3,8 +3,8 @@
 //! Checked Unix signal/termination helpers for spawned children, plus the
 //! bounded log tail their failures are reported with.
 //!
-//! Rust's `Child` can only SIGKILL, so GSR control signals and FFmpeg
-//! termination go through `libc::kill` here.
+//! Rust's `Child` can only SIGKILL, so the SIGINT that lets GSR and FFmpeg
+//! finish their files goes through `libc::kill` here.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -33,11 +33,6 @@ pub fn read_log_tail(path: &Path) -> String {
     let mut tail = Vec::new();
     let _ = file.read_to_end(&mut tail);
     String::from_utf8_lossy(&tail).into_owned()
-}
-
-/// The runtime SIGRTMIN value; GSR toggles regular recording with it.
-pub fn sigrtmin() -> i32 {
-    libc::SIGRTMIN()
 }
 
 /// Send `signal` to a live child. Rejects a missing/zero PID and converts the

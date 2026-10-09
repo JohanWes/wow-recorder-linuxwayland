@@ -43,7 +43,7 @@ use tray_backend::{TrayBackend, TrayEvent};
 
 /// Everything `run` needs that is not the coordinator or the tray.
 pub struct ShellOptions {
-    /// Recorder diagnostics directory (`gsr.log`, events, hook, token).
+    /// Recorder diagnostics directory (`gsr.log`, `app.log`, token).
     pub data_dir: PathBuf,
     /// Fallback directory for "Open logs" when `data_dir` does not exist yet.
     pub config_dir: PathBuf,

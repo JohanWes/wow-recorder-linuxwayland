@@ -36,7 +36,7 @@ fn main() {
     // Claim the single instance before anything with side effects runs: a
     // second launcher must only activate the primary and exit, or it would
     // rotate the shared log, sweep live capture files into Recovery, and arm
-    // a second gpu-screen-recorder against the shared events file.
+    // a second gpu-screen-recorder against the shared IPC socket.
     let application = match ui::register(APP_ID) {
         Ok(ui::Registration::Primary(application)) => application,
         Ok(ui::Registration::Secondary(application)) => {

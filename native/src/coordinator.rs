@@ -35,7 +35,7 @@ use crate::media_jobs::{MediaConfig, MediaControl, MediaEvent, MediaJob, MediaWo
 use crate::parser::{CombatEvent, ParseTimeContext, ParsedEvent, PlayerObservationKind};
 use crate::recorder::{
     CaptureArtifacts, CaptureConfig, Recorder, RecorderError, RecorderEvent, RecordingMode,
-    ReplaySave, StartRequest, Timeouts,
+    StartRequest, Timeouts,
 };
 use crate::storage::{EntryUpdate, LibraryIndex, Storage, now_unix_ms};
 
@@ -202,8 +202,10 @@ impl Drop for CoordinatorHandle {
 #[derive(Clone, Debug)]
 pub struct Setup {
     pub config_path: PathBuf,
-    /// App-private directory for the recorder's token/hook/events files.
+    /// App-private directory for the recorder's token and log files.
     pub data_dir: PathBuf,
+    /// gpu-screen-recorder's IPC socket.
+    pub ipc_socket: PathBuf,
     pub gsr_binary: PathBuf,
     pub media: MediaConfig,
     /// Year used to expand the combat log's month/day timestamps.
@@ -221,11 +223,13 @@ impl Setup {
     pub fn from_environment() -> Result<Self, ConfigError> {
         let (year, utc_offset_minutes) = local_clock();
         let config_path = crate::config::config_path_from_environment()?;
+        let data_dir = config_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("recorder");
         Ok(Self {
-            data_dir: config_path
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join("recorder"),
+            ipc_socket: ipc_socket_path(&data_dir),
+            data_dir,
             config_path,
             gsr_binary: PathBuf::from("gpu-screen-recorder"),
             media: MediaConfig {
@@ -238,6 +242,19 @@ impl Setup {
             poll_interval: Duration::from_millis(50),
             test_duration: Duration::from_secs(5),
         })
+    }
+}
+
+/// gpu-screen-recorder's IPC socket. Flatpak gives each app a private runtime
+/// directory; `data_dir` is the last resort because a Unix socket path must
+/// stay within 107 bytes.
+fn ipc_socket_path(data_dir: &Path) -> PathBuf {
+    let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) else {
+        return data_dir.join("gsr.sock");
+    };
+    match std::env::var_os("FLATPAK_ID") {
+        Some(id) => runtime.join("app").join(id).join("gsr.sock"),
+        None => runtime.join("warcraft-recorder-gsr.sock"),
     }
 }
 
@@ -584,6 +601,7 @@ impl Coordinator {
         CaptureConfig {
             gsr_binary: self.setup.gsr_binary.clone(),
             data_dir: self.setup.data_dir.clone(),
+            ipc_socket: self.setup.ipc_socket.clone(),
             capture_root: capture_root(&self.config),
             settings: self.config.capture.clone(),
         }
@@ -883,7 +901,7 @@ impl Coordinator {
         tracing::info!(
             late_by_ms,
             requested_replay_ms,
-            save = ?ReplaySave::for_pre_roll(requested_replay_ms),
+            save_seconds = requested_replay_ms.div_ceil(1_000),
             "starting capture"
         );
         self.start_capture(draft, requested_replay_ms, RecordingMode::Automatic);
@@ -2176,6 +2194,7 @@ mod tests {
                 Setup {
                     config_path: root.join(CONFIG_FILENAME),
                     data_dir: root.join("recorder"),
+                    ipc_socket: root.join("recorder/gsr.sock"),
                     gsr_binary: PathBuf::from("true"),
                     media: MediaConfig::default(),
                     year: 2026,
@@ -2272,6 +2291,7 @@ mod tests {
                 Setup {
                     config_path: root.join(CONFIG_FILENAME),
                     data_dir: root.join("recorder"),
+                    ipc_socket: root.join("recorder/gsr.sock"),
                     gsr_binary: PathBuf::from("true"),
                     media: MediaConfig::default(),
                     year: 2026,
