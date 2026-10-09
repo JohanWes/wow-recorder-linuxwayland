@@ -207,7 +207,7 @@ impl Storage {
     fn load_sidecar(&self, path: &Path) -> Result<LibraryEntry, String> {
         // The meter is most of a sidecar and only the player needs it
         // (`load_meter`): compact native sidecars are read up to it, anything
-        // else is streamed past it.
+        // else is read whole and the meter is skipped while parsing.
         let sidecar = match read_native_head(path) {
             Some(sidecar) => sidecar,
             None => {
