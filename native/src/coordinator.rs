@@ -28,7 +28,7 @@ use crate::config::{Config, ConfigError, LayoutSettings, ValidationProblem};
 use crate::domain::{
     ActivityDetails, Category, CorrelatedActivity, DeathMarkerVisibility, GameFlavor, LibraryEntry,
     MarkerVisibility, MediaFacts, MeterData, Outcome, Problem, RecorderStatus, RecordingId,
-    RecoveryAction, StorageLimit, WorkKind, WorkProgress,
+    RecoveryAction, WorkKind, WorkProgress,
 };
 use crate::logwatch::LogTailer;
 use crate::media_jobs::{MediaConfig, MediaControl, MediaEvent, MediaJob, MediaWorker};
@@ -434,7 +434,7 @@ impl Coordinator {
             self.dirty = true;
             return;
         }
-        // One scan serves both the library and the sweep's references.
+        // One scan serves the library, the limit, and the sweep's references.
         self.rescan();
         let report = self.storage.sweep_orphans(&self.index);
         if !report.failures.is_empty() {
@@ -444,7 +444,6 @@ impl Coordinator {
                 Some(RecoveryAction::OpenLogs),
             );
         }
-        self.enforce_limit();
         self.dirty = true;
         // Show the library before arming: spawning gpu-screen-recorder waits
         // out a stability check, and there is no reason for the window to sit
@@ -1248,7 +1247,6 @@ impl Coordinator {
                     // The worker already wrote the sidecar: fold its entry
                     // into the index instead of re-parsing the library.
                     self.index.upsert_entry(*entry);
-                    self.recount();
                     self.enforce_limit();
                 }
                 MediaEvent::Failed { kind, message } => {
@@ -1396,7 +1394,7 @@ impl Coordinator {
             self.rescan();
         } else {
             self.index.remove_entries(&result.deleted);
-            self.recount();
+            self.enforce_limit();
         }
     }
 
@@ -1409,40 +1407,20 @@ impl Coordinator {
                 "recording skipped"
             );
         }
-        self.recount();
+        self.enforce_limit();
     }
 
-    fn recount(&mut self) {
-        self.storage_used_bytes = self
-            .index
-            .entries
-            .iter()
-            .map(|entry| {
-                let media =
-                    std::fs::metadata(&entry.media_path).map_or(0, |metadata| metadata.len());
-                let sidecar =
-                    std::fs::metadata(&entry.sidecar_path).map_or(0, |metadata| metadata.len());
-                media.saturating_add(sidecar)
-            })
-            .fold(0, u64::saturating_add);
-        self.dirty = true;
-    }
-
+    /// Evict down to the limit and recount the library's size; storage
+    /// treats Unlimited as count-only.
     fn enforce_limit(&mut self) {
-        let StorageLimit::Gib(_) = self.config.storage.limit else {
-            self.protected_over_limit = false;
-            return;
-        };
         let result = self
             .storage
             .enforce_limit(self.config.storage.limit, &self.index.entries);
         self.protected_over_limit = result.protected_over_limit;
         if result.partially_deleted {
-            // A sidecar outlived its media; only a rescan can reconcile.
+            // A sidecar outlived its media; only a rescan can reconcile. The
+            // rescan skips that sidecar, so this does not repeat.
             self.rescan();
-            return;
-        }
-        if result.evicted.is_empty() {
             return;
         }
         self.index.remove_entries(&result.evicted);
@@ -1956,30 +1934,11 @@ fn local_clock() -> (i32, i32) {
     let seconds = now_unix_ms().div_euclid(1_000) as libc::time_t;
     let mut local = unsafe { std::mem::zeroed::<libc::tm>() };
     // `localtime_r` follows the system's configured zone, including DST.
+    // Should it fail, UTC (offset zero) stands in.
     if unsafe { libc::localtime_r(&seconds, &mut local) }.is_null() {
-        return (local_year(), 0);
+        unsafe { libc::gmtime_r(&seconds, &mut local) };
     }
-    (local.tm_year + 1900, utc_offset_minutes(local.tm_gmtoff))
-}
-
-fn utc_offset_minutes(seconds: libc::c_long) -> i32 {
-    (seconds / 60) as i32
-}
-
-fn local_year() -> i32 {
-    // Days since the epoch to a civil year, without pulling in a date crate.
-    let days = now_unix_ms().div_euclid(86_400_000);
-    let mut year = 1970;
-    let mut remaining = days;
-    loop {
-        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-        let length = if leap { 366 } else { 365 };
-        if remaining < length {
-            return year;
-        }
-        remaining -= length;
-        year += 1;
-    }
+    (local.tm_year + 1900, (local.tm_gmtoff / 60) as i32)
 }
 
 /// The minimum parsed events that drive one category through the activity
