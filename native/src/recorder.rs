@@ -699,6 +699,7 @@ impl Recorder {
                         let now = Instant::now();
                         ending.regular_deadline = now;
                         ending.active.replay_deadline = now;
+                        ending.sigint_sent = true;
                     }
                     events.push(RecorderEvent::ChildExited {
                         code: status.code(),
