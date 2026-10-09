@@ -3,8 +3,9 @@
 //! gpu-screen-recorder lifecycle adapter.
 //!
 //! One long-lived GSR replay-buffer child, at most one active recording, and
-//! the signal/hook protocol: SIGUSR1 saves the replay pre-roll, SIGRTMIN
-//! toggles the regular recording, and a generated `-sc` hook script appends
+//! the signal/hook protocol: a save signal sized to the pre-roll (see
+//! `ReplaySave`) saves the replay, SIGRTMIN toggles the regular recording, and
+//! a generated `-sc` hook script appends
 //! `epoch_ms<TAB>kind<TAB>path` records that `poll`/`end` correlate against the
 //! configured replay/regular directories.
 //!
@@ -56,6 +57,41 @@ pub struct StartRequest {
     pub id: RecordingId,
     /// Detection delay plus lead-in, already clamped by the coordinator.
     pub requested_replay_ms: u64,
+}
+
+/// The smallest GSR replay save covering a pre-roll. GSR adds its keyframe
+/// interval to a partial save, so each one holds at least its nominal length
+/// and the finalize trim stays exact. Saving the whole buffer only to keep a
+/// few seconds would write hundreds of megabytes per capture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplaySave {
+    None,
+    Last10s,
+    Last30s,
+    Last60s,
+    Full,
+}
+
+impl ReplaySave {
+    pub fn for_pre_roll(requested_replay_ms: u64) -> Self {
+        match requested_replay_ms {
+            0 => Self::None,
+            1..=10_000 => Self::Last10s,
+            10_001..=30_000 => Self::Last30s,
+            30_001..=60_000 => Self::Last60s,
+            _ => Self::Full,
+        }
+    }
+
+    fn signal(self) -> Option<i32> {
+        match self {
+            Self::None => None,
+            Self::Last10s => Some(process::sigrtmin() + 1),
+            Self::Last30s => Some(process::sigrtmin() + 2),
+            Self::Last60s => Some(process::sigrtmin() + 3),
+            Self::Full => Some(libc::SIGUSR1),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,7 +177,7 @@ pub enum RecorderEvent {
 pub struct Timeouts {
     /// Post-spawn stability check before arm is considered successful.
     pub arm_stability: Duration,
-    /// Wait for the hook's replay event after SIGUSR1.
+    /// Wait for the hook's replay event after the save signal.
     pub replay_event: Duration,
     /// Wait for the hook's regular event after the stop SIGRTMIN.
     pub regular_event: Duration,
@@ -183,7 +219,9 @@ struct ActiveCapture {
     id: RecordingId,
     requested_replay_ms: u64,
     regular_started_at_ms: i64,
-    replay_deadline: Instant,
+    /// `None` when no replay save was requested: the end resolves on the
+    /// regular event alone.
+    replay_deadline: Option<Instant>,
 }
 
 /// A requested end whose hook events have not all arrived yet. `poll` resolves
@@ -387,9 +425,9 @@ impl Recorder {
         Ok(())
     }
 
-    /// Register the replay wait, save the pre-roll (SIGUSR1), and start the
-    /// regular recording (SIGRTMIN). Never waits for media. Returns the
-    /// regular recording's wall-clock start.
+    /// Register the replay wait, save the pre-roll (`ReplaySave`, none for a
+    /// zero pre-roll), and start the regular recording (SIGRTMIN). Never waits
+    /// for media. Returns the regular recording's wall-clock start.
     pub fn begin(&mut self, request: StartRequest) -> Result<i64, RecorderError> {
         // A pending end still owns the hook events GSR has yet to write, and
         // `resolve_end` clears whatever is left over. Starting here would let
@@ -401,14 +439,17 @@ impl Recorder {
         }
         let child = self.live_child()?;
         let regular_started_at_ms = now_unix_ms();
-        process::send_signal(child, libc::SIGUSR1)?;
+        let save = ReplaySave::for_pre_roll(request.requested_replay_ms).signal();
+        if let Some(signal) = save {
+            process::send_signal(child, signal)?;
+        }
         process::send_signal(child, process::sigrtmin())?;
         self.last_toggle_at = Some(Instant::now());
         self.active = Some(ActiveCapture {
             id: request.id,
             requested_replay_ms: request.requested_replay_ms,
             regular_started_at_ms,
-            replay_deadline: Instant::now() + self.timeouts.replay_event,
+            replay_deadline: save.map(|_| Instant::now() + self.timeouts.replay_event),
         });
         Ok(regular_started_at_ms)
     }
@@ -496,7 +537,7 @@ impl Recorder {
 
     /// One nonblocking step of a requested end. The regular recording is
     /// awaited first against its own deadline, then the replay pre-roll
-    /// against the absolute deadline taken at `begin`.
+    /// against the absolute deadline taken at `begin`, if one was saved.
     fn poll_pending_end(&mut self, events: &mut Vec<RecorderEvent>) {
         let Some(config) = self.ending.as_ref().map(|ending| ending.config.clone()) else {
             return;
@@ -546,18 +587,17 @@ impl Recorder {
             }
         }
 
-        let replay_deadline = self
+        let active = &self
             .ending
             .as_ref()
             .expect("regular resolution keeps the pending end")
-            .active
-            .replay_deadline;
-        let replay_bound = self
-            .ending
-            .as_ref()
-            .expect("regular resolution keeps the pending end")
-            .active
-            .regular_started_at_ms;
+            .active;
+        // Without a save, any replay event is noise for `resolve_end`.
+        let Some(replay_deadline) = active.replay_deadline else {
+            self.resolve_end(None, events);
+            return;
+        };
+        let replay_bound = active.regular_started_at_ms;
         let replay = self.take_event("replay", &Self::replay_dir(&config), replay_bound);
         if replay.is_none() && now < replay_deadline {
             return;
@@ -706,7 +746,7 @@ impl Recorder {
                     if let Some(ending) = self.ending.as_mut() {
                         let now = Instant::now();
                         ending.regular_deadline = now;
-                        ending.active.replay_deadline = now;
+                        ending.active.replay_deadline = ending.active.replay_deadline.map(|_| now);
                         ending.sigint_sent = true;
                     }
                     events.push(RecorderEvent::ChildExited {
@@ -1029,6 +1069,25 @@ mod tests {
         fs::write(path, b"media").unwrap();
     }
 
+    /// Signals the fake GSR has handled, once it has handled the start toggle.
+    /// A save signal is sent before the toggle, so it shows up by then too.
+    fn received_signals(config: &CaptureConfig) -> Vec<String> {
+        let path = config.data_dir.join("fake-signals");
+        let toggle = process::sigrtmin().to_string();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let signals: Vec<String> = fs::read_to_string(&path)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            if signals.contains(&toggle) || Instant::now() >= deadline {
+                return signals;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Drive a requested end to its bounded conclusion, the way shutdown does,
     /// and return whatever artifacts it produced.
     fn end_artifacts(recorder: &mut Recorder) -> Option<CaptureArtifacts> {
@@ -1115,6 +1174,76 @@ mod tests {
         assert_eq!(artifacts.regular, regular);
         assert_eq!(artifacts.requested_replay_ms, 12_000);
         assert!(artifacts.regular_stopped_at_ms >= artifacts.regular_started_at_ms);
+        // A 12 s pre-roll asked GSR for its 30 s save, not the whole buffer.
+        let signals = received_signals(&config);
+        assert!(signals.contains(&(process::sigrtmin() + 2).to_string()));
+        assert!(!signals.contains(&"USR1".to_string()));
+        recorder.shutdown().unwrap();
+    }
+
+    #[test]
+    fn replay_save_is_the_smallest_covering_the_pre_roll() {
+        for (requested_replay_ms, save) in [
+            (0, ReplaySave::None),
+            (1, ReplaySave::Last10s),
+            (10_000, ReplaySave::Last10s),
+            (10_001, ReplaySave::Last30s),
+            (30_000, ReplaySave::Last30s),
+            (60_000, ReplaySave::Last60s),
+            (60_001, ReplaySave::Full),
+        ] {
+            assert_eq!(
+                ReplaySave::for_pre_roll(requested_replay_ms),
+                save,
+                "{requested_replay_ms}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_pre_roll_saves_nothing_and_ends_on_the_regular_event() {
+        let mut recorder = Recorder::with_timeouts(Timeouts {
+            replay_event: Duration::from_secs(60),
+            ..test_timeouts()
+        });
+        let config = test_config("no-replay");
+        recorder.arm(&config).unwrap();
+
+        let id = RecordingId::new();
+        recorder
+            .begin(StartRequest {
+                id: id.clone(),
+                requested_replay_ms: 0,
+            })
+            .unwrap();
+        // A replay event that belongs to nothing must not attach.
+        let replay = Recorder::replay_dir(&config).join("Replay_1.mkv");
+        let regular = Recorder::regular_dir(&config).join("Video_1.mkv");
+        touch(&replay);
+        touch(&regular);
+        append_event(&config, "replay", &replay);
+        recorder.request_end(&id).unwrap();
+        append_event(&config, "regular", &regular);
+
+        // One poll resolves it: nothing waits out the replay deadline.
+        let artifacts = recorder
+            .poll(now_unix_ms())
+            .into_iter()
+            .find_map(|event| match event {
+                RecorderEvent::CaptureEnded { artifacts } => artifacts,
+                _ => None,
+            })
+            .expect("ended on the regular event");
+        assert_eq!(artifacts.replay, None);
+        assert_eq!(artifacts.regular, regular);
+        // Only the start/stop toggles reached GSR.
+        let toggle = process::sigrtmin().to_string();
+        let signals = received_signals(&config);
+        assert!(signals.contains(&toggle));
+        assert!(
+            signals.iter().all(|signal| *signal == toggle),
+            "{signals:?}"
+        );
         recorder.shutdown().unwrap();
     }
 
