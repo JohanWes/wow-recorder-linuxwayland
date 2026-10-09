@@ -30,13 +30,16 @@ use crate::storage::{CombinedMedia, Storage, now_unix_ms, sanitize_name, unique_
 /// Emitting progress more often is visually indistinguishable but makes every
 /// GTK snapshot repeat work.
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
+/// An idle worker only waits for jobs (which wake it at once) and shutdown,
+/// so it need not check the control channel every poll interval.
+const IDLE_WAIT: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug)]
 pub struct MediaConfig {
     pub ffmpeg: PathBuf,
     /// Local UTC offset for generated display names, supplied by the coordinator.
     pub utc_offset_minutes: i32,
-    /// Poll interval for control and FFmpeg progress.
+    /// Poll interval for control and FFmpeg progress while FFmpeg runs.
     pub poll_interval: Duration,
     /// Grace an in-flight automatic finalization gets after a shutdown request.
     pub finalize_grace: Duration,
@@ -139,7 +142,7 @@ impl MediaWorker {
                 }
                 break;
             }
-            match self.jobs.recv_timeout(self.config.poll_interval) {
+            match self.jobs.recv_timeout(IDLE_WAIT) {
                 Ok(job) => self.run_job(job),
                 Err(RecvTimeoutError::Timeout) => self.observe_shutdown(),
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -245,15 +248,14 @@ impl MediaWorker {
         artifacts: &CaptureArtifacts,
         final_temp: &Path,
     ) -> Result<Option<u64>, String> {
-        let regular_only = |worker: &Self| -> Result<Option<u64>, String> {
-            let _ = worker;
+        let regular_only = || -> Result<Option<u64>, String> {
             fs::copy(&artifacts.regular, final_temp)
                 .map(|_| Some(0))
                 .map_err(|error| format!("copy regular recording: {error}"))
         };
 
         let Some(replay) = artifacts.replay.as_deref().filter(|path| path.exists()) else {
-            return regular_only(self);
+            return regular_only();
         };
 
         let trim_temp = self
@@ -274,9 +276,12 @@ impl MediaWorker {
                 let _ = fs::remove_file(&trim_temp);
                 return Ok(None);
             }
-            _ => {
+            other => {
+                if let FfmpegOutcome::Failed { message } = other {
+                    tracing::warn!(%message, "replay trim failed; keeping the regular recording only");
+                }
                 let _ = fs::remove_file(&trim_temp);
-                return regular_only(self);
+                return regular_only();
             }
         };
 
@@ -305,7 +310,7 @@ impl MediaWorker {
         if let Err(error) = fs::write(&list_temp, list) {
             let _ = fs::remove_file(&trim_temp);
             let _ = fs::remove_file(&list_temp);
-            return regular_only(self).map_err(|_| format!("write concat list: {error}"));
+            return regular_only().map_err(|_| format!("write concat list: {error}"));
         }
 
         let concat = self.run_ffmpeg(
@@ -319,7 +324,10 @@ impl MediaWorker {
         match concat {
             FfmpegOutcome::Done { .. } => Ok(Some(actual_replay_ms)),
             FfmpegOutcome::Cancelled => Ok(None),
-            FfmpegOutcome::Failed { .. } => regular_only(self),
+            FfmpegOutcome::Failed { message } => {
+                tracing::warn!(%message, "replay concat failed; keeping the regular recording only");
+                regular_only()
+            }
         }
     }
 
@@ -431,85 +439,76 @@ impl MediaWorker {
     }
 
     /// Spawn FFmpeg and poll it. Progress and stderr go to exclusively created
-    /// per-job files (never pipes); control is observed within one interval.
+    /// per-job files (never pipes), removed afterwards; control is observed
+    /// within one interval.
     fn run_ffmpeg(
         &mut self,
         kind: WorkKind,
         args: Vec<String>,
         total_ms: Option<u64>,
     ) -> FfmpegOutcome {
-        let progress_path = match self.job_file("progress", "txt") {
-            Ok(path) => path,
-            Err(error) => {
-                return FfmpegOutcome::Failed {
-                    message: format!("progress file: {error}"),
-                };
+        let progress_path = self.job_file("progress", "txt");
+        let log_path = self.job_file("ffmpeg", "log");
+        let outcome = match (&progress_path, &log_path) {
+            (Ok(progress_path), Ok(log_path)) => {
+                self.spawn_and_poll(kind, &args, progress_path, log_path, total_ms)
             }
+            (Err(error), _) | (_, Err(error)) => FfmpegOutcome::Failed {
+                message: format!("FFmpeg job file: {error}"),
+            },
         };
-        let log_path = match self.job_file("ffmpeg", "log") {
-            Ok(path) => path,
-            Err(error) => {
-                let _ = fs::remove_file(&progress_path);
-                return FfmpegOutcome::Failed {
-                    message: format!("log file: {error}"),
-                };
-            }
-        };
+        for path in [progress_path, log_path].into_iter().flatten() {
+            let _ = fs::remove_file(path);
+        }
+        outcome
+    }
 
-        let log = match File::create(&log_path) {
-            Ok(file) => file,
-            Err(error) => {
-                let _ = fs::remove_file(&progress_path);
-                let _ = fs::remove_file(&log_path);
-                return FfmpegOutcome::Failed {
-                    message: format!("log file: {error}"),
-                };
-            }
-        };
-
-        let mut command = Command::new(&self.config.ffmpeg);
-        command
-            // The GTK process constrains allocator arenas for its RSS gate;
-            // media tools must retain their own defaults.
-            .env_remove("MALLOC_ARENA_MAX")
-            .arg("-progress")
-            .arg(&progress_path)
-            .arg("-nostats")
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(log));
-
-        let mut child = match command.spawn() {
+    fn spawn_and_poll(
+        &mut self,
+        kind: WorkKind,
+        args: &[String],
+        progress_path: &Path,
+        log_path: &Path,
+        total_ms: Option<u64>,
+    ) -> FfmpegOutcome {
+        let spawned = OpenOptions::new()
+            .write(true)
+            .open(log_path)
+            .and_then(|log| {
+                Command::new(&self.config.ffmpeg)
+                    // The GTK process constrains allocator arenas for its RSS
+                    // gate; media tools must retain their own defaults.
+                    .env_remove("MALLOC_ARENA_MAX")
+                    .arg("-progress")
+                    .arg(progress_path)
+                    .arg("-nostats")
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::from(log))
+                    .spawn()
+            });
+        let mut child = match spawned {
             Ok(child) => child,
             Err(error) => {
-                let _ = fs::remove_file(&progress_path);
-                let _ = fs::remove_file(&log_path);
                 return FfmpegOutcome::Failed {
                     message: format!("spawn FFmpeg: {error}"),
                 };
             }
         };
-
-        let outcome = self.poll_child(kind, &mut child, &progress_path, total_ms);
-        let status_message = match &outcome {
+        match self.poll_child(kind, &mut child, progress_path, total_ms) {
             FfmpegOutcome::Failed { message } => {
-                let tail = process::read_log_tail(&log_path);
+                let tail = process::read_log_tail(log_path);
                 let tail = tail.trim();
-                Some(if tail.is_empty() {
-                    message.clone()
-                } else {
-                    format!("{message}: {tail}")
-                })
+                FfmpegOutcome::Failed {
+                    message: if tail.is_empty() {
+                        message
+                    } else {
+                        format!("{message}: {tail}")
+                    },
+                }
             }
-            _ => None,
-        };
-        let _ = fs::remove_file(&progress_path);
-        let _ = fs::remove_file(&log_path);
-
-        match (outcome, status_message) {
-            (FfmpegOutcome::Failed { .. }, Some(message)) => FfmpegOutcome::Failed { message },
-            (other, _) => other,
+            other => other,
         }
     }
 
@@ -523,36 +522,28 @@ impl MediaWorker {
         let mut progress = ProgressReader::new(progress_path);
         let mut out_time_ms = 0u64;
         let mut last_progress_emit = Instant::now() - PROGRESS_EMIT_INTERVAL;
-        let mut interrupt_at = self.shutdown_at.map(|shutdown_at| match kind {
-            WorkKind::Finalize => shutdown_at + self.config.finalize_grace,
-            _ => Instant::now(),
-        });
+        let grace = match kind {
+            WorkKind::Finalize => self.config.finalize_grace,
+            _ => Duration::ZERO,
+        };
+        let mut interrupt_at = self.shutdown_at.map(|shutdown_at| shutdown_at + grace);
 
         loop {
             if interrupt_at.is_some() {
-                // Shutdown is one-shot; polling a dead channel would busy-spin.
+                // Shutdown is one-shot: polling a dead channel would busy-spin
+                // and must not keep pushing the deadline into the future.
                 std::thread::sleep(self.config.poll_interval);
             } else {
-                match self.control.recv_timeout(self.config.poll_interval) {
+                let shutdown = match self.control.recv_timeout(self.config.poll_interval) {
                     Ok(MediaControl::Shutdown {
                         pending_finalizations,
-                    }) => {
-                        self.begin_shutdown(pending_finalizations);
-                        // Set once: a disconnected control channel must not keep
-                        // pushing the deadline into the future.
-                        interrupt_at = Some(match kind {
-                            WorkKind::Finalize => Instant::now() + self.config.finalize_grace,
-                            _ => Instant::now(),
-                        });
-                    }
-                    Err(RecvTimeoutError::Disconnected) => {
-                        self.begin_shutdown(Vec::new());
-                        interrupt_at = Some(match kind {
-                            WorkKind::Finalize => Instant::now() + self.config.finalize_grace,
-                            _ => Instant::now(),
-                        });
-                    }
-                    Err(RecvTimeoutError::Timeout) => {}
+                    }) => Some(pending_finalizations),
+                    Err(RecvTimeoutError::Disconnected) => Some(Vec::new()),
+                    Err(RecvTimeoutError::Timeout) => None,
+                };
+                if let Some(pending_finalizations) = shutdown {
+                    self.begin_shutdown(pending_finalizations);
+                    interrupt_at = self.shutdown_at.map(|shutdown_at| shutdown_at + grace);
                 }
             }
 
@@ -659,24 +650,23 @@ impl ProgressReader {
     }
 }
 
+/// Stream-copy `input` to `output`, with `before` as input options and
+/// `after` as extra output options.
+fn copy_args(before: &[&str], input: &Path, after: &[&str], output: &Path) -> Vec<String> {
+    let input = input.to_string_lossy();
+    let output = output.to_string_lossy();
+    let mut args = vec!["-nostdin", "-hide_banner"];
+    args.extend(before);
+    args.extend(["-i", &input]);
+    args.extend(after);
+    args.extend(["-c:v", "copy", "-c:a", "copy"]);
+    args.extend(["-avoid_negative_ts", "make_zero", "-y", &output]);
+    args.into_iter().map(str::to_owned).collect()
+}
+
 /// Take the final `seconds` of the replay without needing its duration.
 fn trim_args(replay: &Path, seconds: u64, output: &Path) -> Vec<String> {
-    vec![
-        "-nostdin".to_owned(),
-        "-hide_banner".to_owned(),
-        "-sseof".to_owned(),
-        format!("-{seconds}"),
-        "-i".to_owned(),
-        replay.to_string_lossy().into_owned(),
-        "-c:v".to_owned(),
-        "copy".to_owned(),
-        "-c:a".to_owned(),
-        "copy".to_owned(),
-        "-avoid_negative_ts".to_owned(),
-        "make_zero".to_owned(),
-        "-y".to_owned(),
-        output.to_string_lossy().into_owned(),
-    ]
+    copy_args(&["-sseof", &format!("-{seconds}")], replay, &[], output)
 }
 
 /// Remux to the null sink purely to learn a file's real duration; the bundled
@@ -697,48 +687,22 @@ fn measure_args(media: &Path) -> Vec<String> {
 }
 
 fn concat_args(list: &Path, output: &Path) -> Vec<String> {
-    vec![
-        "-nostdin".to_owned(),
-        "-hide_banner".to_owned(),
-        "-f".to_owned(),
-        "concat".to_owned(),
-        "-safe".to_owned(),
-        "0".to_owned(),
-        "-i".to_owned(),
-        list.to_string_lossy().into_owned(),
-        "-c:v".to_owned(),
-        "copy".to_owned(),
-        "-c:a".to_owned(),
-        "copy".to_owned(),
-        "-avoid_negative_ts".to_owned(),
-        "make_zero".to_owned(),
-        "-y".to_owned(),
-        output.to_string_lossy().into_owned(),
-    ]
+    copy_args(&["-f", "concat", "-safe", "0"], list, &[], output)
 }
 
 /// Input-side seek plus output-side duration, with a pure stream copy.
 fn clip_args(source: &Path, start_ms: u64, duration_ms: u64, output: &Path) -> Vec<String> {
-    vec![
-        "-nostdin".to_owned(),
-        "-hide_banner".to_owned(),
-        "-ss".to_owned(),
-        format_seconds(start_ms),
-        "-i".to_owned(),
-        source.to_string_lossy().into_owned(),
-        "-t".to_owned(),
-        format_seconds(duration_ms),
-        "-c:v".to_owned(),
-        "copy".to_owned(),
-        "-c:a".to_owned(),
-        "copy".to_owned(),
-        "-avoid_negative_ts".to_owned(),
-        "make_zero".to_owned(),
-        "-movflags".to_owned(),
-        "+faststart".to_owned(),
-        "-y".to_owned(),
-        output.to_string_lossy().into_owned(),
-    ]
+    copy_args(
+        &["-ss", &format_seconds(start_ms)],
+        source,
+        &[
+            "-t",
+            &format_seconds(duration_ms),
+            "-movflags",
+            "+faststart",
+        ],
+        output,
+    )
 }
 
 fn clip_timeline(timeline: &[TimelineItem], start_ms: u64, end_ms: u64) -> Vec<TimelineItem> {

@@ -10,11 +10,6 @@
 #   chatty  stream stderr and progress until SIGINT
 set -u
 
-if [ "${1:-}" = "-version" ] || [ "${1:-}" = "--version" ]; then
-  echo "fake ffmpeg version 0"
-  exit 0
-fi
-
 progress=""
 output=""
 prev=""
@@ -29,8 +24,6 @@ done
 dir=$(dirname -- "${progress:-.}")
 mode="ok"
 [ -f "$dir/fake-ffmpeg-mode" ] && mode=$(cat "$dir/fake-ffmpeg-mode")
-out_us=3000000
-[ -f "$dir/fake-ffmpeg-out-us" ] && out_us=$(cat "$dir/fake-ffmpeg-out-us")
 
 if [ -n "$progress" ]; then
   : > "$dir/fake-ffmpeg-argv.txt"
@@ -42,7 +35,7 @@ fi
 case "$mode" in
   ok)
     printf 'fake ffmpeg media' > "$output"
-    printf 'frame=1\nout_time_us=%s\nprogress=end\n' "$out_us" >> "$progress"
+    printf 'frame=1\nout_time_us=3000000\nprogress=end\n' >> "$progress"
     exit 0
     ;;
   fail)
