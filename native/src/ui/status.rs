@@ -209,13 +209,77 @@ pub(crate) fn shell_action(action: RecoveryAction) -> ShellAction {
     }
 }
 
+/// A label counting up from a wall-clock anchor. It renders itself once a
+/// second, and only while it has an anchor and is on screen, so a window
+/// hidden to the tray costs no wakeups; the coordinator never publishes
+/// per-second snapshots for this.
+pub struct ElapsedLabel {
+    pub label: gtk4::Label,
+    anchor: Rc<Cell<Option<i64>>>,
+    running: Rc<Cell<bool>>,
+}
+
+impl ElapsedLabel {
+    pub fn new(tooltip: &str) -> Self {
+        let label = gtk4::Label::new(None);
+        label.add_css_class("monospace");
+        label.set_tooltip_text(Some(tooltip));
+        label.set_visible(false);
+        let anchor: Rc<Cell<Option<i64>>> = Rc::default();
+        let running: Rc<Cell<bool>> = Rc::default();
+        {
+            let anchor = Rc::clone(&anchor);
+            let running = Rc::clone(&running);
+            label.connect_map(move |label| tick(label, &anchor, &running));
+        }
+        Self {
+            label,
+            anchor,
+            running,
+        }
+    }
+
+    pub fn set_anchor(&self, anchor: Option<i64>) {
+        self.anchor.set(anchor);
+        self.label.set_visible(anchor.is_some());
+        tick(&self.label, &self.anchor, &self.running);
+    }
+}
+
+/// Render the label now and keep one one-second timeout rendering it until
+/// the anchor goes away or the label is unmapped; mapping restarts it.
+fn tick(label: &gtk4::Label, anchor: &Rc<Cell<Option<i64>>>, running: &Rc<Cell<bool>>) {
+    let Some(anchor_ms) = anchor.get() else {
+        return;
+    };
+    label.set_label(&elapsed_label(anchor_ms, now_unix_ms()));
+    if !label.is_mapped() || running.replace(true) {
+        return;
+    }
+    let anchor = Rc::clone(anchor);
+    let running = Rc::clone(running);
+    let label = label.downgrade();
+    gtk4::glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
+        match (label.upgrade(), anchor.get()) {
+            (Some(label), Some(anchor_ms)) if label.is_mapped() => {
+                label.set_label(&elapsed_label(anchor_ms, now_unix_ms()));
+                gtk4::glib::ControlFlow::Continue
+            }
+            _ => {
+                running.set(false);
+                gtk4::glib::ControlFlow::Break
+            }
+        }
+    });
+}
+
 /// The status card widget. All behavior arrives through `apply`; all outgoing
 /// intent goes through the one `ActionSink`.
 pub struct StatusCard {
     pub widget: gtk4::Box,
     light: gtk4::Box,
     title: gtk4::Label,
-    elapsed: gtk4::Label,
+    elapsed: ElapsedLabel,
     spinner: libadwaita::Spinner,
     detail: gtk4::Label,
     force_end: gtk4::Button,
@@ -224,8 +288,6 @@ pub struct StatusCard {
     problems: gtk4::Box,
     tray_note: gtk4::Label,
     sink: ActionSink,
-    elapsed_anchor: Rc<Cell<Option<i64>>>,
-    timer_running: Rc<Cell<bool>>,
     /// What the two rebuilt sections were last built from. Rebuilding them per
     /// snapshot throws away GTK objects, relayouts the rail, and collapses any
     /// problem row the user had expanded.
@@ -255,9 +317,7 @@ impl StatusCard {
         title.set_hexpand(true);
         title.set_xalign(0.0);
 
-        let elapsed = gtk4::Label::new(None);
-        elapsed.add_css_class("monospace");
-        elapsed.set_tooltip_text(Some("Elapsed recording time"));
+        let elapsed = ElapsedLabel::new("Elapsed recording time");
 
         let spinner = libadwaita::Spinner::new();
         spinner.set_visible(false);
@@ -265,7 +325,7 @@ impl StatusCard {
         let title_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
         title_row.append(&light);
         title_row.append(&title);
-        title_row.append(&elapsed);
+        title_row.append(&elapsed.label);
         title_row.append(&spinner);
 
         let detail = gtk4::Label::new(None);
@@ -334,15 +394,13 @@ impl StatusCard {
             problems,
             tray_note,
             sink,
-            elapsed_anchor: Rc::new(Cell::new(None)),
-            timer_running: Rc::new(Cell::new(false)),
             rendered_warnings: RefCell::new(Vec::new()),
             rendered_problems: RefCell::new(Vec::new()),
             rendered_tone: Cell::new(None),
         }
     }
 
-    pub fn apply(&self, snapshot: &AppSnapshot, now_unix_ms: i64) {
+    pub fn apply(&self, snapshot: &AppSnapshot) {
         let view = view(snapshot);
 
         if self.rendered_tone.replace(Some(view.tone)) != Some(view.tone) {
@@ -365,14 +423,7 @@ impl StatusCard {
         self.spinner.set_visible(view.show_spinner);
         self.force_end.set_visible(view.show_force_end);
 
-        self.elapsed_anchor.set(view.elapsed_anchor_ms);
-        if let Some(anchor) = view.elapsed_anchor_ms {
-            self.elapsed.set_label(&elapsed_label(anchor, now_unix_ms));
-            self.elapsed.set_visible(true);
-            self.ensure_timer();
-        } else {
-            self.elapsed.set_visible(false);
-        }
+        self.elapsed.set_anchor(view.elapsed_anchor_ms);
 
         let warnings = advanced_logging_warnings(snapshot);
         if *self.rendered_warnings.borrow() != warnings {
@@ -445,28 +496,6 @@ impl StatusCard {
 
     pub fn set_tray_available(&self, available: bool) {
         self.tray_note.set_visible(!available);
-    }
-
-    /// One one-second timeout renders the elapsed anchor while it is visible.
-    fn ensure_timer(&self) {
-        if self.timer_running.replace(true) {
-            return;
-        }
-        let anchor = Rc::clone(&self.elapsed_anchor);
-        let timer_running = Rc::clone(&self.timer_running);
-        let elapsed = self.elapsed.downgrade();
-        gtk4::glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
-            let Some(elapsed) = elapsed.upgrade() else {
-                timer_running.set(false);
-                return gtk4::glib::ControlFlow::Break;
-            };
-            let Some(anchor_ms) = anchor.get() else {
-                timer_running.set(false);
-                return gtk4::glib::ControlFlow::Break;
-            };
-            elapsed.set_label(&elapsed_label(anchor_ms, now_unix_ms()));
-            gtk4::glib::ControlFlow::Continue
-        });
     }
 }
 

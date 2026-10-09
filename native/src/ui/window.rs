@@ -17,7 +17,6 @@ use warcraft_recorder::coordinator::{AppSnapshot, Command, CoordinatorHandle};
 use warcraft_recorder::domain::{Category, RecoveryAction};
 
 use warcraft_recorder::domain::RecorderStatus;
-use warcraft_recorder::storage::now_unix_ms;
 
 use super::library::{Library, Selection};
 use super::operational_actions::{
@@ -502,7 +501,7 @@ impl Shell {
             .set(snapshot.config.interface.minimize_to_tray);
 
         self.sidebar.apply(snapshot);
-        self.sidebar.status_card.apply(snapshot, now_unix_ms());
+        self.sidebar.status_card.apply(snapshot);
 
         let view = content_view(snapshot);
         self.title.set_title(&view.title);
@@ -511,7 +510,7 @@ impl Shell {
         // by the library rebuild resolve against current entries.
         self.player.apply_snapshot(snapshot);
         self.library.apply(snapshot);
-        self.manual_bar.apply(snapshot, now_unix_ms());
+        self.manual_bar.apply(snapshot);
         self.notice_new_clips(snapshot);
 
         *self.latest_snapshot.borrow_mut() = Some(Arc::clone(snapshot));

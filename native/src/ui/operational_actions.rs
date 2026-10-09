@@ -18,7 +18,7 @@ use warcraft_recorder::coordinator::{AppSnapshot, Command};
 use warcraft_recorder::domain::{Category, RecorderStatus};
 use warcraft_recorder::storage::now_unix_ms;
 
-use super::status::elapsed_label;
+use super::status::ElapsedLabel;
 use super::{ActionSink, ShellAction, TEST_CATEGORIES};
 
 /// What the Manual toolbar shows, derived from one snapshot.
@@ -70,9 +70,7 @@ pub struct ManualBar {
     pub widget: gtk4::Box,
     start: gtk4::Button,
     stop: gtk4::Button,
-    elapsed: gtk4::Label,
-    elapsed_anchor: Rc<Cell<Option<i64>>>,
-    timer_running: Rc<Cell<bool>>,
+    elapsed: ElapsedLabel,
     was_active: Cell<bool>,
     /// Wall-clock time of the last Start click, to catch the coordinator's
     /// "could not be started" problem for the error bell.
@@ -95,14 +93,11 @@ impl ManualBar {
         stop.add_css_class("destructive-action");
         stop.set_tooltip_text(Some("Stop the manual recording"));
         stop.set_visible(false);
-        let elapsed = gtk4::Label::new(None);
-        elapsed.add_css_class("monospace");
-        elapsed.set_tooltip_text(Some("Elapsed manual recording time"));
-        elapsed.set_visible(false);
+        let elapsed = ElapsedLabel::new("Elapsed manual recording time");
 
         widget.append(&start);
         widget.append(&stop);
-        widget.append(&elapsed);
+        widget.append(&elapsed.label);
 
         let start_requested_ms: Rc<Cell<Option<i64>>> = Rc::new(Cell::new(None));
         let bar = Self {
@@ -110,8 +105,6 @@ impl ManualBar {
             start: start.clone(),
             stop: stop.clone(),
             elapsed,
-            elapsed_anchor: Rc::new(Cell::new(None)),
-            timer_running: Rc::new(Cell::new(false)),
             was_active: Cell::new(false),
             start_requested_ms: Rc::clone(&start_requested_ms),
         };
@@ -131,21 +124,13 @@ impl ManualBar {
         bar
     }
 
-    pub fn apply(&self, snapshot: &AppSnapshot, now_unix_ms: i64) {
+    pub fn apply(&self, snapshot: &AppSnapshot) {
         let view = manual_view(snapshot);
         self.widget.set_visible(view.visible);
         self.start.set_visible(!view.stop_visible);
         self.start.set_sensitive(view.start_enabled);
         self.stop.set_visible(view.stop_visible);
-
-        self.elapsed_anchor.set(view.elapsed_anchor_ms);
-        if let Some(anchor) = view.elapsed_anchor_ms {
-            self.elapsed.set_label(&elapsed_label(anchor, now_unix_ms));
-            self.elapsed.set_visible(true);
-            self.ensure_timer();
-        } else {
-            self.elapsed.set_visible(false);
-        }
+        self.elapsed.set_anchor(view.elapsed_anchor_ms);
 
         // Sound transitions: bell on start/stop, and on a failed start
         // reported by the coordinator after our request.
@@ -167,29 +152,6 @@ impl ManualBar {
                 bell(&self.widget);
             }
         }
-    }
-
-    /// One one-second timeout renders the elapsed anchor while visible,
-    /// exactly like the status card.
-    fn ensure_timer(&self) {
-        if self.timer_running.replace(true) {
-            return;
-        }
-        let anchor = Rc::clone(&self.elapsed_anchor);
-        let timer_running = Rc::clone(&self.timer_running);
-        let elapsed = self.elapsed.downgrade();
-        gtk4::glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
-            let Some(elapsed) = elapsed.upgrade() else {
-                timer_running.set(false);
-                return gtk4::glib::ControlFlow::Break;
-            };
-            let Some(anchor_ms) = anchor.get() else {
-                timer_running.set(false);
-                return gtk4::glib::ControlFlow::Break;
-            };
-            elapsed.set_label(&elapsed_label(anchor_ms, now_unix_ms()));
-            gtk4::glib::ControlFlow::Continue
-        });
     }
 }
 
