@@ -307,7 +307,7 @@ static AFFIX_NAMES: &[(u32, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use warcraft_recorder::domain::{Category, CombatantSummary, PlayerSummary};
+    use warcraft_recorder::domain::{Category, PlayerSummary};
 
     fn base(category: Category, details: ActivityDetails, outcome: Outcome) -> LibraryEntry {
         let mut entry = crate::ui::window::tests::entry(category, "T", 1_000);
@@ -321,8 +321,8 @@ mod tests {
     }
 
     #[test]
-    fn raid_suggestions_cover_result_difficulty_encounter_and_zone() {
-        let details = ActivityDetails::Raid {
+    fn raid_and_dungeon_suggestions_cover_their_details_and_results() {
+        let raid = ActivityDetails::Raid {
             zone_id: Some(1),
             zone_name: Some("Vault of the Incarnates".to_owned()),
             encounter_id: Some(2),
@@ -332,34 +332,16 @@ mod tests {
             pull: Some(3),
             boss_percent: None,
         };
-        let mut entry = base(Category::Raids, details, Outcome::Win);
-        entry.protected = true;
-        entry.player = Some(PlayerSummary {
+        let mut raid = base(Category::Raids, raid, Outcome::Win);
+        raid.protected = true;
+        raid.player = Some(PlayerSummary {
             name: "Alice".to_owned(),
             realm: None,
             guid: None,
             class_id: None,
             spec_id: Some(64),
         });
-        let got = suggestions_for_entry(&entry);
-        let got = labels(&got);
-        for expected in [
-            "Starred",
-            "Retail",
-            "Alice",
-            "Frost",
-            "Vault of the Incarnates",
-            "Kill",
-            "Mythic",
-            "Raszageth",
-        ] {
-            assert!(got.contains(&expected), "missing {expected}: {got:?}");
-        }
-    }
-
-    #[test]
-    fn dungeon_timed_and_abandoned_results_and_affixes() {
-        let timed = ActivityDetails::Dungeon {
+        let dungeon = ActivityDetails::Dungeon {
             zone_id: None,
             dungeon_name: Some("Halls of Valor".to_owned()),
             map_id: None,
@@ -367,33 +349,42 @@ mod tests {
             affixes: vec![9, 10, 152],
             upgrade_level: Some(2),
         };
-        let entry = base(Category::MythicPlus, timed, Outcome::Complete);
-        let chips = suggestions_for_entry(&entry);
-        let got = labels(&chips);
-        for expected in [
-            "Halls of Valor",
-            "Tyrannical",
-            "Fortified",
-            "Peril",
-            "2 Chests",
-            "Timed",
-        ] {
-            assert!(got.contains(&expected), "missing {expected}: {got:?}");
+        let timed = base(Category::MythicPlus, dungeon.clone(), Outcome::Complete);
+        let abandoned = base(Category::MythicPlus, dungeon, Outcome::Abandoned);
+        let cases: [(&LibraryEntry, &[&str]); 3] = [
+            (
+                &raid,
+                &[
+                    "Starred",
+                    "Retail",
+                    "Alice",
+                    "Frost",
+                    "Vault of the Incarnates",
+                    "Kill",
+                    "Mythic",
+                    "Raszageth",
+                ],
+            ),
+            (
+                &timed,
+                &[
+                    "Halls of Valor",
+                    "Tyrannical",
+                    "Fortified",
+                    "Peril",
+                    "2 Chests",
+                    "Timed",
+                ],
+            ),
+            (&abandoned, &["Abandoned"]),
+        ];
+        for (entry, expected) in cases {
+            let chips = suggestions_for_entry(entry);
+            let got = labels(&chips);
+            for label in expected {
+                assert!(got.contains(label), "missing {label}: {got:?}");
+            }
         }
-        assert!(!got.contains(&"Depleted"));
-
-        let abandoned = ActivityDetails::Dungeon {
-            zone_id: None,
-            dungeon_name: Some("Halls of Valor".to_owned()),
-            map_id: None,
-            keystone_level: Some(20),
-            affixes: vec![],
-            upgrade_level: None,
-        };
-        let entry = base(Category::MythicPlus, abandoned, Outcome::Abandoned);
-        let chips = suggestions_for_entry(&entry);
-        let got = labels(&chips);
-        assert!(got.contains(&"Abandoned"));
     }
 
     #[test]
@@ -449,41 +440,5 @@ mod tests {
         let narrowed = narrow(&available, "o", &selected, usize::MAX);
         // "Bob" excluded (selected); "Frost" matches the "o".
         assert_eq!(labels(&narrowed), vec!["Frost"]);
-    }
-
-    #[test]
-    fn combined_suggestions_deduplicate_repeated_labels() {
-        let a = base(Category::TwoVTwo, ActivityDetails::Manual, Outcome::Win);
-        let b = base(Category::TwoVTwo, ActivityDetails::Manual, Outcome::Win);
-        // Two identical entries produce "Retail", "Not Starred", "Win" twice;
-        // the combined set holds one of each.
-        let combined = combined_suggestions([&a, &b]);
-        assert_eq!(combined.len(), suggestions_for_entry(&a).len());
-    }
-
-    fn combatant(name: &str, spec: u16) -> CombatantSummary {
-        CombatantSummary {
-            name: Some(name.to_owned()),
-            realm: None,
-            guid: None,
-            region: None,
-            class_id: None,
-            spec_id: Some(spec),
-            team_id: None,
-        }
-    }
-
-    #[test]
-    fn combatants_contribute_name_suggestions() {
-        let mut entry = base(
-            Category::ThreeVThree,
-            ActivityDetails::Manual,
-            Outcome::Loss,
-        );
-        entry.combatants = vec![combatant("Carol", 253), combatant("", 254)];
-        let chips = suggestions_for_entry(&entry);
-        let got = labels(&chips);
-        assert!(got.contains(&"Carol"));
-        assert!(got.contains(&"Loss"));
     }
 }

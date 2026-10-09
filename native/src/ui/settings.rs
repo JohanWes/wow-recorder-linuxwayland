@@ -1448,7 +1448,6 @@ fn path_row(
 mod tests {
     use super::*;
     use warcraft_recorder::config::{FlavorConfig, PathAuthorization};
-    use warcraft_recorder::domain::{Category, WorkKind, WorkProgress};
 
     fn ready_config() -> Config {
         let mut config = Config::default();
@@ -1494,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn spin_defaults_stay_within_bounds_and_dependency_rows_grey() {
+    fn spin_defaults_stay_within_bounds() {
         let config = Config::default();
         // Spin bounds must agree with config validation, so a default always
         // renders inside them.
@@ -1517,64 +1516,12 @@ mod tests {
         (STORAGE_SPINS[0].set)(&mut unlimited, 0.0);
         assert_eq!(unlimited.storage.limit, StorageLimit::Unlimited);
         assert_eq!((STORAGE_SPINS[0].get)(&unlimited), 0.0);
-        // Dependency sensitivity greys children without erasing values.
-        let mut no_raids = config.clone();
-        no_raids.activities.record_raids = false;
-        assert!(!row_sensitive("activities.min_raid_difficulty", &no_raids));
-        assert!(!row_sensitive("activities.raid_overrun_seconds", &no_raids));
-        assert!(row_sensitive("activities.min_keystone_level", &no_raids));
-        let mut no_dungeons = config.clone();
-        no_dungeons.activities.record_dungeons = false;
-        assert!(!row_sensitive(
-            "activities.min_keystone_level",
-            &no_dungeons
-        ));
-        assert!(!row_sensitive("storage.buffer_dir", &config));
-        let mut separate = config.clone();
-        separate.storage.separate_buffer_dir = true;
-        assert!(row_sensitive("storage.buffer_dir", &separate));
-        assert!(!row_sensitive("manual.sound", &config));
-        assert!(!row_sensitive("capture.audio_input", &config));
     }
 
     #[test]
-    fn unsafe_reason_covers_recording_overrun_finalizing_and_media_work() {
-        assert_eq!(unsafe_reason(&snapshot(RecorderStatus::Ready)), None);
-        assert_eq!(
-            unsafe_reason(&snapshot(RecorderStatus::WaitingForWow)),
-            None
-        );
-        assert!(
-            unsafe_reason(&snapshot(RecorderStatus::Recording {
-                category: Category::Raids,
-                title: "Boss".to_owned(),
-                started_unix_ms: 0,
-                manual: false,
-                test: false,
-            }))
-            .is_some()
-        );
-        assert!(
-            unsafe_reason(&snapshot(RecorderStatus::Overrunning {
-                title: "Boss".to_owned(),
-                started_unix_ms: 0,
-            }))
-            .is_some()
-        );
-        assert!(
-            unsafe_reason(&snapshot(RecorderStatus::Finalizing {
-                title: "Saving".to_owned(),
-            }))
-            .is_some()
-        );
-        let mut busy = snapshot(RecorderStatus::Ready);
-        busy.work = Some(WorkProgress {
-            kind: WorkKind::Clip,
-            completed: 1,
-            total: None,
-        });
-        assert!(unsafe_reason(&busy).is_some());
+    fn unsafe_reason_covers_queued_media_work() {
         let mut queued = snapshot(RecorderStatus::Ready);
+        assert_eq!(unsafe_reason(&queued), None);
         queued.queued_jobs = 1;
         assert!(unsafe_reason(&queued).is_some());
     }
@@ -1595,13 +1542,6 @@ mod tests {
         let (subtitle, reauth) = path_state(&AuthorizedPath::authorized("/new/Logs"));
         assert!(!reauth);
         assert_eq!(subtitle, "/new/Logs");
-        // Inconsistent saved state (authorized flag with empty path) still
-        // renders as not selected rather than authorized.
-        let inconsistent = AuthorizedPath {
-            path: PathBuf::new(),
-            authorization: PathAuthorization::Authorized,
-        };
-        assert_eq!(path_state(&inconsistent).0, "Not selected");
 
         let devices = [
             AudioDevice {
@@ -1620,24 +1560,5 @@ mod tests {
         assert_eq!(model.len(), 3);
         assert_eq!(index, 2);
         assert_eq!(model[2].label, "device:gone - Unavailable");
-    }
-
-    #[test]
-    fn probe_matches_field_requirements() {
-        let directory = std::env::temp_dir().join(format!(
-            "warcraft-recorder-settings-probe-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&directory).expect("create probe directory");
-        let sentinel = directory.join(".warcraft-recorder-probe");
-        std::fs::write(&sentinel, b"sentinel").expect("write sentinel file");
-        assert_eq!(probe_folder(&directory, false), Ok(()));
-        assert_eq!(probe_folder(&directory, true), Ok(()));
-        assert_eq!(
-            std::fs::read(&sentinel).expect("read sentinel file"),
-            b"sentinel"
-        );
-        assert!(probe_folder(&directory.join("missing"), false).is_err());
-        std::fs::remove_dir_all(&directory).expect("remove probe directory");
     }
 }

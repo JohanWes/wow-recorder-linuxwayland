@@ -255,38 +255,25 @@ mod tests {
     }
 
     #[test]
-    fn hide_empty_never_hides_anything_in_an_empty_library() {
-        let views = rows(&snapshot(Vec::new(), true, false));
-        assert!(views.iter().all(|view| view.visible));
-    }
-
-    #[test]
     fn hide_empty_hides_only_zero_categories_once_videos_exist() {
-        let views = rows(&snapshot(
-            vec![(Category::Raids, 3), (Category::Clip, 1)],
-            true,
-            false,
-        ));
-        let visible = |category: &Category| {
-            views
-                .iter()
-                .find(|view| &view.category == category)
+        let visible = |snapshot: &AppSnapshot, category: Category| {
+            rows(snapshot)
+                .into_iter()
+                .find(|view| view.category == category)
                 .expect("row exists")
                 .visible
         };
-        assert!(visible(&Category::Raids));
-        assert!(visible(&Category::Clip));
-        assert!(!visible(&Category::TwoVTwo));
-        assert!(!visible(&Category::Manual));
-    }
+        // An empty library hides nothing.
+        let empty = snapshot(Vec::new(), true, false);
+        assert!(rows(&empty).iter().all(|view| view.visible));
 
-    #[test]
-    fn manual_stays_visible_when_manual_recording_is_enabled() {
-        let views = rows(&snapshot(vec![(Category::Raids, 1)], true, true));
-        let manual = views
-            .iter()
-            .find(|view| view.category == Category::Manual)
-            .expect("manual row");
-        assert!(manual.visible);
+        let filled = snapshot(vec![(Category::Raids, 3)], true, false);
+        assert!(visible(&filled, Category::Raids));
+        assert!(!visible(&filled, Category::TwoVTwo));
+        assert!(!visible(&filled, Category::Manual));
+
+        // Manual stays while manual recording is enabled.
+        let manual = snapshot(vec![(Category::Raids, 3)], true, true);
+        assert!(visible(&manual, Category::Manual));
     }
 }

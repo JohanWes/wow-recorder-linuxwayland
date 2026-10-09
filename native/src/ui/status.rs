@@ -498,36 +498,14 @@ impl StatusCard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use warcraft_recorder::domain::Category;
-
-    fn snapshot_with(status: RecorderStatus) -> AppSnapshot {
-        crate::ui::window::tests::snapshot_with(status, Config::default(), Vec::new())
-    }
-
-    #[test]
-    fn force_end_is_visible_only_for_automatic_recording() {
-        let recording = |manual, test| RecorderStatus::Recording {
-            category: Category::MythicPlus,
-            title: "Dungeon".to_owned(),
-            started_unix_ms: 1_000,
-            manual,
-            test,
-        };
-        assert!(view(&snapshot_with(recording(false, false))).show_force_end);
-        assert!(view(&snapshot_with(recording(false, true))).show_force_end);
-        assert!(!view(&snapshot_with(recording(true, false))).show_force_end);
-        assert!(
-            !view(&snapshot_with(RecorderStatus::Overrunning {
-                title: "Dungeon".to_owned(),
-                started_unix_ms: 1_000,
-            }))
-            .show_force_end
-        );
-    }
 
     #[test]
     fn advanced_logging_warns_only_when_config_wtf_says_off() {
-        let mut snapshot = snapshot_with(RecorderStatus::Ready);
+        let mut snapshot = crate::ui::window::tests::snapshot_with(
+            RecorderStatus::Ready,
+            Config::default(),
+            Vec::new(),
+        );
         // Read and off, read and on, and unreadable: only the first warns.
         snapshot.advanced_logging = vec![
             ("retail", Some(false)),

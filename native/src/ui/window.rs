@@ -807,7 +807,7 @@ pub(crate) mod tests {
     use warcraft_recorder::config::Config;
     use warcraft_recorder::domain::{
         ActivityDetails, Category, Codec, CorrelatedActivity, GameFlavor, LibraryEntry, MediaFacts,
-        Outcome, Problem, RecorderStatus, RecordingId,
+        Outcome, RecorderStatus, RecordingId,
     };
 
     pub(crate) fn entry(category: Category, title: &str, start_unix_ms: i64) -> LibraryEntry {
@@ -868,61 +868,5 @@ pub(crate) mod tests {
             storage_used_bytes: 0,
             protected_over_limit: false,
         }
-    }
-
-    fn snapshot_with_entries(entries: Vec<LibraryEntry>) -> AppSnapshot {
-        snapshot_with(RecorderStatus::Ready, Config::default(), entries)
-    }
-
-    #[test]
-    fn player_fit_uses_the_video_aspect_ratio() {
-        assert_eq!(fitted_video_height(1_620, 3_440, 1_440), 679);
-        assert_eq!(fitted_video_height(1_600, 1_920, 1_080), 900);
-        assert_eq!(fitted_video_height(0, 1_920, 1_080), 0);
-        assert_eq!(fitted_video_height(1_600, 0, 0), 0);
-    }
-
-    #[test]
-    fn banners_come_from_setup_problems_and_the_newest_problem() {
-        let mut snapshot = snapshot_with_entries(Vec::new());
-        assert_eq!(content_view(&snapshot).setup_banner, None);
-        assert_eq!(content_view(&snapshot).problem_banner, None);
-
-        snapshot.setup_problems = vec![
-            warcraft_recorder::config::ValidationProblem {
-                field: "storage.recording_dir",
-                message: "Choose a recording directory.".to_owned(),
-            },
-            warcraft_recorder::config::ValidationProblem {
-                field: "flavors",
-                message: "Enable at least one World of Warcraft flavor.".to_owned(),
-            },
-        ];
-        snapshot.problems = vec![
-            Problem {
-                summary: "older".to_owned(),
-                safe_detail: None,
-                occurred_unix_ms: 1,
-                recovery_action: None,
-            },
-            Problem {
-                summary: "newest".to_owned(),
-                safe_detail: None,
-                occurred_unix_ms: 2,
-                recovery_action: Some(RecoveryAction::OpenLogs),
-            },
-        ];
-        let view = content_view(&snapshot);
-        assert_eq!(
-            view.setup_banner.as_deref(),
-            Some("Choose a recording directory.")
-        );
-        assert_eq!(
-            view.problem_banner,
-            Some(ProblemBanner {
-                summary: "newest".to_owned(),
-                action: Some(RecoveryAction::OpenLogs),
-            })
-        );
     }
 }

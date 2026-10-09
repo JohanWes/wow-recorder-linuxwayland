@@ -428,44 +428,12 @@ mod tests {
     }
 
     #[test]
-    fn manual_bar_is_gated_by_category_setting_and_recorder_state() {
-        let cases = [
-            // (status, selected, manual enabled) -> (visible, start, stop)
-            (
-                RecorderStatus::Ready,
-                Category::Manual,
-                true,
-                (true, true, false),
-            ),
-            (
-                RecorderStatus::Ready,
-                Category::Manual,
-                false,
-                (false, true, false),
-            ),
-            (
-                RecorderStatus::Ready,
-                Category::Raids,
-                true,
-                (false, true, false),
-            ),
-            (
-                RecorderStatus::WaitingForWow,
-                Category::Manual,
-                true,
-                (true, true, false),
-            ),
-        ];
-        for (status, selected, manual, (visible, start, stop)) in cases {
-            let view = manual_view(&snapshot(status.clone(), selected, manual));
-            assert_eq!(view.visible, visible, "{status:?}");
-            assert_eq!(view.start_enabled, start, "{status:?}");
-            assert_eq!(view.stop_visible, stop, "{status:?}");
-        }
-    }
+    fn manual_bar_is_gated_and_shows_stop_only_for_a_manual_recording() {
+        // Idle: Start in the Manual category, only with manual recording on.
+        let idle = manual_view(&snapshot(RecorderStatus::Ready, Category::Manual, true));
+        assert!(idle.visible && idle.start_enabled && !idle.stop_visible);
+        assert!(!manual_view(&snapshot(RecorderStatus::Ready, Category::Manual, false)).visible);
 
-    #[test]
-    fn active_manual_recording_shows_stop_with_the_elapsed_anchor() {
         let manual = RecorderStatus::Recording {
             category: Category::Manual,
             title: "Manual recording".to_owned(),

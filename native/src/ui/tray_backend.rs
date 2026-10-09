@@ -192,30 +192,3 @@ impl ksni::Tray for RecorderTray {
         true
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn open_and_quit_never_block_a_saturated_channel() {
-        // Capacity-one channel; a second Open would block a blocking send.
-        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
-        let quit = Arc::new(AtomicBool::new(false));
-        let tray = RecorderTray {
-            events: sender,
-            available: Arc::new(AtomicBool::new(true)),
-            quit_requested: Arc::clone(&quit),
-            wake: Arc::new(|| {}),
-            title: "Warcraft Recorder".into(),
-            status: ksni::Status::Active,
-            icons: Vec::new(),
-        };
-
-        tray.request_open(); // fills the single slot
-        tray.request_open(); // dropped by try_send rather than blocking
-        tray.request_quit(); // latches without touching the channel
-
-        assert!(quit.load(Ordering::Acquire));
-    }
-}

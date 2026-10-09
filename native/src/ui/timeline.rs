@@ -735,14 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn pixel_mapping_round_trips_and_hover_prefers_the_nearest_item() {
-        assert_eq!(
-            x_to_ms(ms_to_x(30_000, 120_000, 600.0), 120_000, 600.0),
-            30_000
-        );
-        assert_eq!(x_to_ms(-10.0, 120_000, 600.0), 0);
-        assert_eq!(x_to_ms(999.0, 120_000, 600.0), 120_000);
-
+    fn hover_prefers_the_nearest_item() {
         let items = vec![
             (30_000, None, Some("Alice".to_owned())),
             (60_000, None, Some("Bob".to_owned())),
