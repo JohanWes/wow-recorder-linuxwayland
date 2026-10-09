@@ -57,7 +57,8 @@ pub fn drag_clip_handle(range: ClipRangeMs, start_handle: bool, to_ms: u64) -> C
     }
 }
 
-fn plain_name(name: &str) -> &str {
+/// A player name without its `-Realm` suffix.
+pub fn plain_name(name: &str) -> &str {
     name.split('-').next().unwrap_or(name)
 }
 

@@ -12,7 +12,7 @@ use warcraft_recorder::coordinator::AppSnapshot;
 use warcraft_recorder::domain::Category;
 
 use super::status::StatusCard;
-use super::{ActionSink, CATEGORIES, ShellAction};
+use super::{ActionSink, CATEGORIES, ShellAction, icon_button};
 
 /// One category row as the rail renders it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,20 +179,14 @@ impl Sidebar {
             });
         }
 
-        let update_button = gtk4::Button::from_icon_name("view-refresh-symbolic");
-        update_button.add_css_class("flat");
-        update_button.set_tooltip_text(Some("Check for updates"));
-        update_button.update_property(&[gtk4::accessible::Property::Label("Check for updates")]);
+        let update_button = icon_button("view-refresh-symbolic", "Check for updates");
         {
             let sink = Rc::clone(&sink);
             update_button.connect_clicked(move |_| {
                 sink(ShellAction::CheckForUpdates);
             });
         }
-        let test_button = gtk4::Button::from_icon_name("applications-science-symbolic");
-        test_button.add_css_class("flat");
-        test_button.set_tooltip_text(Some("Test recording"));
-        test_button.update_property(&[gtk4::accessible::Property::Label("Test recording")]);
+        let test_button = icon_button("applications-science-symbolic", "Test recording");
         {
             let sink = Rc::clone(&sink);
             test_button.connect_clicked(move |_| {

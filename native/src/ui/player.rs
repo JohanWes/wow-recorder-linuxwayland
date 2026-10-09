@@ -30,7 +30,7 @@ use super::library::Selection;
 use super::multipov;
 use super::player_backend::{PlayerBackend, PlayerState, SeekMode, VideoStreamToken};
 use super::timeline::{self, MarkerDirection, MarkerPrefs, Timeline};
-use super::{ActionSink, ShellAction};
+use super::{ActionSink, ShellAction, icon_button};
 
 const SPEEDS: [f64; 4] = [0.25, 0.5, 1.0, 2.0];
 const SEEK_STEP_SECONDS: f64 = 5.0;
@@ -1319,14 +1319,6 @@ impl Inner {
         self.updating.set(false);
         self.pov_dropdown.set_visible(povs.len() > 1);
     }
-}
-
-fn icon_button(icon: &str, label: &str) -> gtk4::Button {
-    let button = gtk4::Button::from_icon_name(icon);
-    button.add_css_class("flat");
-    button.set_tooltip_text(Some(label));
-    button.update_property(&[gtk4::accessible::Property::Label(label)]);
-    button
 }
 
 /// Player shortcuts belong to the window's own content. The capture-phase

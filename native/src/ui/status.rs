@@ -15,7 +15,7 @@ use warcraft_recorder::coordinator::AppSnapshot;
 use warcraft_recorder::domain::{Problem, RecorderStatus, RecoveryAction};
 use warcraft_recorder::storage::now_unix_ms;
 
-use super::{ActionSink, ShellAction, format_clock};
+use super::{ActionSink, ShellAction, clear_box, format_clock};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
@@ -427,9 +427,7 @@ impl StatusCard {
 
         let warnings = advanced_logging_warnings(snapshot);
         if *self.rendered_warnings.borrow() != warnings {
-            while let Some(child) = self.warnings.first_child() {
-                self.warnings.remove(&child);
-            }
+            clear_box(&self.warnings);
             for warning in &warnings {
                 let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
                 row.set_tooltip_text(Some(
@@ -466,9 +464,7 @@ impl StatusCard {
         self.problems_expander.set_visible(!problems.is_empty());
         self.problems_expander
             .set_label(Some(&format!("Problems ({})", problems.len())));
-        while let Some(child) = self.problems.first_child() {
-            self.problems.remove(&child);
-        }
+        clear_box(&self.problems);
         for problem in problems {
             let row = gtk4::Expander::new(Some(&problem.summary));
             let body = gtk4::Box::new(gtk4::Orientation::Vertical, 4);

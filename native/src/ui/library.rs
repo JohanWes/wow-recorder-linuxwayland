@@ -877,9 +877,7 @@ impl Inner {
     }
 
     fn rebuild_chip_row(self: &Rc<Self>) {
-        while let Some(child) = self.chips_box.first_child() {
-            self.chips_box.remove(&child);
-        }
+        super::clear_box(&self.chips_box);
         let chips = self.state.selected_chips.borrow().clone();
         for chip in &chips {
             let button = chip_pill(chip);
@@ -1324,25 +1322,11 @@ impl Inner {
     }
 
     fn date_column(&self) -> gtk4::ColumnViewColumn {
-        let factory = gtk4::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
-            let label = gtk4::Label::new(None);
-            label.set_xalign(0.0);
-            label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        let column = label_column("Date", |label, row| {
             // Keep the final text column clear of the vertical scrollbar.
             label.set_margin_end(6);
-            item.downcast_ref::<gtk4::ListItem>()
-                .unwrap()
-                .set_child(Some(&label));
-        });
-        factory.connect_bind(|_, item| {
-            let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-            let label = item.child().and_downcast::<gtk4::Label>().unwrap();
-            let row = row_of(&item.item().unwrap());
             label.set_text(&format_date(row.date_ms));
         });
-        let column = gtk4::ColumnViewColumn::new(Some("Date"), Some(factory));
-        column.set_resizable(true);
         column.set_sorter(Some(&sort_by(|r| r.date_ms)));
         column
     }
@@ -1584,51 +1568,47 @@ fn sort_by<K: Ord + 'static>(key: impl Fn(&RowModel) -> K + 'static) -> gtk4::Cu
     })
 }
 
+/// A resizable column of start-aligned, ellipsized label cells; `bind` fills
+/// a cell from the row it currently shows.
+fn label_column(
+    title: &str,
+    bind: impl Fn(&gtk4::Label, &RowModel) + 'static,
+) -> gtk4::ColumnViewColumn {
+    let factory = gtk4::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        let label = gtk4::Label::new(None);
+        label.set_xalign(0.0);
+        label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        item.downcast_ref::<gtk4::ListItem>()
+            .unwrap()
+            .set_child(Some(&label));
+    });
+    factory.connect_bind(move |_, item| {
+        let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
+        let label = item.child().and_downcast::<gtk4::Label>().unwrap();
+        bind(&label, &row_of(&item.item().unwrap()));
+    });
+    let column = gtk4::ColumnViewColumn::new(Some(title), Some(factory));
+    column.set_resizable(true);
+    column
+}
+
 fn text_column(
     title: &str,
     expand: bool,
     getter: impl Fn(&RowModel) -> String + 'static,
     sorter: gtk4::CustomSorter,
 ) -> gtk4::ColumnViewColumn {
-    let getter = Rc::new(getter);
-    let factory = gtk4::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
-        let label = gtk4::Label::new(None);
-        label.set_xalign(0.0);
-        label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        item.downcast_ref::<gtk4::ListItem>()
-            .unwrap()
-            .set_child(Some(&label));
-    });
-    factory.connect_bind(move |_, item| {
-        let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-        let label = item.child().and_downcast::<gtk4::Label>().unwrap();
-        let row = row_of(&item.item().unwrap());
-        label.set_text(&getter(&row));
-    });
-    let column = gtk4::ColumnViewColumn::new(Some(title), Some(factory));
+    let column = label_column(title, move |label, row| label.set_text(&getter(row)));
     column.set_expand(expand);
-    column.set_resizable(true);
     column.set_sorter(Some(&sorter));
     column
 }
 
-/// The Result column: same text cell as `text_column`, plus a win/loss outcome
-/// color (the label conveys the meaning; color is reinforcement only).
+/// The Result column: a text cell plus a win/loss outcome color (the label
+/// conveys the meaning; color is reinforcement only).
 fn result_column() -> gtk4::ColumnViewColumn {
-    let factory = gtk4::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
-        let label = gtk4::Label::new(None);
-        label.set_xalign(0.0);
-        label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        item.downcast_ref::<gtk4::ListItem>()
-            .unwrap()
-            .set_child(Some(&label));
-    });
-    factory.connect_bind(move |_, item| {
-        let item = item.downcast_ref::<gtk4::ListItem>().unwrap();
-        let label = item.child().and_downcast::<gtk4::Label>().unwrap();
-        let row = row_of(&item.item().unwrap());
+    let column = label_column("Result", |label, row| {
         label.set_text(&row.result);
         label.remove_css_class("wr-result-win");
         label.remove_css_class("wr-result-loss");
@@ -1638,8 +1618,6 @@ fn result_column() -> gtk4::ColumnViewColumn {
             _ => {}
         }
     });
-    let column = gtk4::ColumnViewColumn::new(Some("Result"), Some(factory));
-    column.set_resizable(true);
     column.set_sorter(Some(&sort_by(|r| r.outcome_order)));
     column
 }

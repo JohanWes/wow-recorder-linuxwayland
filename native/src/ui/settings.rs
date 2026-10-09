@@ -1107,9 +1107,7 @@ impl Settings {
 
         let warnings = super::status::advanced_logging_warnings(snapshot);
         if *self.rendered_warnings.borrow() != warnings {
-            while let Some(child) = self.advanced_box.first_child() {
-                self.advanced_box.remove(&child);
-            }
+            super::clear_box(&self.advanced_box);
             for warning in &warnings {
                 let label = gtk4::Label::new(Some(warning));
                 label.set_wrap(true);

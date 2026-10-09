@@ -9,6 +9,7 @@
 use warcraft_recorder::domain::{LibraryEntry, RecordingId};
 
 use super::filters::spec_name;
+use super::timeline::plain_name;
 
 /// One selectable local viewpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,7 +30,7 @@ pub fn povs(entries: &[&LibraryEntry]) -> Vec<Pov> {
             .player
             .as_ref()
             .filter(|player| !player.name.is_empty())
-            .map(|player| player.name.split('-').next().unwrap_or("").to_owned());
+            .map(|player| plain_name(&player.name).to_owned());
         let label = match (&player, entry.player.as_ref().and_then(|p| p.spec_id)) {
             (Some(name), Some(spec)) => match spec_name(spec) {
                 Some(spec) => format!("{name} ({spec})"),

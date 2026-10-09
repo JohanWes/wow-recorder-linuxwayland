@@ -323,6 +323,21 @@ pub fn format_clock(ms: u64) -> String {
     }
 }
 
+/// A flat icon-only button whose tooltip doubles as its accessible label.
+pub fn icon_button(icon: &str, label: &str) -> gtk4::Button {
+    let button = gtk4::Button::from_icon_name(icon);
+    button.add_css_class("flat");
+    button.set_tooltip_text(Some(label));
+    button.update_property(&[gtk4::accessible::Property::Label(label)]);
+    button
+}
+
+pub fn clear_box(container: &gtk4::Box) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+}
+
 /// Run the shell for the already-registered primary application; returns the
 /// process exit code. The caller joins the coordinator and tray handles after
 /// this returns.
