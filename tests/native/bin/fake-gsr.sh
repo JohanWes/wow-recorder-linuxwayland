@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Fake gpu-screen-recorder for native recorder tests. Records argv, honors an
-# exit-code file, and idles like the replay-buffer child. The control/data
-# directory is derived from the -sc hook path so parallel tests stay isolated.
+# Fake gpu-screen-recorder for native recorder tests. Honors an exit-code file
+# and idles like the replay-buffer child. The control/data directory is
+# derived from the -sc hook path so parallel tests stay isolated.
 set -u
 
 # Install signal handling first so control signals can never kill a
@@ -36,14 +36,8 @@ for arg in "$@"; do
   prev="$arg"
 done
 
-if [ -n "$data_dir" ]; then
-  : > "$data_dir/fake-argv.txt"
-  for arg in "$@"; do
-    printf '%s\n' "$arg" >> "$data_dir/fake-argv.txt"
-  done
-  if [ -f "$data_dir/fake-exit" ]; then
-    exit "$(cat "$data_dir/fake-exit")"
-  fi
+if [ -n "$data_dir" ] && [ -f "$data_dir/fake-exit" ]; then
+  exit "$(cat "$data_dir/fake-exit")"
 fi
 
 while :; do sleep 0.05; done

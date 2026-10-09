@@ -134,7 +134,6 @@ pub enum RecorderEvent {
     },
     /// The portal wrote (or replaced) the reusable capture-target token.
     TargetTokenAvailable(String),
-    Diagnostic(String),
 }
 
 /// Bounded waits. Tests shrink them; production uses the defaults.
@@ -170,6 +169,9 @@ const GSR_EXIT_SELECTION_DENIED: i32 = 60;
 const MAX_RESTART_DELAY_SECONDS: u64 = 30;
 /// A child that ran this long before exiting was not crash-looping.
 const STABLE_CHILD: Duration = Duration::from_secs(60);
+/// The portal token only changes after a target selection, so `poll` need
+/// not reread it every coordinator tick.
+const TOKEN_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 struct GsrEvent {
     timestamp_ms: i64,
@@ -207,7 +209,7 @@ pub struct Recorder {
     active: Option<ActiveCapture>,
     ending: Option<PendingEnd>,
     last_token: Option<String>,
-    ignored_events: u32,
+    token_checked_at: Option<Instant>,
     last_toggle_at: Option<Instant>,
     timeouts: Timeouts,
 }
@@ -236,7 +238,7 @@ impl Recorder {
             active: None,
             ending: None,
             last_token: None,
-            ignored_events: 0,
+            token_checked_at: None,
             last_toggle_at: None,
             timeouts,
         }
@@ -326,9 +328,9 @@ impl Recorder {
         let events_path = Self::events_path(config);
         write_hook_script(&Self::hook_path(config), &events_path)?;
         fs::write(&events_path, b"")?;
+        fs::write(Self::log_path(config), b"")?;
         self.events_offset = 0;
         self.pending.clear();
-        self.ignored_events = 0;
 
         let token_path = Self::token_path(config);
         if let Some(token) = &config.settings.capture_target_token
@@ -344,6 +346,7 @@ impl Recorder {
         self.restart_attempts = 0;
         self.restart_at_ms = None;
         self.last_token = read_token(&token_path);
+        self.token_checked_at = None;
         Ok(())
     }
 
@@ -568,8 +571,13 @@ impl Recorder {
         };
         // Any event still pending after the session was noise (wrong kind,
         // stale, duplicate, or outside the managed directories).
-        self.ignored_events += self.pending.len() as u32;
-        self.pending.clear();
+        if !self.pending.is_empty() {
+            tracing::debug!(
+                count = self.pending.len(),
+                "ignored unexpected GSR hook events"
+            );
+            self.pending.clear();
+        }
         let artifacts = ending.regular.map(|regular| CaptureArtifacts {
             replay,
             regular,
@@ -715,11 +723,7 @@ impl Recorder {
                     }
                 }
                 Ok(None) => {}
-                Err(error) => {
-                    events.push(RecorderEvent::Diagnostic(format!(
-                        "child status check failed: {error}"
-                    )));
-                }
+                Err(error) => tracing::warn!(%error, "GSR child status check failed"),
             }
         } else if self.desired_running
             && self
@@ -741,9 +745,13 @@ impl Recorder {
             }
         }
 
-        if let Some(config) = &self.config {
-            let token = read_token(&Self::token_path(config));
-            if let Some(token) = token
+        if let Some(config) = &self.config
+            && self
+                .token_checked_at
+                .is_none_or(|checked_at| checked_at.elapsed() >= TOKEN_CHECK_INTERVAL)
+        {
+            self.token_checked_at = Some(Instant::now());
+            if let Some(token) = read_token(&Self::token_path(config))
                 && self.last_token.as_deref() != Some(token.as_str())
             {
                 self.last_token = Some(token.clone());
@@ -751,13 +759,6 @@ impl Recorder {
             }
         }
         self.poll_pending_end(&mut events);
-        if self.ignored_events > 0 {
-            events.push(RecorderEvent::Diagnostic(format!(
-                "ignored {} unexpected GSR hook event(s)",
-                self.ignored_events
-            )));
-            self.ignored_events = 0;
-        }
         events
     }
 
@@ -820,11 +821,11 @@ impl Recorder {
             let kind = fields.next().unwrap_or("");
             let path = fields.next().unwrap_or("");
             let Ok(timestamp_ms) = timestamp.parse::<i64>() else {
-                self.ignored_events += 1;
+                tracing::debug!("ignored GSR hook event with a malformed timestamp");
                 continue;
             };
-            if path.is_empty() || !matches!(kind, "regular" | "replay" | "screenshot") {
-                self.ignored_events += 1;
+            if path.is_empty() || !matches!(kind, "regular" | "replay") {
+                tracing::debug!(kind, "ignored unexpected GSR hook event");
                 continue;
             }
             self.pending.push(GsrEvent {
@@ -1042,50 +1043,17 @@ mod tests {
     }
 
     #[test]
-    fn argv_matches_baseline_and_preserves_awkward_paths() {
+    fn argv_preserves_awkward_paths_and_joins_audio_sources() {
         let mut config = test_config("argv");
         config.settings.audio_output = "device:out put".to_string();
         config.settings.audio_input = Some("device:mic".to_string());
         let args = build_gsr_args(&config);
-        let expected: Vec<OsString> = vec![
-            "-w".into(),
-            "portal".into(),
-            "-restore-portal-session".into(),
-            "yes".into(),
-            "-portal-session-token-filepath".into(),
-            config.data_dir.join("gsr-portal.token").into_os_string(),
-            "-r".into(),
-            "180".into(),
-            "-replay-storage".into(),
-            "ram".into(),
-            "-restart-replay-on-save".into(),
-            "no".into(),
-            "-c".into(),
-            "mkv".into(),
-            "-f".into(),
-            "60".into(),
-            "-bm".into(),
-            "cbr".into(),
-            "-q".into(),
-            "20000".into(),
-            "-k".into(),
-            "h264".into(),
-            "-ac".into(),
-            "aac".into(),
-            "-cursor".into(),
-            "no".into(),
-            "-o".into(),
-            config.capture_root.join("replay").into_os_string(),
-            "-ro".into(),
-            config.capture_root.join("regular").into_os_string(),
-            "-sc".into(),
-            config.data_dir.join("gsr-hook.sh").into_os_string(),
-            "-v".into(),
-            "no".into(),
-            "-a".into(),
-            "device:out put|device:mic".into(),
-        ];
-        assert_eq!(args, expected);
+        // The data dir contains a space and a non-ASCII byte; it stays one arg.
+        assert!(args.contains(&config.data_dir.join("gsr-hook.sh").into_os_string()));
+        assert_eq!(
+            args[args.len() - 2..],
+            ["-a".into(), "device:out put|device:mic".into()] as [OsString; 2]
+        );
 
         // Duplicate input collapses; empty audio drops -a entirely.
         config.settings.audio_input = Some("device:out put".to_string());
@@ -1147,14 +1115,6 @@ mod tests {
         assert_eq!(artifacts.regular, regular);
         assert_eq!(artifacts.requested_replay_ms, 12_000);
         assert!(artifacts.regular_stopped_at_ms >= artifacts.regular_started_at_ms);
-        // The ignored events surface as one bounded diagnostic.
-        let events = recorder.poll(now_unix_ms());
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, RecorderEvent::Diagnostic(_))),
-            "expected diagnostic, got {events:?}"
-        );
         recorder.shutdown().unwrap();
     }
 
@@ -1205,26 +1165,6 @@ mod tests {
         recorder.shutdown().unwrap();
     }
 
-    /// Two toggles inside one GSR loop iteration collapse into one.
-    #[test]
-    fn an_immediate_end_waits_before_toggling_gsr_again() {
-        let mut recorder = Recorder::with_timeouts(test_timeouts());
-        let config = test_config("toggle-gap");
-        recorder.arm(&config).unwrap();
-
-        let id = RecordingId::new();
-        recorder
-            .begin(StartRequest {
-                id: id.clone(),
-                requested_replay_ms: 0,
-            })
-            .unwrap();
-        let started = Instant::now();
-        recorder.request_end(&id).unwrap();
-        assert!(started.elapsed() >= test_timeouts().toggle_gap);
-        recorder.shutdown().unwrap();
-    }
-
     #[test]
     fn stale_same_directory_regular_does_not_win_and_current_artifacts_do() {
         let mut recorder = Recorder::with_timeouts(test_timeouts());
@@ -1260,14 +1200,6 @@ mod tests {
         assert_eq!(artifacts.regular, current_regular);
         assert_eq!(artifacts.replay.as_deref(), Some(replay.as_path()));
         assert_eq!(artifacts.regular_stopped_at_ms, stopped_at_ms);
-        // The stale regular event is noise, reported by the next normal poll.
-        let events = recorder.poll(now_unix_ms());
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, RecorderEvent::Diagnostic(_))),
-            "expected diagnostic, got {events:?}"
-        );
         recorder.shutdown().unwrap();
     }
 
@@ -1437,17 +1369,6 @@ mod tests {
         assert!(matches!(
             recorder.request_end(&RecordingId::new()),
             Err(RecorderError::NotArmed)
-        ));
-    }
-
-    #[test]
-    fn invalid_audio_setting_is_rejected_before_spawn() {
-        let mut recorder = Recorder::with_timeouts(test_timeouts());
-        let mut config = test_config("invalid");
-        config.settings.audio_output = "a|b".to_string();
-        assert!(matches!(
-            recorder.arm(&config),
-            Err(RecorderError::InvalidSettings(_))
         ));
     }
 

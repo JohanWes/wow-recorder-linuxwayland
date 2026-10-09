@@ -732,7 +732,6 @@ impl Coordinator {
                 RecorderEvent::RestartScheduled { attempt, .. } => {
                     tracing::info!(attempt, "capture restart scheduled");
                 }
-                RecorderEvent::Diagnostic(message) => tracing::debug!(%message, "recorder"),
             }
         }
     }
