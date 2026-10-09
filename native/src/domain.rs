@@ -120,7 +120,6 @@ pub struct PlayerSummary {
     pub name: String,
     pub realm: Option<String>,
     pub guid: Option<String>,
-    pub class_id: Option<u16>,
     pub spec_id: Option<u16>,
 }
 
@@ -130,7 +129,6 @@ pub struct CombatantSummary {
     pub realm: Option<String>,
     pub guid: Option<String>,
     pub region: Option<String>,
-    pub class_id: Option<u16>,
     pub spec_id: Option<u16>,
     pub team_id: Option<u8>,
 }

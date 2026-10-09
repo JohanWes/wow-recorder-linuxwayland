@@ -626,7 +626,6 @@ mod tests {
             name: "Alice-Realm".to_owned(),
             realm: None,
             guid: None,
-            class_id: None,
             spec_id: None,
         });
         entry

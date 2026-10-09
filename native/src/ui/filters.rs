@@ -82,7 +82,6 @@ impl Chip {
 }
 
 /// Spec id → the owning class's CSS class, for class-colored player names.
-/// Sidecars never carry `class_id`, so the spec id is the class source.
 pub fn class_css_class(spec_id: u16) -> Option<&'static str> {
     Some(match spec_id {
         250..=252 => "wr-class-death-knight",
@@ -338,7 +337,6 @@ mod tests {
             name: "Alice".to_owned(),
             realm: None,
             guid: None,
-            class_id: None,
             spec_id: Some(64),
         });
         let dungeon = ActivityDetails::Dungeon {
@@ -399,7 +397,6 @@ mod tests {
             name: "Alice".to_owned(),
             realm: None,
             guid: None,
-            class_id: None,
             spec_id: Some(64),
         });
         let mut bob = base(Category::TwoVTwo, arena(), Outcome::Win);
@@ -407,7 +404,6 @@ mod tests {
             name: "Bob".to_owned(),
             realm: None,
             guid: None,
-            class_id: None,
             spec_id: Some(577),
         });
 

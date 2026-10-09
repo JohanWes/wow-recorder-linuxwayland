@@ -1343,7 +1343,6 @@ fn legacy_player(combatant: &LegacyCombatant) -> Option<PlayerSummary> {
         name: combatant.name.clone()?,
         realm: combatant.realm.clone(),
         guid: combatant.guid.clone(),
-        class_id: None,
         spec_id: combatant.spec_id,
     })
 }
@@ -1354,7 +1353,6 @@ fn legacy_combatant(combatant: &LegacyCombatant) -> CombatantSummary {
         realm: combatant.realm.clone(),
         guid: combatant.guid.clone(),
         region: combatant.region.clone(),
-        class_id: None,
         spec_id: combatant.spec_id,
         team_id: combatant.team_id.and_then(|team| u8::try_from(team).ok()),
     }
@@ -1832,7 +1830,6 @@ mod tests {
                 name: "Testone".to_owned(),
                 realm: Some("Testrealm".to_owned()),
                 guid: Some("Player-1000-AAAA0001".to_owned()),
-                class_id: None,
                 spec_id: Some(577),
             }),
             combatants: Vec::new(),

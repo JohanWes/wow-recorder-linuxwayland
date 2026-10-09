@@ -68,7 +68,6 @@ mod tests {
             name: name.to_owned(),
             realm: None,
             guid: None,
-            class_id: None,
             spec_id: Some(spec),
         });
         entry

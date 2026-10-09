@@ -2085,7 +2085,6 @@ fn player_summary(active: &ActiveActivity) -> Option<PlayerSummary> {
         name: combatant.name.clone()?,
         realm: combatant.realm.clone(),
         guid: Some(combatant.guid.clone()),
-        class_id: None,
         spec_id: combatant.spec_id,
     })
 }
@@ -2104,7 +2103,6 @@ fn combatant_summaries(active: &ActiveActivity) -> Vec<CombatantSummary> {
             realm: combatant.realm.clone(),
             guid: Some(combatant.guid.clone()),
             region: combatant.region.clone(),
-            class_id: None,
             spec_id: combatant.spec_id,
             team_id: combatant.team_id,
         })
@@ -2622,7 +2620,6 @@ mod tests {
                 name: "Alpha".to_string(),
                 realm: Some("Realm".to_string()),
                 guid: Some("Player-1-A".to_string()),
-                class_id: None,
                 spec_id: Some(71),
             })
         );
