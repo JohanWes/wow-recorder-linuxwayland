@@ -13,12 +13,12 @@ cleanup:
   # Example shell scripts for manual gpu-screen-recorder use.
   - /share/gpu-screen-recorder
 post-install:
-  - rm -f /app/bin/gsr-kms-server
+  - rm -f /app/bin/gsr-kms-server /app/bin/gsr-cli
   - install -Dm644 ../LICENSE /app/share/licenses/$FLATPAK_ID/gpu-screen-recorder-LICENSE
 sources:
   - type: archive
-    url: https://dec05eba.com/snapshot/gpu-screen-recorder.git.5.13.9.tar.gz
-    sha256: a09365f687002c87f99bcaa4665be1bd0188fa4358f437368fc6a95ab50f4d78
+    url: https://dec05eba.com/snapshot/gpu-screen-recorder.git.6.1.3.tar.gz
+    sha256: 7932921ccb52a32c324c1718fc4f982a9cbe59c11f99a22255791a8eb41214ce
     strip-components: 0
   - type: patch
     path: gsr-run-hooks-in-sandbox.patch

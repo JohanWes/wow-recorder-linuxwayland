@@ -14,7 +14,7 @@ for sig in $signals; do trap '' "$sig" 2>/dev/null; done
 trap 'exit 0' INT TERM
 
 if [ "${1:-}" = "--version" ]; then
-  echo "fake gpu-screen-recorder 5.13.9"
+  echo "fake gpu-screen-recorder 6.1.3"
   exit 0
 fi
 
