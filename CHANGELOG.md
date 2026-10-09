@@ -7,6 +7,35 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## 1.0.14 - 2026-10-09
+
+### Changed
+- The library startup scan is about 3x faster (165 ms to 55 ms on a
+  38-recording library), protecting or tagging a large recording is faster,
+  combat-log parsing is about 2.5x faster with far fewer allocations, memory
+  use drops once the damage meter opens, and the app wakes up less when idle.
+
+### Fixed
+- Audio settings list the real output and input devices by name instead of
+  only the defaults, and virtual microphones such as EasyEffects appear as
+  inputs.
+- The selected sidebar category is remembered across launches instead of
+  resetting to 2v2.
+- Logging out or sending SIGTERM (`systemctl`, `kill`) shuts the app down
+  cleanly and stops gpu-screen-recorder instead of leaving it running.
+- Recordings longer than an hour show h:mm:ss consistently in the player and
+  timeline.
+- The player's region is now recorded for combatants.
+- A date filter with From after To swaps the dates instead of doing nothing.
+- The "settings cannot be applied while recording" warning clears once the
+  recorder is idle.
+- A config file with a bad value is no longer silently replaced by defaults:
+  missing keys fall back to defaults and a rejected file is kept as
+  `config.json.bad`.
+- Recovery is faster when gpu-screen-recorder exits mid-stop, FFmpeg
+  replay-trim fallbacks are logged, and the warning for a disappearing Logs
+  folder is logged once instead of repeatedly.
+
 ## 1.0.13 - 2026-10-03
 
 ### Changed

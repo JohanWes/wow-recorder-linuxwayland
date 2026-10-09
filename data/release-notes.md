@@ -4,6 +4,43 @@ Commit subjects per release, written by `scripts/generate-release-notes.sh` and
 compiled into the binary: the "What's new" dialog reads the section matching the
 running version. Only `## <version>` headings and `- ` lines are parsed.
 
+## 1.0.14
+- Read native sidecars only up to the meter during library scan
+- Copy the meter through as raw JSON when protecting or tagging
+- Simplify storage: derive sidecar probe, drop parallel correlation starts
+- Fold library recount into enforce_limit and simplify local clock
+- Trim redundant storage and coordinator tests, use sparse files and test_root
+- Speed up vertical slice and drop its redundant tests and projection asserts
+- Load config once, default missing keys, and keep rejected files as .bad
+- Skip build output and screenshots in flatpak dir sources, update test README
+- Parse the bare id|label audio list gpu-screen-recorder actually prints
+- Resolve a pending end at once when the GSR child dies
+- Log recorder noise directly, throttle token reads, truncate gsr.log on arm
+- Drop log diagnostics queue and long-line guard, warn once per error
+- Simplify FFmpeg job plumbing, idle longer, and warn on replay fallback
+- Borrow combat-log fields instead of allocating, and trim parser tests
+- Deduplicate activity engine code and fix region and boss percent edge cases
+- Borrow spell database strings from the resource and decode icons from bytes
+- Cut meter per-event allocations, fold duplicate helpers, and drop dead code
+- Fold duplicated damage meter UI blocks and drop low-value tests
+- Avoid quadratic id scans in library delete, protect, and suggestions
+- Share one clock formatter so long recordings read h:mm:ss everywhere
+- Share one elapsed label that stops ticking while unmapped
+- Drop the timeline key controller the window shortcuts already shadow
+- Remove dead apply branch, unused test-category data, and bell argument
+- Share label column, icon button, box clearing, and plain name helpers
+- Swap a backwards library date range instead of ignoring it
+- Clear the settings busy warning once the recorder is idle
+- Trim removal-history notes from player and viewpoint module docs
+- Trim UI tests that cover std behaviour, dead branches, or nothing
+- Import format_clock directly in damage meter and drop the alias
+- Label audio devices by description, falling back to the device id
+- Remove dead class_id fields from player and combatant summaries
+- Ignore sidebar auto-selection before the first snapshot sets the category
+- Route SIGTERM through the graceful shutdown path like tray Quit
+- Classify audio sources by .monitor suffix so virtual mics list as inputs
+- Update README footprint table with remeasured memory and scan time
+
 ## 1.0.13
 - Update intro video with smoother meter transitions
 - Run replay buffer only while World of Warcraft runs

@@ -34,6 +34,18 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.14" date="2026-10-09">
+      <description>
+        <p>
+          Audio settings now list your real output and input devices by
+          name, including virtual microphones. The selected category is
+          remembered across launches, logging out shuts the app down
+          cleanly, and a config file with a bad value is kept as
+          config.json.bad instead of being replaced. The library loads
+          about 3x faster and uses less memory and CPU.
+        </p>
+      </description>
+    </release>
     <release version="1.0.13" date="2026-10-03">
       <description>
         <p>
