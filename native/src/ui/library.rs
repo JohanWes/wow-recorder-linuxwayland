@@ -769,7 +769,8 @@ impl Inner {
             if let Some(item) = self.filter_model.item(index) {
                 let row = row_of(&item);
                 for chip in &row.combined {
-                    if seen.insert(chip.label.clone()) {
+                    if !seen.contains(&chip.label) {
+                        seen.insert(chip.label.clone());
                         chips.push(chip.clone());
                     }
                 }
@@ -1162,10 +1163,12 @@ impl Inner {
     /// arrive as problems, so only the rows actually gone are reported.
     fn report_deleted(&self, snapshot: &AppSnapshot) {
         let deleting = self.state.deleting.take();
-        let gone = deleting
-            .iter()
-            .filter(|id| !snapshot.entries.iter().any(|entry| &entry.id == *id))
-            .count();
+        if deleting.is_empty() {
+            return;
+        }
+        let present: HashSet<&RecordingId> =
+            snapshot.entries.iter().map(|entry| &entry.id).collect();
+        let gone = deleting.iter().filter(|id| !present.contains(id)).count();
         if gone > 0 {
             self.toast(&format!("Deleted {gone} recording{}", plural(gone)));
         }
@@ -1521,16 +1524,12 @@ impl State {
 
 // --- free helpers -----------------------------------------------------------
 
+/// Correlation puts every entry in exactly one row, so the ids are disjoint.
 fn viewpoint_ids(rows: &[Rc<RowModel>]) -> Vec<RecordingId> {
-    let mut ids = Vec::new();
-    for row in rows {
-        for id in &row.correlated_ids {
-            if !ids.contains(id) {
-                ids.push(id.clone());
-            }
-        }
-    }
-    ids
+    rows.iter()
+        .flat_map(|row| &row.correlated_ids)
+        .cloned()
+        .collect()
 }
 
 /// The row a factory cell is bound to right now, if any.
