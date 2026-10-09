@@ -6,7 +6,7 @@
 # Modes (contents of <progress dir>/fake-ffmpeg-mode, default "ok"):
 #   ok      write the output file, report one progress record, exit 0
 #   fail    write stderr diagnostics and exit 1
-#   fail-trim  fail like "fail" for the -sseof replay trim, otherwise "ok"
+#   fail-measure  fail like "fail" for the /dev/null replay measure, otherwise "ok"
 #   silent  ignore SIGINT and never print anything (forces the kill escalation)
 #   chatty  stream stderr and progress until SIGINT
 set -u
@@ -25,9 +25,9 @@ done
 dir=$(dirname -- "${progress:-.}")
 mode="ok"
 [ -f "$dir/fake-ffmpeg-mode" ] && mode=$(cat "$dir/fake-ffmpeg-mode")
-if [ "$mode" = "fail-trim" ]; then
+if [ "$mode" = "fail-measure" ]; then
   mode="ok"
-  for arg in "$@"; do [ "$arg" = "-sseof" ] && mode="fail"; done
+  [ "$output" = "/dev/null" ] && mode="fail"
 fi
 
 if [ -n "$progress" ]; then

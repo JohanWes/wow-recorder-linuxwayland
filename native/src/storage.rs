@@ -1868,7 +1868,6 @@ mod tests {
         CaptureArtifacts {
             replay,
             regular,
-            requested_replay_ms: 8_000,
             // The regular recording starts five seconds after the activity.
             regular_started_at_ms: 1_772_323_205_000,
             regular_stopped_at_ms: 1_772_323_275_000,

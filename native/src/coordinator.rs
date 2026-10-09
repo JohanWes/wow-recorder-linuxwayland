@@ -2216,7 +2216,6 @@ mod tests {
             coordinator.capture_ended(Some(CaptureArtifacts {
                 replay: None,
                 regular: discarded.clone(),
-                requested_replay_ms: 0,
                 regular_started_at_ms: 0,
                 regular_stopped_at_ms: 0,
             }));

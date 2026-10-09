@@ -231,17 +231,23 @@ impl MediaWorker {
             return Err("FFmpeg produced an empty recording".to_owned());
         }
 
-        self.storage
+        let entry = self
+            .storage
             .finalize(draft, artifacts, &combined)
-            .map(Some)
             .map_err(|error| {
                 let _ = fs::remove_file(&combined.temp_media);
                 format!("finalize: {error}")
-            })
+            })?;
+        tracing::info!(
+            id = %draft.id,
+            actual_replay_ms = combined.actual_replay_ms,
+            "finalized recording"
+        );
+        Ok(Some(entry))
     }
 
-    /// Trim the replay to the requested lead-in and concatenate it in front of
-    /// the regular recording. Returns usable replay milliseconds, or `None` when
+    /// Measure the replay and concatenate it in front of the regular
+    /// recording. Returns usable replay milliseconds, or `None` when
     /// cancelled. Any replay problem falls back to the regular recording alone.
     fn combine(
         &mut self,
@@ -252,57 +258,30 @@ impl MediaWorker {
             return self.regular_only(artifacts, final_temp);
         };
 
-        let trim_temp = self
-            .job_file("replay-trim", "mkv")
-            .map_err(|error| format!("replay trim temp: {error}"))?;
-        let wanted_seconds = (artifacts.requested_replay_ms as f64 / 1000.0)
-            .round()
-            .max(1.0) as u64;
-        let trim = self.run_ffmpeg(
-            WorkKind::Finalize,
-            trim_args(replay, wanted_seconds, &trim_temp),
-            None,
-        );
-
-        let trimmed_out_time_ms = match trim {
+        // GSR saves whole seconds from a keyframe, so the replay holds up to
+        // one keyframe interval more than requested. Remuxing it to the null
+        // sink yields the real lead-in the timeline is placed against.
+        let actual_replay_ms = match self.run_ffmpeg(WorkKind::Finalize, measure_args(replay), None)
+        {
             FfmpegOutcome::Done { out_time_ms } if out_time_ms > 0 => out_time_ms,
-            FfmpegOutcome::Cancelled => {
-                let _ = fs::remove_file(&trim_temp);
-                return Ok(None);
-            }
+            FfmpegOutcome::Cancelled => return Ok(None),
             other => {
                 if let FfmpegOutcome::Failed { message } = other {
-                    tracing::warn!(%message, "replay trim failed; keeping the regular recording only");
+                    tracing::warn!(%message, "replay measure failed; keeping the regular recording only");
                 }
-                let _ = fs::remove_file(&trim_temp);
                 return self.regular_only(artifacts, final_temp);
             }
         };
-
-        // `-sseof` reports the seek-relative output time, which is shorter than
-        // the keyframe-aligned file the stream copy actually wrote (~0.9 s).
-        // Remuxing the trim to the null sink yields the real lead-in; the trim's
-        // own progress is the fallback.
-        let actual_replay_ms =
-            match self.run_ffmpeg(WorkKind::Finalize, measure_args(&trim_temp), None) {
-                FfmpegOutcome::Done { out_time_ms } if out_time_ms > 0 => out_time_ms,
-                FfmpegOutcome::Cancelled => {
-                    let _ = fs::remove_file(&trim_temp);
-                    return Ok(None);
-                }
-                _ => trimmed_out_time_ms,
-            };
 
         let list_temp = self
             .job_file("concat", "txt")
             .map_err(|error| format!("concat list temp: {error}"))?;
         let list = format!(
             "file '{}'\nfile '{}'\n",
-            escape_concat(&trim_temp),
+            escape_concat(replay),
             escape_concat(&artifacts.regular)
         );
         if let Err(error) = fs::write(&list_temp, list) {
-            let _ = fs::remove_file(&trim_temp);
             let _ = fs::remove_file(&list_temp);
             return self
                 .regular_only(artifacts, final_temp)
@@ -314,7 +293,6 @@ impl MediaWorker {
             concat_args(&list_temp, final_temp),
             None,
         );
-        let _ = fs::remove_file(&trim_temp);
         let _ = fs::remove_file(&list_temp);
 
         match concat {
@@ -672,11 +650,6 @@ fn copy_args(before: &[&str], input: &Path, after: &[&str], output: &Path) -> Ve
     args.extend(["-c:v", "copy", "-c:a", "copy"]);
     args.extend(["-avoid_negative_ts", "make_zero", "-y", &output]);
     args.into_iter().map(str::to_owned).collect()
-}
-
-/// Take the final `seconds` of the replay without needing its duration.
-fn trim_args(replay: &Path, seconds: u64, output: &Path) -> Vec<String> {
-    copy_args(&["-sseof", &format!("-{seconds}")], replay, &[], output)
 }
 
 /// Remux to the null sink purely to learn a file's real duration; the bundled
@@ -1109,7 +1082,6 @@ mod tests {
             artifacts: CaptureArtifacts {
                 replay,
                 regular,
-                requested_replay_ms: 8_000,
                 regular_started_at_ms: 1_772_323_205_000,
                 regular_stopped_at_ms: 1_772_323_275_000,
             },
@@ -1124,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn finalization_trims_and_concatenates_the_replay() {
+    fn finalization_measures_and_concatenates_the_replay() {
         let mut harness = Harness::new("finalize");
         harness
             .jobs
@@ -1141,8 +1113,7 @@ mod tests {
         assert_eq!(entry.timeline[0].start_ms(), 18_000);
         assert!(entry.media_path.exists());
 
-        // The trim used -sseof with the requested lead-in and the concat used
-        // the demuxer list; both intermediates are gone.
+        // The concat used the demuxer list; its intermediates are gone.
         let argv = harness.argv();
         assert!(
             argv.windows(2)
@@ -1180,9 +1151,9 @@ mod tests {
     }
 
     #[test]
-    fn a_failing_trim_falls_back_to_the_regular_recording_alone() {
+    fn a_failing_replay_measure_falls_back_to_the_regular_recording_alone() {
         let mut harness = Harness::new("finalize-fallback");
-        harness.set_mode("fail-trim");
+        harness.set_mode("fail-measure");
         harness
             .jobs
             .send(finalize_job(&harness, true))

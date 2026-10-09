@@ -66,7 +66,6 @@ pub struct CaptureArtifacts {
     /// GSR-saved replay pre-roll; missing falls back to regular-only.
     pub replay: Option<PathBuf>,
     pub regular: PathBuf,
-    pub requested_replay_ms: u64,
     pub regular_started_at_ms: i64,
     pub regular_stopped_at_ms: i64,
 }
@@ -245,7 +244,6 @@ impl Ipc {
 
 struct ActiveCapture {
     id: RecordingId,
-    requested_replay_ms: u64,
     regular_started_at_ms: i64,
     begun_at: Instant,
     /// The unanswered `save-replay` request; `None` once it was answered or
@@ -493,7 +491,6 @@ impl Recorder {
         let begun_at = Instant::now();
         self.active = Some(ActiveCapture {
             id: request.id,
-            requested_replay_ms: request.requested_replay_ms,
             regular_started_at_ms,
             begun_at,
             save_id,
@@ -635,7 +632,6 @@ impl Recorder {
         let artifacts = ending.regular.map(|regular| CaptureArtifacts {
             replay: ending.active.replay,
             regular,
-            requested_replay_ms: ending.active.requested_replay_ms,
             regular_started_at_ms: ending.active.regular_started_at_ms,
             regular_stopped_at_ms: ending.regular_stopped_at_ms,
         });
