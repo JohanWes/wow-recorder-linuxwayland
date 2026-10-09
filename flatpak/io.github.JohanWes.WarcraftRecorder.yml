@@ -64,9 +64,13 @@ modules:
       - type: dir
         path: ../native
         dest: native
+        skip:
+          - target
       - type: dir
         path: ../data
         dest: data
+        skip:
+          - screenshots
       - type: dir
         path: ../tests/native
         dest: tests/native

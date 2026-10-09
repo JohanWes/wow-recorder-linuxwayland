@@ -1,12 +1,12 @@
 # Native tests
 
-The maintained test surface is the Rust package and the fixture/golden corpus
-under `tests/native/`. Run it from the repository root with:
+Run the Rust tests from the repository root:
 
 ```sh
 cargo test --manifest-path native/Cargo.toml --all-targets
 ```
 
-Legacy config and sidecar fixtures are intentionally retained for the native
-one-way importer and compatible user tag/protection patch behavior. Generated
-media and Flatpak build directories are disposable and must not be committed.
+- `native/bin/`: shell fakes for `gpu-screen-recorder` and `ffmpeg`, used by
+  the recorder, media-job, and vertical-slice tests.
+- `native/fixtures/legacy/sidecars/`: sidecars written by the old Electron
+  app, kept for the legacy import and tag/protect patch tests.
