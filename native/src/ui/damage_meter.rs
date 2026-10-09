@@ -25,7 +25,7 @@ use warcraft_recorder::meter::{
 use warcraft_recorder::spelldb::SpellDb;
 
 use super::filters::class_css_class;
-use super::timeline::format_mm_ss;
+use super::format_clock;
 
 /// Raid-marker values (`destRaidFlags & 0xff`) in display order.
 const MARKERS: [(u8, &str); 8] = [
@@ -234,7 +234,7 @@ fn format_uptime(ms: u64) -> String {
     if ms < 60_000 {
         return format!("{:.1}s", ms as f64 / 1_000.0);
     }
-    format_mm_ss(ms)
+    format_clock(ms)
 }
 
 /// The selected entry's meter facts plus the combatant GUID → spec id join
@@ -1019,7 +1019,7 @@ impl Inner {
         match fight {
             Some(fight) => self
                 .title
-                .set_text(&format!("{} {title}", format_mm_ss(fight.elapsed_ms))),
+                .set_text(&format!("{} {title}", format_clock(fight.elapsed_ms))),
             None => self.title.set_text(&title),
         }
     }
@@ -1310,7 +1310,7 @@ impl Inner {
             content.append(&heading(&format!(
                 "Death {} — {}",
                 index + 1,
-                format_mm_ss(death.at_ms)
+                format_clock(death.at_ms)
             )));
             // Each bar is the health the unit was left on after the event, so
             // the list reads as a health bar draining towards the death.
@@ -1553,7 +1553,7 @@ impl Inner {
                 .collect();
             let list = history_list(items, move |(at_ms, target)| {
                 let at_ms = *at_ms;
-                let row = fill_line(class, &format_mm_ss(at_ms), target, 1.0);
+                let row = fill_line(class, &format_clock(at_ms), target, 1.0);
                 this.row_button(&row.overlay, move |this| this.seek_to(at_ms))
                     .upcast()
             });

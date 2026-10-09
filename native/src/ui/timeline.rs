@@ -174,9 +174,6 @@ pub fn hover_label(
     })
 }
 
-/// The damage meter's name for the shared clock format.
-pub use super::format_clock as format_mm_ss;
-
 // --- Widget ---
 
 const TRACK_HEIGHT: i32 = 34;
