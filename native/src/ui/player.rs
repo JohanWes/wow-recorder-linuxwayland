@@ -994,8 +994,8 @@ impl Inner {
         if self.time_label_state.replace(Some(rendered)) != Some(rendered) {
             self.time_label.set_text(&format!(
                 "{} / {}",
-                timeline::format_mm_ss(position_ms),
-                timeline::format_mm_ss(duration_ms),
+                super::format_clock(position_ms),
+                super::format_clock(duration_ms),
             ));
         }
     }

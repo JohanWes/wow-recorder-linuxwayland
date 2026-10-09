@@ -15,6 +15,8 @@ use warcraft_recorder::domain::{
     TimelineKind, TimelineShape,
 };
 
+use super::format_clock;
+
 /// Marker visibility preferences, mirrored from `InterfaceSettings`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarkerPrefs {
@@ -163,7 +165,7 @@ pub fn hover_label(
         }
     }
     best.map(|(_, (start_ms, _, label))| {
-        let time = format_mm_ss(*start_ms);
+        let time = format_clock(*start_ms);
         match label {
             Some(label) => format!("{label} - {time}"),
             None => time,
@@ -171,10 +173,8 @@ pub fn hover_label(
     })
 }
 
-pub fn format_mm_ss(ms: u64) -> String {
-    let total = ms / 1000;
-    format!("{}:{:02}", total / 60, total % 60)
-}
+/// The damage meter's name for the shared clock format.
+pub use super::format_clock as format_mm_ss;
 
 // --- Widget ---
 
@@ -512,7 +512,7 @@ impl Timeline {
                     f64::from(x)
                 };
                 let text = hover_label(&state.labels.borrow(), x, duration_ms, width, 8.0)
-                    .unwrap_or_else(|| format_mm_ss(x_to_ms(x, duration_ms, width)));
+                    .unwrap_or_else(|| format_clock(x_to_ms(x, duration_ms, width)));
                 tooltip.set_text(Some(&text));
                 true
             });

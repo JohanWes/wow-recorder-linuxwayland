@@ -312,6 +312,17 @@ pub fn category_label(category: &Category) -> &str {
         .unwrap_or("Recordings")
 }
 
+/// A duration as `m:ss`, or `h:mm:ss` from one hour.
+pub fn format_clock(ms: u64) -> String {
+    let total = ms / 1000;
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 /// Run the shell for the already-registered primary application; returns the
 /// process exit code. The caller joins the coordinator and tray handles after
 /// this returns.

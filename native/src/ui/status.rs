@@ -15,7 +15,7 @@ use warcraft_recorder::coordinator::AppSnapshot;
 use warcraft_recorder::domain::{Problem, RecorderStatus, RecoveryAction};
 use warcraft_recorder::storage::now_unix_ms;
 
-use super::{ActionSink, ShellAction};
+use super::{ActionSink, ShellAction, format_clock};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
@@ -181,19 +181,10 @@ pub fn view(snapshot: &AppSnapshot) -> StatusView {
     }
 }
 
-/// Format the elapsed anchor as `m:ss` (or `h:mm:ss`) against `now_unix_ms`.
+/// Format the elapsed anchor against `now_unix_ms`; a now-before-anchor
+/// snapshot renders as zero rather than a negative time.
 pub fn elapsed_label(anchor_unix_ms: i64, now_unix_ms: i64) -> String {
-    // `saturating_sub` on i64 clamps at i64::MIN, not zero; clamp the elapsed
-    // difference so a now-before-anchor snapshot never renders a negative time.
-    let seconds = now_unix_ms.saturating_sub(anchor_unix_ms).max(0) / 1_000;
-    let hours = seconds / 3_600;
-    let minutes = seconds % 3_600 / 60;
-    let seconds = seconds % 60;
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
+    format_clock(now_unix_ms.saturating_sub(anchor_unix_ms).max(0) as u64)
 }
 
 pub(crate) fn recovery_label(action: RecoveryAction) -> &'static str {

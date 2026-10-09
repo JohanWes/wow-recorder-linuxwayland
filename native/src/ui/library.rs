@@ -141,16 +141,6 @@ fn raid_difficulty_label(id: Option<u32>, stored: Option<&str>) -> String {
     .to_owned()
 }
 
-fn format_duration(ms: u64) -> String {
-    let total = ms / 1000;
-    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m}:{s:02}")
-    }
-}
-
 fn format_date(unix_ms: i64) -> String {
     glib::DateTime::from_unix_local(unix_ms / 1000)
         .and_then(|dt| dt.format("%Y-%m-%d %H:%M"))
@@ -1328,7 +1318,7 @@ impl Inner {
         text_column(
             "Duration",
             false,
-            |r| format_duration(r.duration_ms),
+            |r| super::format_clock(r.duration_ms),
             sort_by(|r| r.duration_ms),
         )
     }
