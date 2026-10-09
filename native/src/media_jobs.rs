@@ -248,14 +248,8 @@ impl MediaWorker {
         artifacts: &CaptureArtifacts,
         final_temp: &Path,
     ) -> Result<Option<u64>, String> {
-        let regular_only = || -> Result<Option<u64>, String> {
-            fs::copy(&artifacts.regular, final_temp)
-                .map(|_| Some(0))
-                .map_err(|error| format!("copy regular recording: {error}"))
-        };
-
         let Some(replay) = artifacts.replay.as_deref().filter(|path| path.exists()) else {
-            return regular_only();
+            return self.regular_only(artifacts, final_temp);
         };
 
         let trim_temp = self
@@ -281,7 +275,7 @@ impl MediaWorker {
                     tracing::warn!(%message, "replay trim failed; keeping the regular recording only");
                 }
                 let _ = fs::remove_file(&trim_temp);
-                return regular_only();
+                return self.regular_only(artifacts, final_temp);
             }
         };
 
@@ -310,7 +304,9 @@ impl MediaWorker {
         if let Err(error) = fs::write(&list_temp, list) {
             let _ = fs::remove_file(&trim_temp);
             let _ = fs::remove_file(&list_temp);
-            return regular_only().map_err(|_| format!("write concat list: {error}"));
+            return self
+                .regular_only(artifacts, final_temp)
+                .map_err(|_| format!("write concat list: {error}"));
         }
 
         let concat = self.run_ffmpeg(
@@ -326,8 +322,22 @@ impl MediaWorker {
             FfmpegOutcome::Cancelled => Ok(None),
             FfmpegOutcome::Failed { message } => {
                 tracing::warn!(%message, "replay concat failed; keeping the regular recording only");
-                regular_only()
+                self.regular_only(artifacts, final_temp)
             }
+        }
+    }
+
+    /// The regular recording alone, remuxed so the library only holds MP4.
+    fn regular_only(
+        &mut self,
+        artifacts: &CaptureArtifacts,
+        final_temp: &Path,
+    ) -> Result<Option<u64>, String> {
+        let args = copy_args(&[], &artifacts.regular, &[], final_temp);
+        match self.run_ffmpeg(WorkKind::Finalize, args, None) {
+            FfmpegOutcome::Done { .. } => Ok(Some(0)),
+            FfmpegOutcome::Cancelled => Ok(None),
+            FfmpegOutcome::Failed { message } => Err(format!("remux regular recording: {message}")),
         }
     }
 
@@ -1172,7 +1182,7 @@ mod tests {
     #[test]
     fn a_failing_trim_falls_back_to_the_regular_recording_alone() {
         let mut harness = Harness::new("finalize-fallback");
-        harness.set_mode("fail");
+        harness.set_mode("fail-trim");
         harness
             .jobs
             .send(finalize_job(&harness, true))
@@ -1185,10 +1195,39 @@ mod tests {
         // the marker keeps its activity-relative distance minus the lead-in.
         assert_eq!(entry.duration_ms, 70_000);
         assert_eq!(entry.timeline[0].start_ms(), 15_000);
+        assert_regular_remuxed(&harness, &entry);
+        harness.shutdown_and_join();
+    }
+
+    /// The last FFmpeg run remuxed the regular recording into the entry, so
+    /// GSR's Matroska never lands in the library as-is.
+    fn assert_regular_remuxed(harness: &Harness, entry: &LibraryEntry) {
+        let regular = harness.root.join("capture/regular/Video.mkv");
+        let argv = harness.argv();
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair[0] == "-i" && pair[1] == regular.to_string_lossy())
+        );
+        assert!(argv.windows(2).any(|pair| pair == ["-c:v", "copy"]));
         assert_eq!(
             fs::read_to_string(&entry.media_path).expect("media"),
-            "regular bytes"
+            "fake ffmpeg media"
         );
+    }
+
+    #[test]
+    fn finalization_without_a_replay_remuxes_the_regular_recording() {
+        let mut harness = Harness::new("finalize-regular-only");
+        harness
+            .jobs
+            .send(finalize_job(&harness, false))
+            .expect("send");
+
+        let MediaEvent::Completed { entry, .. } = harness.outcome() else {
+            panic!("regular-only finalize did not complete");
+        };
+        assert_eq!(entry.duration_ms, 70_000);
+        assert_regular_remuxed(&harness, &entry);
         harness.shutdown_and_join();
     }
 
