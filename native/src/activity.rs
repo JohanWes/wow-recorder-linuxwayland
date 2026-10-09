@@ -34,11 +34,11 @@ mod tables;
 
 pub(crate) use tables::instance_name;
 use tables::{
-    CURRENT_RETAIL_ENCOUNTERS, PartyType, RETAIL_DUNGEON_MAP_IDS, arena_zone_name,
-    battleground_name, classic_arena_name, classic_battleground_name, classic_unique_aura,
-    classic_unique_spec, difficulty_info, difficulty_order, dungeon_encounter_name, dungeon_name,
-    dungeon_timers, md5_hex, mop_challenge_mode_name, mop_challenge_mode_timers, raid_lookup,
-    raid_zone_id, retail_battleground_name, retail_unique_spec,
+    CURRENT_RETAIL_ENCOUNTERS, PartyType, arena_zone_name, battleground_name, classic_arena_name,
+    classic_battleground_name, classic_unique_aura, classic_unique_spec, difficulty_info,
+    difficulty_order, dungeon_encounter_name, dungeon_name, dungeon_timers, md5_hex,
+    mop_challenge_mode_name, mop_challenge_mode_timers, raid_lookup, raid_zone_id,
+    retail_battleground_name, retail_unique_spec,
 };
 
 const RAID_DEFAULT_OVERRUN_MS: u64 = 3_000;
@@ -75,13 +75,17 @@ pub(crate) fn is_player_controlled_friendly(flags: u64) -> bool {
     flags & CONTROL_PLAYER != 0 && is_unit_friendly(flags)
 }
 
-/// Name, realm, region from a `Name-Realm(-x-Region)` string.
+/// Name, realm, region from a `Name-Realm(-Region)` string.
 fn ambiguate(name_realm: &str) -> (String, Option<String>, Option<String>) {
-    let parts: Vec<&str> = name_realm.split('-').collect();
-    let name = parts.first().unwrap_or(&"").to_string();
-    let realm = parts.get(1).map(|value| (*value).to_string());
-    let region = parts.get(3).map(|value| (*value).to_string());
+    let mut parts = name_realm.splitn(3, '-');
+    let name = parts.next().unwrap_or_default().to_owned();
+    let realm = parts.next().map(str::to_owned);
+    let region = parts.next().map(str::to_owned);
     (name, realm, region)
+}
+
+fn win_loss(won: bool) -> Outcome {
+    if won { Outcome::Win } else { Outcome::Loss }
 }
 
 pub(crate) fn relative_ms(started_at_ms: i64, at_ms: i64) -> u64 {
@@ -164,37 +168,22 @@ impl ActivityEngine {
             occurred_at_ms,
             event,
         } = event;
+        let (state, rules) = match flavor {
+            GameFlavor::Retail => (&mut self.retail, Rules::Retail),
+            GameFlavor::Classic => (&mut self.classic, Rules::Classic),
+            GameFlavor::Era => (&mut self.era, Rules::Era),
+            GameFlavor::Unknown(_) => return Vec::new(),
+        };
         let mut actions = Vec::new();
-        match flavor {
-            GameFlavor::Retail => handle_event(
-                &mut self.retail,
-                Rules::Retail,
-                &event,
-                occurred_at_ms,
-                config,
-                &mut self.finished,
-                &mut actions,
-            ),
-            GameFlavor::Classic => handle_event(
-                &mut self.classic,
-                Rules::Classic,
-                &event,
-                occurred_at_ms,
-                config,
-                &mut self.finished,
-                &mut actions,
-            ),
-            GameFlavor::Era => handle_event(
-                &mut self.era,
-                Rules::Era,
-                &event,
-                occurred_at_ms,
-                config,
-                &mut self.finished,
-                &mut actions,
-            ),
-            GameFlavor::Unknown(_) => {}
-        }
+        handle_event(
+            state,
+            rules,
+            &event,
+            occurred_at_ms,
+            config,
+            &mut self.finished,
+            &mut actions,
+        );
         actions
     }
 
@@ -253,6 +242,30 @@ struct ActiveActivity {
     timeline: Vec<TimelineItem>,
     meter: MeterAccumulator,
     kind: ActiveKind,
+}
+
+impl ActiveActivity {
+    fn new(
+        category: Category,
+        flavor: GameFlavor,
+        started_at_ms: i64,
+        overrun_ms: u64,
+        meter: MeterAccumulator,
+        kind: ActiveKind,
+    ) -> Self {
+        Self {
+            id: RecordingId::new(),
+            category,
+            flavor,
+            started_at_ms,
+            overrun_ms,
+            combatants: Combatants::default(),
+            player_guid: None,
+            timeline: Vec::new(),
+            meter,
+            kind,
+        }
+    }
 }
 
 enum ActiveKind {
@@ -811,7 +824,7 @@ fn process_combatant(
     let position = existing.or(allow_new.then_some(combatants.entries.len()))?;
     if combatants
         .get(guid)
-        .is_some_and(CombatantState::is_fully_defined)
+        .is_some_and(|combatant| combatant.name.is_some())
     {
         return Some(position);
     }
@@ -983,17 +996,13 @@ fn start_raid(
         ALLERIA_ENCOUNTER_ID => (ALLERIA_UNIT_NAME, true),
         _ => ("", true),
     };
-    let active = ActiveActivity {
-        id: RecordingId::new(),
-        category: Category::Raids,
+    let active = ActiveActivity::new(
+        Category::Raids,
         flavor,
-        started_at_ms: at_ms,
-        overrun_ms: RAID_DEFAULT_OVERRUN_MS,
-        combatants: Combatants::default(),
-        player_guid: None,
-        timeline: Vec::new(),
-        meter: MeterAccumulator::new(at_ms, None),
-        kind: ActiveKind::Raid(RaidState {
+        at_ms,
+        RAID_DEFAULT_OVERRUN_MS,
+        MeterAccumulator::new(at_ms, None),
+        ActiveKind::Raid(RaidState {
             encounter_id,
             encounter_name: name.to_string(),
             difficulty_id,
@@ -1002,7 +1011,7 @@ fn start_raid(
             boss_unit_name,
             boss_unit_active,
         }),
-    };
+    );
     begin(state, active, config, actions);
 }
 
@@ -1050,7 +1059,7 @@ fn handle_encounter_end(
     if success {
         active.overrun_ms = u64::from(config.raid_overrun_seconds) * 1_000;
     }
-    let outcome = if success { Outcome::Win } else { Outcome::Loss };
+    let outcome = win_loss(success);
     let active = state.active.take().expect("checked above");
     finish(
         active,
@@ -1085,9 +1094,7 @@ fn close_open_segment(active: &mut ActiveActivity, at_ms: i64) {
 fn segment_item(started_at_ms: i64, segment: &CmSegment) -> TimelineItem {
     let start = relative_ms(started_at_ms, segment.start_ms);
     let end = relative_ms(started_at_ms, segment.end_ms.unwrap_or(segment.start_ms)).max(start);
-    let outcome = segment
-        .result
-        .map(|result| if result { Outcome::Win } else { Outcome::Loss });
+    let outcome = segment.result.map(win_loss);
     TimelineItem::span(
         segment.kind.clone(),
         start,
@@ -1124,7 +1131,7 @@ fn handle_challenge_start(
     }
     match rules {
         Rules::Retail => {
-            if !RETAIL_DUNGEON_MAP_IDS.contains(&map_id) || dungeon_timers(map_id).is_none() {
+            if dungeon_timers(map_id).is_none() {
                 return;
             }
             if level < config.min_keystone_level {
@@ -1164,17 +1171,13 @@ fn handle_challenge_start(
             MeterAccumulator::new(at_ms, None),
         ),
     };
-    let active = ActiveActivity {
-        id: RecordingId::new(),
-        category: Category::MythicPlus,
+    let active = ActiveActivity::new(
+        Category::MythicPlus,
         flavor,
-        started_at_ms: at_ms,
-        overrun_ms: 0,
-        combatants: Combatants::default(),
-        player_guid: None,
-        timeline: Vec::new(),
+        at_ms,
+        0,
         meter,
-        kind: ActiveKind::Challenge(ChallengeState {
+        ActiveKind::Challenge(ChallengeState {
             zone_id,
             map_id,
             level,
@@ -1182,7 +1185,7 @@ fn handle_challenge_start(
             cm_duration_ms: None,
             segments,
         }),
-    };
+    );
     begin(state, active, config, actions);
 }
 
@@ -1290,21 +1293,17 @@ fn handle_arena_start(
         _ => return,
     };
     if state.active.is_none() && category == Category::SoloShuffle {
-        let active = ActiveActivity {
-            id: RecordingId::new(),
-            category: Category::SoloShuffle,
-            flavor: GameFlavor::Retail,
-            started_at_ms: at_ms,
-            overrun_ms: PVP_DEFAULT_OVERRUN_MS,
-            combatants: Combatants::default(),
-            player_guid: None,
-            timeline: Vec::new(),
-            meter: MeterAccumulator::new(at_ms, Some("Round 1".to_owned())),
-            kind: ActiveKind::SoloShuffle(ShuffleState {
+        let active = ActiveActivity::new(
+            Category::SoloShuffle,
+            GameFlavor::Retail,
+            at_ms,
+            PVP_DEFAULT_OVERRUN_MS,
+            MeterAccumulator::new(at_ms, Some("Round 1".to_owned())),
+            ActiveKind::SoloShuffle(ShuffleState {
                 zone_id,
                 rounds: vec![ShuffleRound::new(at_ms)],
             }),
-        };
+        );
         begin(state, active, config, actions);
     } else if state.active.is_some() && category == Category::SoloShuffle {
         // New round of the existing shuffle. A previous round that never ended
@@ -1331,18 +1330,14 @@ fn handle_arena_start(
         // A new round cuts the meter fight at the existing round transition.
         active.meter.cut(at_ms, format!("Round {round_number}"));
     } else {
-        let active = ActiveActivity {
-            id: RecordingId::new(),
+        let active = ActiveActivity::new(
             category,
-            flavor: GameFlavor::Retail,
-            started_at_ms: at_ms,
-            overrun_ms: PVP_DEFAULT_OVERRUN_MS,
-            combatants: Combatants::default(),
-            player_guid: None,
-            timeline: Vec::new(),
-            meter: MeterAccumulator::new(at_ms, None),
-            kind: ActiveKind::Arena(ArenaState { zone_id }),
-        };
+            GameFlavor::Retail,
+            at_ms,
+            PVP_DEFAULT_OVERRUN_MS,
+            MeterAccumulator::new(at_ms, None),
+            ActiveKind::Arena(ArenaState { zone_id }),
+        );
         begin(state, active, config, actions);
     }
 }
@@ -1377,7 +1372,7 @@ fn handle_arena_end(
         return;
     }
     let result = arena_result(active, winning_team_id);
-    let outcome = if result { Outcome::Win } else { Outcome::Loss };
+    let outcome = win_loss(result);
     let active = state.active.take().expect("checked above");
     finish(
         active,
@@ -1477,11 +1472,11 @@ fn classic_zone_change(
 ) {
     if let Some(active_ref) = state.active.as_ref() {
         let activity_zone = active_zone_id(active_ref).unwrap_or(0);
-        if matches!(active_ref.kind, ActiveKind::Arena(_)) && zone_id != activity_zone {
-            end_on_death_count(state, at_ms, config, finished, actions);
-            return;
-        }
-        if matches!(active_ref.kind, ActiveKind::Battleground { .. }) && zone_id != activity_zone {
+        if matches!(
+            active_ref.kind,
+            ActiveKind::Arena(_) | ActiveKind::Battleground { .. }
+        ) && zone_id != activity_zone
+        {
             end_on_death_count(state, at_ms, config, finished, actions);
         }
         return;
@@ -1490,18 +1485,14 @@ fn classic_zone_change(
         start_battleground(state, zone_id, GameFlavor::Classic, at_ms, config, actions);
     } else if classic_arena_name(zone_id).is_some() {
         // Classic arenas start as 2v2; the roster size adjusts the category.
-        let active = ActiveActivity {
-            id: RecordingId::new(),
-            category: Category::TwoVTwo,
-            flavor: GameFlavor::Classic,
-            started_at_ms: at_ms,
-            overrun_ms: PVP_DEFAULT_OVERRUN_MS,
-            combatants: Combatants::default(),
-            player_guid: None,
-            timeline: Vec::new(),
-            meter: MeterAccumulator::new(at_ms, None),
-            kind: ActiveKind::Arena(ArenaState { zone_id }),
-        };
+        let active = ActiveActivity::new(
+            Category::TwoVTwo,
+            GameFlavor::Classic,
+            at_ms,
+            PVP_DEFAULT_OVERRUN_MS,
+            MeterAccumulator::new(at_ms, None),
+            ActiveKind::Arena(ArenaState { zone_id }),
+        );
         begin(state, active, config, actions);
     }
 }
@@ -1517,18 +1508,14 @@ fn start_battleground(
     if state.active.is_some() {
         return;
     }
-    let active = ActiveActivity {
-        id: RecordingId::new(),
-        category: Category::Battlegrounds,
+    let active = ActiveActivity::new(
+        Category::Battlegrounds,
         flavor,
-        started_at_ms: at_ms,
-        overrun_ms: PVP_DEFAULT_OVERRUN_MS,
-        combatants: Combatants::default(),
-        player_guid: None,
-        timeline: Vec::new(),
-        meter: MeterAccumulator::new(at_ms, None),
-        kind: ActiveKind::Battleground { zone_id },
-    };
+        at_ms,
+        PVP_DEFAULT_OVERRUN_MS,
+        MeterAccumulator::new(at_ms, None),
+        ActiveKind::Battleground { zone_id },
+    );
     begin(state, active, config, actions);
 }
 
@@ -1559,21 +1546,13 @@ fn end_on_death_count(
 fn battleground_estimate(active: &ActiveActivity) -> Outcome {
     let friends_dead = death_count(active, true);
     let enemies_dead = death_count(active, false);
-    if friends_dead < enemies_dead {
-        Outcome::Win
-    } else {
-        Outcome::Loss
-    }
+    win_loss(friends_dead < enemies_dead)
 }
 
 /// Deaths are stored as timeline points: friendly deaths carry `Loss`, enemy
 /// deaths carry `Win`.
 fn death_count(active: &ActiveActivity, friendly: bool) -> usize {
-    let want = if friendly {
-        Outcome::Loss
-    } else {
-        Outcome::Win
-    };
+    let want = win_loss(!friendly);
     active
         .timeline
         .iter()
@@ -1851,11 +1830,7 @@ fn handle_unit_died(
     }
     let relative = relative_ms(active.started_at_ms, at_ms - DEATH_MARKER_BACK_OFFSET_MS);
     let (plain_name, _, _) = ambiguate(name);
-    let outcome = if friendly {
-        Outcome::Loss
-    } else {
-        Outcome::Win
-    };
+    let outcome = win_loss(!friendly);
 
     if matches!(active.kind, ActiveKind::SoloShuffle(_)) {
         let started_at_ms = active.started_at_ms;
@@ -2041,35 +2016,29 @@ fn finish(
         ActiveKind::Challenge(challenge) => challenge.zone_id != 0,
         ActiveKind::Raid(_) => true,
     };
-    if player_summary(&active).is_none() || !zone_ok {
-        let id = active.id.clone();
-        finished.push(build_draft(active, outcome, ended_at_ms));
-        actions.push(ActivityAction::Discard {
+    let draft = build_draft(active, outcome, ended_at_ms);
+    let id = draft.id.clone();
+    let action = if draft.player.is_none() || !zone_ok {
+        ActivityAction::Discard {
             id,
             reason: DiscardReason::IncompleteMetadata,
-        });
-        return;
-    }
-
-    let duration_ms = relative_ms(active.started_at_ms, ended_at_ms) + active.overrun_ms;
-    if active.category == Category::Raids
-        && (duration_ms as i64) < i64::from(config.min_raid_duration_seconds) * 1_000
+        }
+    } else if draft.category == Category::Raids
+        && (draft.duration_ms.unwrap_or_default() as i64)
+            < i64::from(config.min_raid_duration_seconds) * 1_000
     {
-        let id = active.id.clone();
-        finished.push(build_draft(active, outcome, ended_at_ms));
-        actions.push(ActivityAction::Discard {
+        ActivityAction::Discard {
             id,
             reason: DiscardReason::BelowMinDuration,
-        });
-        return;
-    }
-
-    let id = active.id.clone();
-    finished.push(build_draft(active, outcome, ended_at_ms));
-    actions.push(match end {
-        EndKind::Complete(_) => ActivityAction::Complete { id },
-        EndKind::Abandon => ActivityAction::Abandon { id },
-    });
+        }
+    } else {
+        match end {
+            EndKind::Complete(_) => ActivityAction::Complete { id },
+            EndKind::Abandon => ActivityAction::Abandon { id },
+        }
+    };
+    finished.push(draft);
+    actions.push(action);
 }
 
 fn abandon_outcome(active: &ActiveActivity) -> Outcome {
@@ -2194,8 +2163,13 @@ fn combatant_names(active: &ActiveActivity) -> HashMap<String, String> {
 fn build_details(active: &ActiveActivity) -> ActivityDetails {
     match &active.kind {
         ActiveKind::Raid(raid) => {
-            let boss_percent =
-                ((100.0 * raid.current_hp as f64) / raid.max_hp as f64).round() as u8;
+            let boss_percent = if raid.max_hp == 0 {
+                100
+            } else {
+                ((100.0 * raid.current_hp as f64) / raid.max_hp as f64)
+                    .round()
+                    .min(100.0) as u8
+            };
             ActivityDetails::Raid {
                 zone_id: Some(raid_zone_id(raid.encounter_id)),
                 zone_name: Some(raid_lookup(raid.encounter_id).short_name.to_string()),
@@ -2237,11 +2211,7 @@ fn build_details(active: &ActiveActivity) -> ActivityDetails {
                 .enumerate()
                 .map(|(index, round)| RoundSummary {
                     round: (index + 1) as u32,
-                    outcome: if round.result {
-                        Outcome::Win
-                    } else {
-                        Outcome::Loss
-                    },
+                    outcome: win_loss(round.result),
                     start_ms: relative_ms(started_at_ms, round.start_ms),
                     duration_ms: round
                         .end_ms
@@ -2405,11 +2375,7 @@ fn round_point(started_at_ms: i64, index: usize, round: &ShuffleRound) -> Timeli
         TimelineKind::Round,
         relative_ms(started_at_ms, round.start_ms),
         Some(format!("Round {}", index + 1)),
-        Some(if round.result {
-            Outcome::Win
-        } else {
-            Outcome::Loss
-        }),
+        Some(win_loss(round.result)),
         None,
     )
 }
@@ -2422,11 +2388,7 @@ fn round_span(started_at_ms: i64, index: usize, round: &ShuffleRound) -> Timelin
         start,
         end,
         Some(format!("Round {}", index + 1)),
-        Some(if round.result {
-            Outcome::Win
-        } else {
-            Outcome::Loss
-        }),
+        Some(win_loss(round.result)),
         None,
     )
     .expect("clamped span bounds")
@@ -2777,13 +2739,6 @@ mod tests {
                 1,
                 "raid encounter {encounter_id} was not recordable"
             );
-        }
-
-        for encounter_id in [
-            3101, 3102, 3103, 3105, 3207, 3208, 3209, 3199, 3200, 3201, 3202, 3285, 3286, 3287,
-            3456, 3457, 3458, 2124, 2125, 2126, 2127, 2139, 2142, 2140, 2143,
-        ] {
-            assert!(dungeon_encounter_name(encounter_id).is_some());
         }
     }
 

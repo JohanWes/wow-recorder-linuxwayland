@@ -216,20 +216,6 @@ pub(super) fn dungeon_encounter_name(encounter_id: u32) -> Option<&'static str> 
         .map(|(_, name)| *name)
 }
 
-/// Retail keystone map membership.
-#[rustfmt::skip]
-pub(super) static RETAIL_DUNGEON_MAP_IDS: &[u32] = &[
-    166, 169, 227, 234, 369, 370, 375, 376, 377, 378, 379, 380, 381, 382, 391, 392,
-    399, 400, 401, 402, 200, 210, 165, 2,
-    405, 406, 403, 404, 245, 251, 206, 438,
-    463, 464, 248, 198, 199, 244, 168, 456,
-    353, 501, 502, 503, 505, 507,
-    499, 504, 500, 506, 247, 525,
-    542,
-    558, 560, 559, 557, 556, 239, 161,
-    587, 586, 584, 585, 588, 250, 249,
-];
-
 /// Retail keystone timers in seconds `[one, two, three] chest`.
 #[rustfmt::skip]
 static DUNGEON_TIMERS: &[(u32, [f64; 3])] = &[
