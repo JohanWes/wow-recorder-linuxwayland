@@ -2,9 +2,7 @@
 
 //! Single-view viewpoint selection logic, GTK-free: which local POVs a
 //! correlated activity offers, how they are labelled, and which one to open.
-//!
-//! Multi-POV grid playback (synchronized 2–4 player grid, drift correction)
-//! was removed from the product by maintainer decision (2026-07-22).
+//! The player shows one viewpoint at a time.
 
 use warcraft_recorder::domain::{LibraryEntry, RecordingId};
 

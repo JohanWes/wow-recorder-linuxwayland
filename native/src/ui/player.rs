@@ -5,10 +5,6 @@
 //! viewpoint selector. Volume/mute are process-shared session state; speed,
 //! position, and the clip range are session-only. All playback state lives in
 //! Clapper; this pane only issues commands and mirrors positions.
-//!
-//! Multi-POV grid playback (synchronized 2–4 player grid) was removed from
-//! the product by maintainer decision (2026-07-22); the viewpoint selector
-//! and individual local recordings remain.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::PathBuf;
