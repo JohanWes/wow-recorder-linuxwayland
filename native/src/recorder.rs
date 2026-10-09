@@ -947,113 +947,38 @@ fn text_tail(text: &str) -> String {
     String::from_utf8_lossy(&text.as_bytes()[start..]).into_owned()
 }
 
-/// Sectioned `--list-audio-devices` output:
-/// `default_output`/`default_input`/`device:<nonspace>` values, de-duplicated,
-/// with defaults always present.
+/// `--list-audio-devices` prints one `name|description` line per source. The
+/// defaults always come first; every other source is passed to `-a` as
+/// `device:<name>` and sorted by its PulseAudio/PipeWire name: `*_input*`
+/// sources are inputs, everything else (output monitors) is an output.
 fn parse_audio_devices(text: &str) -> AudioDevices {
-    #[derive(PartialEq)]
-    enum Section {
-        Outputs,
-        Inputs,
-        Unknown,
-    }
-    let mut section = Section::Unknown;
-    let mut outputs = Vec::new();
-    let mut inputs = Vec::new();
-    let mut all = Vec::new();
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let lower = line.to_ascii_lowercase();
-        if lower.contains("device") && lower.ends_with(':') {
-            if lower.contains("output") {
-                section = Section::Outputs;
-                continue;
-            }
-            if lower.contains("input") {
-                section = Section::Inputs;
-                continue;
-            }
-        }
-        let normalized = line
-            .strip_prefix("- ")
-            .or_else(|| line.strip_prefix("* "))
-            .unwrap_or(line);
-        let (value, detail) = match normalized.split_once('|') {
-            Some((value, detail)) => (value.trim(), detail.trim()),
-            None => match normalized.split_once(char::is_whitespace) {
-                Some((value, detail)) => (value, detail.trim()),
-                None => (normalized, ""),
-            },
+    let device = |id: &str, detail: &str| AudioDevice {
+        id: id.to_string(),
+        label: format!("{id} - {detail}"),
+    };
+    let mut devices = AudioDevices {
+        outputs: vec![device("default_output", "Default output device")],
+        inputs: vec![device("default_input", "Default input device")],
+    };
+    for line in text.lines() {
+        let Some((name, detail)) = line.split_once('|') else {
+            continue;
         };
-        let recognized = value == "default_output"
-            || value == "default_input"
-            || (value.starts_with("device:") && value.len() > "device:".len());
-        if !recognized {
+        let name = name.trim();
+        if name.is_empty() || name.starts_with("default_") {
             continue;
         }
-        let label = if detail.is_empty() {
-            value.to_string()
+        let list = if name.contains("_input") {
+            &mut devices.inputs
         } else {
-            format!("{value} - {detail}")
+            &mut devices.outputs
         };
-        let device = AudioDevice {
-            id: value.to_string(),
-            label,
-        };
-        match section {
-            Section::Outputs => outputs.push(device),
-            Section::Inputs => inputs.push(device),
-            Section::Unknown => all.push(device),
+        let id = format!("device:{name}");
+        if !list.iter().any(|existing| existing.id == id) {
+            list.push(device(&id, detail.trim()));
         }
     }
-
-    fn unique(devices: Vec<AudioDevice>, exclude: &str) -> Vec<AudioDevice> {
-        let mut seen = std::collections::HashSet::new();
-        devices
-            .into_iter()
-            .filter(|device| device.id != exclude && seen.insert(device.id.clone()))
-            .collect()
-    }
-
-    let mut final_outputs = unique(
-        if outputs.is_empty() {
-            all.clone()
-        } else {
-            outputs
-        },
-        "default_input",
-    );
-    let mut final_inputs = unique(
-        if inputs.is_empty() { all } else { inputs },
-        "default_output",
-    );
-    if !final_outputs
-        .iter()
-        .any(|device| device.id == "default_output")
-    {
-        final_outputs.insert(
-            0,
-            AudioDevice {
-                id: "default_output".to_string(),
-                label: "default_output - Default output device".to_string(),
-            },
-        );
-    }
-    if !final_inputs
-        .iter()
-        .any(|device| device.id == "default_input")
-    {
-        final_inputs.insert(
-            0,
-            AudioDevice {
-                id: "default_input".to_string(),
-                label: "default_input - Default input device".to_string(),
-            },
-        );
-    }
-    AudioDevices {
-        outputs: final_outputs,
-        inputs: final_inputs,
-    }
+    devices
 }
 
 #[cfg(test)]
@@ -1467,71 +1392,35 @@ mod tests {
     }
 
     #[test]
-    fn audio_discovery_parses_sections_and_inserts_defaults() {
+    fn audio_discovery_maps_gsr_sources_to_device_ids() {
         let mut recorder = Recorder::with_timeouts(test_timeouts());
-        let config = test_config("audio");
-        recorder.arm(&config).unwrap();
+        recorder.arm(&test_config("audio")).unwrap();
         let devices = recorder.audio_devices().unwrap();
+        let ids = |list: &[AudioDevice]| list.iter().map(|d| d.id.clone()).collect::<Vec<_>>();
         assert_eq!(
-            devices
-                .outputs
-                .iter()
-                .map(|device| device.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["default_output", "device:alsa_output.pci.analog-stereo"]
+            ids(&devices.outputs),
+            [
+                "default_output",
+                "device:alsa_output.pci.analog-stereo.monitor"
+            ]
         );
         assert_eq!(
-            devices
-                .inputs
-                .iter()
-                .map(|device| device.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["default_input", "device:alsa_input.usb-mic"]
+            ids(&devices.inputs),
+            ["default_input", "device:alsa_input.usb-mic"]
+        );
+        assert_eq!(
+            devices.inputs[1].label,
+            "device:alsa_input.usb-mic - Fake USB Microphone"
         );
         recorder.shutdown().unwrap();
 
-        // Unsectioned output falls back to the shared list, de-duplicates,
-        // and always includes both defaults.
-        let parsed =
-            parse_audio_devices("device:x Some Device\ndevice:x Some Device\ngarbage line\n");
+        // Duplicates collapse and lines without a description are ignored.
+        let parsed = parse_audio_devices("bluez_output.x|Headset\nbluez_output.x|Headset\nnoise\n");
         assert_eq!(
-            parsed
-                .outputs
-                .iter()
-                .map(|device| device.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["default_output", "device:x"]
+            ids(&parsed.outputs),
+            ["default_output", "device:bluez_output.x"]
         );
-        assert_eq!(parsed.inputs.len(), 2);
-        assert_eq!(parsed.outputs[1].label, "device:x - Some Device");
-
-        let parsed = parse_audio_devices(
-            "Output devices:\ndefault_output|Default output\ndevice:alsa_output.test|Built-in output\nInput devices:\ndefault_input|Default input\ndevice:alsa_input.test|USB microphone\n",
-        );
-        assert_eq!(
-            parsed
-                .outputs
-                .iter()
-                .map(|device| device.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["default_output", "device:alsa_output.test"]
-        );
-        assert_eq!(
-            parsed.outputs[1].label,
-            "device:alsa_output.test - Built-in output"
-        );
-        assert_eq!(
-            parsed
-                .inputs
-                .iter()
-                .map(|device| device.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["default_input", "device:alsa_input.test"]
-        );
-        assert_eq!(
-            parsed.inputs[1].label,
-            "device:alsa_input.test - USB microphone"
-        );
+        assert_eq!(ids(&parsed.inputs), ["default_input"]);
     }
 
     #[test]
