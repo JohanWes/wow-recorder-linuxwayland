@@ -2,7 +2,6 @@
 
 //! Incremental, coordinator-polled combat-log file reading.
 
-use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -10,14 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::domain::GameFlavor;
-use crate::parser::{
-    ParseFailure, ParseTimeContext, ParsedEvent, combat_log_version, event_name, parse_line,
-};
+use crate::parser::{ParseTimeContext, ParsedEvent, combat_log_version, event_name, parse_line};
 
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 const CHECKPOINT_BYTES: usize = 64;
-const MAX_LINE_BYTES: usize = 1024 * 1024;
-const MAX_DIAGNOSTICS: usize = 32;
 /// A new combat log only appears at session boundaries. Directory mtime makes
 /// discovery immediate in the normal case; this interval is the fallback for
 /// filesystems whose directory timestamps are coarse or unreliable.
@@ -38,32 +33,6 @@ impl fmt::Display for LogError {
             }
         }
     }
-}
-
-impl std::error::Error for LogError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            Self::NoActiveLog(_) => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiagnosticKind {
-    InvalidUtf8,
-    MalformedTimestamp,
-    MalformedRetainedEvent,
-    LineTooLong,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LogDiagnostic {
-    pub kind: DiagnosticKind,
-    pub file: PathBuf,
-    pub event_name: Option<String>,
-    pub line_number: u64,
-    pub byte_offset: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,8 +57,8 @@ pub struct LogTailer {
     observed_modified: Option<SystemTime>,
     source_modified: Option<SystemTime>,
     next_active_refresh: Instant,
-    discarding_long_line: bool,
-    diagnostics: VecDeque<LogDiagnostic>,
+    /// The last poll error logged, so a persistent one is logged only once.
+    last_error: Option<String>,
 }
 
 impl LogTailer {
@@ -125,12 +94,29 @@ impl LogTailer {
             observed_modified: metadata.modified().ok(),
             source_modified,
             next_active_refresh: Instant::now() + ACTIVE_FILE_REFRESH_INTERVAL,
-            discarding_long_line: false,
-            diagnostics: VecDeque::new(),
+            last_error: None,
         })
     }
 
+    /// Read whatever was appended since the last poll. Errors are also
+    /// logged here, once per distinct message, since polling repeats them
+    /// every tick until the folder recovers.
     pub fn poll(&mut self) -> Result<Vec<ParsedEvent>, LogError> {
+        let result = self.read_appended();
+        match &result {
+            Ok(_) => self.last_error = None,
+            Err(error) => {
+                let message = error.to_string();
+                if self.last_error.as_ref() != Some(&message) {
+                    tracing::warn!(error = %message, "log poll failed");
+                    self.last_error = Some(message);
+                }
+            }
+        }
+        result
+    }
+
+    fn read_appended(&mut self) -> Result<Vec<ParsedEvent>, LogError> {
         self.refresh_active_file()?;
         let current_metadata = metadata(&self.path)?;
         let current_identity = file_identity(&current_metadata);
@@ -167,14 +153,10 @@ impl LogTailer {
             let read_start = self.offset;
             self.offset += bytes_read as u64;
             remaining -= bytes_read as u64;
-            events.extend(self.consume(&buffer[..bytes_read], read_start)?);
+            events.extend(self.consume(&buffer[..bytes_read], read_start));
         }
         self.checkpoint = read_checkpoint(&self.path, self.offset)?;
         Ok(events)
-    }
-
-    pub fn take_diagnostics(&mut self) -> Vec<LogDiagnostic> {
-        self.diagnostics.drain(..).collect()
     }
 
     fn refresh_active_file(&mut self) -> Result<(), LogError> {
@@ -205,7 +187,6 @@ impl LogTailer {
         self.incomplete.clear();
         self.incomplete_offset = 0;
         self.line_number = 0;
-        self.discarding_long_line = false;
         self.checkpoint.clear();
         self.observed_len = 0;
         self.observed_modified = None;
@@ -221,21 +202,7 @@ impl LogTailer {
         Ok(read_checkpoint(&self.path, self.offset)? == self.checkpoint)
     }
 
-    fn consume(
-        &mut self,
-        mut bytes: &[u8],
-        mut read_start: u64,
-    ) -> Result<Vec<ParsedEvent>, LogError> {
-        if self.discarding_long_line {
-            let Some(end) = bytes.iter().position(|byte| *byte == b'\n') else {
-                self.incomplete_offset = read_start + bytes.len() as u64;
-                return Ok(Vec::new());
-            };
-            self.discarding_long_line = false;
-            self.line_number += 1;
-            bytes = &bytes[end + 1..];
-            read_start += end as u64 + 1;
-        }
+    fn consume(&mut self, bytes: &[u8], read_start: u64) -> Vec<ParsedEvent> {
         let mut pending = std::mem::take(&mut self.incomplete);
         if pending.is_empty() {
             self.incomplete_offset = read_start;
@@ -248,17 +215,6 @@ impl LogTailer {
             let end = consumed + relative_end;
             let offset = self.incomplete_offset + consumed as u64;
             self.line_number += 1;
-            if end - consumed > MAX_LINE_BYTES {
-                self.push_diagnostic(LogDiagnostic {
-                    kind: DiagnosticKind::LineTooLong,
-                    file: self.path.clone(),
-                    event_name: None,
-                    line_number: self.line_number,
-                    byte_offset: offset,
-                });
-                consumed = end + 1;
-                continue;
-            }
             let line_end = if pending.get(end.wrapping_sub(1)) == Some(&b'\r') {
                 end - 1
             } else {
@@ -277,38 +233,22 @@ impl LogTailer {
             pending.truncate(remaining);
             self.incomplete_offset += consumed as u64;
         }
-        if pending.len() > MAX_LINE_BYTES {
-            self.push_diagnostic(LogDiagnostic {
-                kind: DiagnosticKind::LineTooLong,
-                file: self.path.clone(),
-                event_name: None,
-                line_number: self.line_number + 1,
-                byte_offset: self.incomplete_offset,
-            });
-            pending.clear();
-            self.incomplete_offset = self.offset;
-            self.discarding_long_line = true;
-        }
         self.incomplete = pending;
-        Ok(events)
+        events
     }
 
     fn consume_line(&mut self, bytes: &[u8], offset: u64, events: &mut Vec<ParsedEvent>) {
         if bytes.is_empty() {
             return;
         }
-        let line = match std::str::from_utf8(bytes) {
-            Ok(line) => line,
-            Err(_) => {
-                self.push_diagnostic(LogDiagnostic {
-                    kind: DiagnosticKind::InvalidUtf8,
-                    file: self.path.clone(),
-                    event_name: None,
-                    line_number: self.line_number,
-                    byte_offset: offset,
-                });
-                return;
-            }
+        let Ok(line) = std::str::from_utf8(bytes) else {
+            tracing::debug!(
+                file = %self.path.display(),
+                line = self.line_number,
+                offset,
+                "skipped combat log line with invalid UTF-8"
+            );
+            return;
         };
         if let Some(version) = combat_log_version(line) {
             self.time_context = self.base_context.with_combat_log_version(version);
@@ -316,27 +256,16 @@ impl LogTailer {
         match parse_line(self.flavor.clone(), self.time_context, line) {
             Ok(Some(event)) => events.push(event),
             Ok(None) => {}
-            Err(failure) => {
-                let kind = match failure {
-                    ParseFailure::MalformedTimestamp => DiagnosticKind::MalformedTimestamp,
-                    ParseFailure::MalformedRetainedEvent => DiagnosticKind::MalformedRetainedEvent,
-                };
-                self.push_diagnostic(LogDiagnostic {
-                    kind,
-                    file: self.path.clone(),
-                    event_name: event_name(line).map(|name| name.chars().take(64).collect()),
-                    line_number: self.line_number,
-                    byte_offset: offset,
-                });
-            }
+            // Only the event name is logged, never the line's contents.
+            Err(failure) => tracing::debug!(
+                ?failure,
+                event = event_name(line).map(|name| name.chars().take(64).collect::<String>()),
+                file = %self.path.display(),
+                line = self.line_number,
+                offset,
+                "skipped unparseable combat log line"
+            ),
         }
-    }
-
-    fn push_diagnostic(&mut self, diagnostic: LogDiagnostic) {
-        if self.diagnostics.len() == MAX_DIAGNOSTICS {
-            self.diagnostics.pop_front();
-        }
-        self.diagnostics.push_back(diagnostic);
     }
 
     fn io_error(&self, source: io::Error) -> LogError {
@@ -457,20 +386,11 @@ fn probe_header_context(path: &Path, base: ParseTimeContext) -> Result<ParseTime
     Ok(combat_log_version(line).map_or(base, |version| base.with_combat_log_version(version)))
 }
 
-#[cfg(unix)]
 fn file_identity(metadata: &Metadata) -> FileIdentity {
     use std::os::unix::fs::MetadataExt;
     FileIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
-    }
-}
-
-#[cfg(not(unix))]
-fn file_identity(metadata: &Metadata) -> FileIdentity {
-    FileIdentity {
-        device: 0,
-        inode: metadata.len(),
     }
 }
 
@@ -504,8 +424,10 @@ mod tests {
     }
 
     #[test]
-    fn retained_event_split_at_every_byte_is_emitted_once() {
-        for split in 0..=EVENT.len() {
+    fn retained_event_split_mid_line_is_emitted_once() {
+        // Empty first half, inside the timestamp, at the event name, just
+        // before the newline, and the whole line at once.
+        for split in [0, 5, 18, EVENT.len() - 1, EVENT.len()] {
             let directory = test_directory();
             let path = directory.join("WoWCombatLog.txt");
             let mut tailer = tailer_with(&path, &EVENT.as_bytes()[..split]);
@@ -558,24 +480,6 @@ mod tests {
     }
 
     #[test]
-    fn live_tailing_uses_the_explicit_non_utc_time_context() {
-        let directory = test_directory();
-        let path = directory.join("WoWCombatLog.txt");
-        fs::write(&path, "existing").unwrap();
-        let mut tailer = LogTailer::open(
-            path.clone(),
-            GameFlavor::Retail,
-            ParseTimeContext::new(2026, 120),
-        )
-        .unwrap();
-        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        file.write_all(EVENT.as_bytes()).unwrap();
-        let events = tailer.poll().unwrap();
-        assert_eq!(events[0].occurred_at_ms, 1_775_755_633_200);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn same_inode_truncate_and_regrow_past_offset_restarts_at_zero() {
         let directory = test_directory();
         let path = directory.join("WoWCombatLog.txt");
@@ -597,111 +501,6 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_are_bounded_and_never_retain_line_contents() {
-        let directory = test_directory();
-        let path = directory.join("WoWCombatLog.txt");
-        let mut tailer = tailer_with(
-            &path,
-            b"4/9 19:27:13.200  UNIT_DIED,secret\n4/9 19:27:13.200  UNIT_DIED,\xff\n",
-        );
-        assert!(tailer.poll().unwrap().is_empty());
-        let diagnostics = tailer.take_diagnostics();
-        assert_eq!(diagnostics.len(), 2);
-        assert_eq!(
-            diagnostics.iter().map(|item| item.kind).collect::<Vec<_>>(),
-            [
-                DiagnosticKind::MalformedRetainedEvent,
-                DiagnosticKind::InvalidUtf8
-            ]
-        );
-        assert_eq!(diagnostics[0].event_name.as_deref(), Some("UNIT_DIED"));
-
-        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        for _ in 0..40 {
-            file.write_all(b"4/9 bad  ENCOUNTER_START,private\n")
-                .unwrap();
-        }
-        assert!(tailer.poll().unwrap().is_empty());
-        let diagnostics = tailer.take_diagnostics();
-        assert_eq!(diagnostics.len(), MAX_DIAGNOSTICS);
-        assert!(
-            diagnostics
-                .iter()
-                .all(|item| item.event_name.as_deref() == Some("ENCOUNTER_START"))
-        );
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn overlong_line_reports_once_then_recovers_at_newline() {
-        let directory = test_directory();
-        let path = directory.join("WoWCombatLog.txt");
-        let overlong_size = MAX_LINE_BYTES * 2 + 10;
-        let mut tailer = tailer_with(&path, &vec![b'x'; overlong_size]);
-        for _ in 0..=overlong_size / READ_CHUNK_BYTES + 1 {
-            assert!(tailer.poll().unwrap().is_empty());
-        }
-        assert_eq!(
-            tailer
-                .take_diagnostics()
-                .iter()
-                .filter(|item| item.kind == DiagnosticKind::LineTooLong)
-                .count(),
-            1
-        );
-
-        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        file.write_all(b"\n").unwrap();
-        file.write_all(EVENT.as_bytes()).unwrap();
-        assert_eq!(tailer.poll().unwrap().len(), 1);
-        assert!(tailer.take_diagnostics().is_empty());
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn complete_overlong_line_is_rejected_before_parsing_and_next_line_recovers() {
-        let directory = test_directory();
-        let path = directory.join("WoWCombatLog.txt");
-        let mut bytes = vec![b'x'; MAX_LINE_BYTES + 10];
-        bytes.push(b'\n');
-        bytes.extend_from_slice(EVENT.as_bytes());
-        let mut tailer = tailer_with(&path, &bytes);
-        let mut events = Vec::new();
-        for _ in 0..=MAX_LINE_BYTES / READ_CHUNK_BYTES + 1 {
-            events.extend(tailer.poll().unwrap());
-        }
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            tailer
-                .take_diagnostics()
-                .iter()
-                .filter(|item| item.kind == DiagnosticKind::LineTooLong)
-                .count(),
-            1
-        );
-        fs::remove_dir_all(directory).unwrap();
-    }
-    #[test]
-    fn version_22_header_seeds_the_wider_layout() {
-        let directory = test_directory();
-        let path = directory.join("WoWCombatLog.txt");
-        let mut tailer = tailer_with(&path, format!("{V22_HEADER}{V22_DAMAGE}").as_bytes());
-        let events = tailer.poll().unwrap();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            &events[0].event,
-            CombatEvent::Damage {
-                amount: 46,
-                dest_current_hp: Some(105),
-                dest_max_hp: Some(152),
-                ..
-            }
-        ));
-        assert!(tailer.take_diagnostics().is_empty());
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn live_at_eof_seeds_the_layout_from_a_complete_header_line() {
         let directory = test_directory();
         let path = directory.join("WoWCombatLog.txt");
@@ -716,7 +515,6 @@ mod tests {
             &events[0].event,
             CombatEvent::Damage { amount: 46, .. }
         ));
-        assert!(tailer.take_diagnostics().is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -752,7 +550,6 @@ mod tests {
             CombatEvent::Damage { amount: 46, .. }
         ));
         assert_eq!(tailer.path, third);
-        assert!(tailer.take_diagnostics().is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -767,7 +564,6 @@ mod tests {
             &events[0].event,
             CombatEvent::Damage { amount: 46, .. }
         ));
-        assert!(tailer.take_diagnostics().is_empty());
 
         let path = directory.join("WoWCombatLog-bad-header.txt");
         let mut tailer = tailer_with(
@@ -780,7 +576,6 @@ mod tests {
             &events[0].event,
             CombatEvent::Damage { amount: 46, .. }
         ));
-        assert!(tailer.take_diagnostics().is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
 }

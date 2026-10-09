@@ -765,12 +765,9 @@ impl Coordinator {
     fn poll_logs(&mut self) {
         let mut events = Vec::new();
         for tailer in &mut self.tailers {
-            match tailer.poll() {
-                Ok(polled) => events.extend(polled),
-                Err(error) => tracing::warn!(%error, "log poll failed"),
-            }
-            for diagnostic in tailer.take_diagnostics() {
-                tracing::debug!(?diagnostic, "log diagnostic");
+            // The tailer logs its own errors, once per distinct message.
+            if let Ok(polled) = tailer.poll() {
+                events.extend(polled);
             }
         }
         for event in events {
