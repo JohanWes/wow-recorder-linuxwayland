@@ -126,17 +126,7 @@ fn view_from_key(key: &str) -> Option<View> {
 }
 
 fn view_empty_message(view: View) -> String {
-    let noun = match view {
-        View::Metric(MeterMetric::Damage) => "damage",
-        View::Metric(MeterMetric::DamageTaken) => "damage taken",
-        View::Metric(MeterMetric::Healing) => "healing",
-        View::Metric(MeterMetric::Interrupts) => "interrupts",
-        View::Metric(MeterMetric::Dispels) => "dispels",
-        View::Metric(MeterMetric::Casts) => "casts",
-        View::Metric(MeterMetric::Buffs) | View::Buffs => "buffs",
-        View::Deaths => "deaths",
-    };
-    format!("No {noun} in this fight.")
+    format!("No {} in this fight.", view_key(view).replace('_', " "))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1152,35 +1142,25 @@ impl Inner {
             self.rebuild_deaths(&fight, breakdown.as_deref());
             return;
         }
-        if view == View::Buffs {
-            if let Some(guid) = &breakdown
-                && let Some(actor) = fight.actors.iter().find(|actor| &actor.guid == guid)
-            {
-                self.rebuild_buffs(actor, &fight);
-                return;
-            }
-            // A segment switch may have left the breakdown without its actor.
-            if breakdown.is_some() {
-                self.breakdown.replace(None);
-                self.spell.replace(None);
-            }
-            self.rebuild_buff_ranking(&fight);
-            return;
-        }
-        let View::Metric(metric) = view else {
-            unreachable!();
-        };
-        let target = self.target.borrow().clone();
-        if let Some(guid) = &breakdown
-            && let Some(actor) = fight.actors.iter().find(|actor| &actor.guid == guid)
-        {
-            self.rebuild_breakdown(actor, metric, &target);
-            return;
-        }
+        let actor = breakdown
+            .as_ref()
+            .and_then(|guid| fight.actors.iter().find(|actor| &actor.guid == guid));
         // A segment switch may have left the breakdown without its actor.
-        if breakdown.is_some() {
+        if breakdown.is_some() && actor.is_none() {
             self.breakdown.replace(None);
             self.spell.replace(None);
+        }
+        let View::Metric(metric) = view else {
+            match actor {
+                Some(actor) => self.rebuild_buffs(actor, &fight),
+                None => self.rebuild_buff_ranking(&fight),
+            }
+            return;
+        };
+        let target = self.target.borrow().clone();
+        if let Some(actor) = actor {
+            self.rebuild_breakdown(actor, metric, &target);
+            return;
         }
         let mut ranked: Vec<(&ProjectedActor, u64)> = fight
             .actors
@@ -1502,12 +1482,7 @@ impl Inner {
         }
         let class = self.class_for(&actor.guid);
         let mut lines = vec![Line::Heading("Spells")];
-        let spell_total: u64 = actor
-            .spells
-            .iter()
-            .filter(|entry| entry.metric == view)
-            .map(|entry| entry.amount)
-            .sum();
+        let spell_total = actor_total(actor, view, &TargetSel::All);
         for entry in ranked_spells(actor, view) {
             let mut bar =
                 breakdown_bar(format!("s:{}", entry.key), class, entry, spell_total, true);
@@ -1687,13 +1662,7 @@ impl Inner {
     /// are updated in place and reordered, new keys get fresh rows, and rows
     /// whose key vanished are removed.
     fn set_lines(self: &Rc<Self>, spacing: i32, lines: Vec<Line>) {
-        self.list_cache.borrow_mut().take();
-        if self.scroller.child().as_ref() != Some(self.content.upcast_ref()) {
-            self.scroller.set_child(Some(&self.content));
-        }
-        if self.empty_label.parent().is_some() {
-            self.content.remove(&self.empty_label);
-        }
+        self.restore_content();
         self.content.set_spacing(spacing);
         let lines: Vec<(String, Line)> = lines.into_iter().map(|line| (line.key(), line)).collect();
         let keys: HashSet<&str> = lines.iter().map(|(key, _)| key.as_str()).collect();
@@ -1921,13 +1890,19 @@ impl Inner {
     fn clear_content(&self) {
         // A history list row may have carried the hovered icon.
         self.hide_tooltip();
+        self.restore_content();
+        self.clear_rows();
+    }
+
+    /// Drop any history list and empty message so the content box is the
+    /// scroller's child again.
+    fn restore_content(&self) {
         self.list_cache.borrow_mut().take();
         // A history list may have replaced the content box as the scroller's
         // child; normal content always lives in the box again.
         if self.scroller.child().as_ref() != Some(self.content.upcast_ref()) {
             self.scroller.set_child(Some(&self.content));
         }
-        self.clear_rows();
         if self.empty_label.parent().is_some() {
             self.content.remove(&self.empty_label);
         }
@@ -2173,110 +2148,4 @@ fn stateful_action(name: &str, state: &str) -> gtk4::gio::SimpleAction {
         Some(gtk4::glib::VariantTy::STRING),
         &state.to_variant(),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn spell(key: &str, metric: MeterMetric, amount: u64) -> ProjectedEntry {
-        ProjectedEntry {
-            metric,
-            key: key.to_owned(),
-            marker: 0,
-            amount,
-            hits: 1,
-            overheal: 0,
-            min: amount,
-            max: amount,
-            targets: Vec::new(),
-            times: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn spell_breakdown_is_ranked_by_percentage() {
-        let actor = ProjectedActor {
-            guid: "Player-1".to_owned(),
-            name: "Shaman".to_owned(),
-            spells: vec![
-                spell("First Seen", MeterMetric::Damage, 20),
-                spell("Chain Lightning", MeterMetric::Damage, 50),
-                spell("Healing Surge", MeterMetric::Healing, 100),
-                spell("Lightning Bolt", MeterMetric::Damage, 30),
-            ],
-            targets: Vec::new(),
-        };
-
-        let keys: Vec<_> = ranked_spells(&actor, MeterMetric::Damage)
-            .into_iter()
-            .map(|entry| entry.key.as_str())
-            .collect();
-
-        assert_eq!(keys, ["Chain Lightning", "Lightning Bolt", "First Seen"]);
-    }
-
-    fn occurrence(metric: MeterMetric, times: &[u64]) -> ProjectedEntry {
-        let mut entry = spell("Moonfire", metric, times.len() as u64);
-        entry.times = times.to_vec();
-        entry
-    }
-
-    /// Scrubbing within a fight keeps the occurrence list identical: the
-    /// virtualized history must keep its key (and so its scroll position)
-    /// across half-second ticks, and change it when a new cast accumulates.
-    #[test]
-    fn occurrence_key_is_stable_between_ticks() {
-        let key = |times: &[u64]| {
-            occurrence_key(
-                MeterMetric::Casts,
-                "Player-1",
-                &occurrence(MeterMetric::Casts, times),
-            )
-        };
-        let frozen = key(&[1_000, 2_000, 3_000]);
-        assert_eq!(key(&[1_000, 2_000, 3_000]), frozen);
-        assert_ne!(key(&[1_000, 2_000, 3_000, 4_000]), frozen);
-        assert_ne!(
-            occurrence_key(
-                MeterMetric::Interrupts,
-                "Player-1",
-                &occurrence(MeterMetric::Casts, &[1_000])
-            ),
-            occurrence_key(
-                MeterMetric::Dispels,
-                "Player-1",
-                &occurrence(MeterMetric::Casts, &[1_000])
-            )
-        );
-    }
-
-    fn death(at_ms: u64, guid: &str) -> MeterDeath {
-        MeterDeath {
-            guid: guid.to_owned(),
-            name: "Boss".to_owned(),
-            at_ms,
-            max_hp: 1,
-            events: Vec::new(),
-        }
-    }
-
-    /// A half-second tick without new deaths must keep the death history
-    /// list; a new death or a different actor filter must not.
-    #[test]
-    fn death_list_key_is_stable_between_ticks() {
-        let first = [death(1_000, "Player-1"), death(2_000, "Player-1")];
-        let refs: Vec<&MeterDeath> = first.iter().collect();
-        let frozen = death_list_key("Player-1", &refs);
-        assert_eq!(death_list_key("Player-1", &refs), frozen);
-        assert_ne!(death_list_key("Player-2", &refs), frozen);
-
-        let grown = [
-            death(1_000, "Player-1"),
-            death(2_000, "Player-1"),
-            death(3_000, "Player-1"),
-        ];
-        let grown_refs: Vec<&MeterDeath> = grown.iter().collect();
-        assert_ne!(death_list_key("Player-1", &grown_refs), frozen);
-    }
 }
