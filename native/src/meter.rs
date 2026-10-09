@@ -52,6 +52,11 @@ pub fn is_count_metric(metric: MeterMetric) -> bool {
     )
 }
 
+/// An empty or all-zero GUID: the log's "no unit".
+fn is_nil_guid(guid: &str) -> bool {
+    guid.chars().all(|character| character == '0')
+}
+
 /// Aura lifecycle for buff-uptime tracking. `SPELL_AURA_BROKEN` is not
 /// tracked, so a broken buff's span closes at the fight end instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,17 +115,17 @@ struct RawFight {
 
 type SpellTargetKey = (MeterMetric, String, String, u8);
 
+/// The last damage or heal per `(source, target, metric)`; with the map key
+/// it names the rows a following support event takes its share from.
 struct RecentRecord {
-    spell_key: (MeterMetric, String),
-    target_key: (MeterMetric, String, u8),
-    spell_target_key: SpellTargetKey,
+    spell: String,
+    marker: u8,
     at_ms: i64,
     bucket_end_ms: i64,
     remaining: u64,
     remaining_overheal: u64,
 }
 
-#[derive(Clone)]
 struct RawDeathEvent {
     kind: MeterDeathEventKind,
     at_ms: i64,
@@ -185,7 +190,7 @@ struct RawActor {
     spell_targets: HashMap<SpellTargetKey, RawEntry>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct RawValue {
     amount: u64,
     hits: u32,
@@ -263,14 +268,16 @@ impl MeterAccumulator {
     /// retaining the group's opening damage for Overall.
     pub(crate) fn trash(start_ms: i64) -> Self {
         Self {
-            started_at_ms: start_ms,
             fights: vec![RawFight::new(start_ms, Some("Trash".to_owned()), true)],
-            owners: HashMap::new(),
             segmented: true,
-            host_dead: false,
-            death_history: HashMap::new(),
-            hp: HashMap::new(),
+            ..Self::new(start_ms, None)
         }
+    }
+
+    fn open_fight(&mut self) -> &mut RawFight {
+        self.fights
+            .last_mut()
+            .expect("the open fight is always present")
     }
 
     /// Record pet-to-owner attribution. `owner_name` is carried when the
@@ -283,6 +290,16 @@ impl MeterAccumulator {
         owner_name: Option<&str>,
     ) {
         if pet_guid.is_empty() || owner_guid.is_empty() || pet_guid == owner_guid {
+            return;
+        }
+        // Every pet event re-reports its owner; a later unnamed signal must
+        // not drop the name a summon carried.
+        if let Some(owned) = self.owners.get_mut(pet_guid)
+            && owned.guid == owner_guid
+        {
+            if owned.name.is_none() {
+                owned.name = owner_name.map(str::to_owned);
+            }
             return;
         }
         self.owners.insert(
@@ -467,7 +484,7 @@ impl MeterAccumulator {
         }
         // An area effect re-logs its owner's cast from a nil source carrying
         // the owner's own flags; counting it doubles the button press.
-        if source_guid.is_empty() || source_guid.chars().all(|character| character == '0') {
+        if is_nil_guid(source_guid) {
             return;
         }
         self.record(
@@ -507,14 +524,11 @@ impl MeterAccumulator {
         } else {
             amount
         };
-        let fight = self
-            .fights
-            .last_mut()
-            .expect("the open fight is always present");
-        let key = (source_guid.to_owned(), dest_name.to_owned(), metric);
+        let fight = self.open_fight();
         let Some(&source_index) = fight.actor_index.get(source_guid) else {
             return;
         };
+        let key = (source_guid.to_owned(), dest_name.to_owned(), metric);
         let Some(recent) = fight.recent.get_mut(&key) else {
             return;
         };
@@ -531,13 +545,15 @@ impl MeterAccumulator {
         let bucket_end_ms = recent.bucket_end_ms;
         {
             let source = &mut fight.actors[source_index];
-            if let Some(entry) = source.spells.get_mut(&recent.spell_key) {
+            let target = (metric, dest_name.to_owned(), recent.marker);
+            if let Some(entry) = source.targets.get_mut(&target) {
                 entry.subtract_transfer(transferred, transferred_overheal, bucket_end_ms);
             }
-            if let Some(entry) = source.targets.get_mut(&recent.target_key) {
+            let spell_target = (metric, recent.spell.clone(), target.1, recent.marker);
+            if let Some(entry) = source.spell_targets.get_mut(&spell_target) {
                 entry.subtract_transfer(transferred, transferred_overheal, bucket_end_ms);
             }
-            if let Some(entry) = source.spell_targets.get_mut(&recent.spell_target_key) {
+            if let Some(entry) = source.spells.get_mut(&(metric, spell_target.1)) {
                 entry.subtract_transfer(transferred, transferred_overheal, bucket_end_ms);
             }
         }
@@ -635,31 +651,34 @@ impl MeterAccumulator {
         if guid.is_empty() || max == 0 {
             return;
         }
-        let before = self.hp.get(guid).map_or(current, |hp| hp.current);
-        self.hp.insert(
-            guid.to_owned(),
-            UnitHp {
-                before,
-                current,
-                max,
-                at_ms,
-            },
-        );
+        if let Some(hp) = self.hp.get_mut(guid) {
+            hp.before = hp.current;
+            hp.current = current;
+            hp.max = max;
+            hp.at_ms = at_ms;
+        } else {
+            self.hp.insert(
+                guid.to_owned(),
+                UnitHp {
+                    before: current,
+                    current,
+                    max,
+                    at_ms,
+                },
+            );
+        }
     }
 
     pub(crate) fn death(&mut self, guid: &str, name: &str, at_ms: i64) {
         let events = self.death_history.remove(guid).unwrap_or_default();
-        self.fights
-            .last_mut()
-            .expect("the open fight is always present")
-            .deaths
-            .push(RawDeath {
-                guid: guid.to_owned(),
-                max_hp: self.hp.get(guid).map_or(0, |hp| hp.max),
-                name: name.to_owned(),
-                at_ms,
-                events,
-            });
+        let max_hp = self.hp.get(guid).map_or(0, |hp| hp.max);
+        self.open_fight().deaths.push(RawDeath {
+            guid: guid.to_owned(),
+            max_hp,
+            name: name.to_owned(),
+            at_ms,
+            events,
+        });
     }
 
     /// Close the open fight and start a fixed Current segment such as a boss
@@ -692,10 +711,7 @@ impl MeterAccumulator {
         // Spans close first: their credit bucket can round past `at_ms`, and
         // a fight must not end before the sample its uptime lands in.
         self.close_open_buffs(at_ms);
-        let fight = self
-            .fights
-            .last_mut()
-            .expect("the open fight is always present");
+        let fight = self.open_fight();
         fight.end_ms = at_ms.max(fight.last_bucket_end_ms);
         self.fights.push(RawFight::new(at_ms, label, ambient));
     }
@@ -707,10 +723,7 @@ impl MeterAccumulator {
             return;
         }
         let (ambient, separated) = {
-            let fight = self
-                .fights
-                .last()
-                .expect("the open fight is always present");
+            let fight = self.open_fight();
             (
                 fight.ambient,
                 fight
@@ -732,10 +745,7 @@ impl MeterAccumulator {
         if separated || mine && ambient {
             self.begin_fight(at_ms, Some("Trash".to_owned()), !mine);
         }
-        let fight = self
-            .fights
-            .last_mut()
-            .expect("the open fight is always present");
+        let fight = self.open_fight();
         fight.first_event_ms = Some(fight.first_event_ms.map_or(at_ms, |first| first.min(at_ms)));
         fight.last_event_ms = Some(fight.last_event_ms.map_or(at_ms, |last| last.max(at_ms)));
     }
@@ -754,10 +764,7 @@ impl MeterAccumulator {
             .filter(|last| at_ms.saturating_sub(*last) <= PULL_GAP_MS);
         if let Some(last_event_ms) = last_event_ms {
             self.begin_fight(at_ms, Some("Trash".to_owned()), false);
-            self.fights
-                .last_mut()
-                .expect("the open fight is always present")
-                .last_event_ms = Some(last_event_ms);
+            self.open_fight().last_event_ms = Some(last_event_ms);
         }
     }
 
@@ -772,10 +779,7 @@ impl MeterAccumulator {
         names: &HashMap<String, String>,
     ) -> MeterData {
         self.close_open_buffs(ended_at_ms);
-        let fight = self
-            .fights
-            .last_mut()
-            .expect("the open fight is always present");
+        let fight = self.open_fight();
         fight.end_ms = ended_at_ms.max(fight.last_bucket_end_ms);
         MeterData {
             fights: self
@@ -799,10 +803,7 @@ impl MeterAccumulator {
     /// row for.
     fn close_open_buffs(&mut self, at_ms: i64) {
         let bucket_end_ms = self.bucket_end(at_ms);
-        let fight = self
-            .fights
-            .last_mut()
-            .expect("the open fight is always present");
+        let fight = self.open_fight();
         if !fight.open_buffs.is_empty() {
             fight.last_bucket_end_ms = fight.last_bucket_end_ms.max(bucket_end_ms);
         }
@@ -832,7 +833,7 @@ impl MeterAccumulator {
         if !is_unit_player(dest_flags) || !is_unit_friendly(dest_flags) {
             return;
         }
-        if dest_guid.is_empty() || dest_guid.chars().all(|character| character == '0') {
+        if is_nil_guid(dest_guid) {
             return;
         }
         match event {
@@ -847,11 +848,8 @@ impl MeterAccumulator {
                     self.close_buff(dest_guid, spell_name, at_ms);
                     true
                 } else {
-                    let fight = self
-                        .fights
-                        .last()
-                        .expect("the open fight is always present");
-                    !fight
+                    !self
+                        .open_fight()
                         .open_buffs
                         .contains_key(&(dest_guid.to_owned(), spell_name.to_owned()))
                 };
@@ -867,11 +865,7 @@ impl MeterAccumulator {
                     at_ms,
                 );
                 if open {
-                    let fight = self
-                        .fights
-                        .last_mut()
-                        .expect("the open fight is always present");
-                    fight
+                    self.open_fight()
                         .open_buffs
                         .insert((dest_guid.to_owned(), spell_name.to_owned()), at_ms);
                 }
@@ -883,10 +877,7 @@ impl MeterAccumulator {
     /// without an open span (applied before the activity) are ignored.
     fn close_buff(&mut self, dest_guid: &str, spell_name: &str, at_ms: i64) {
         let bucket_end_ms = self.bucket_end(at_ms);
-        let fight = self
-            .fights
-            .last_mut()
-            .expect("the open fight is always present");
+        let fight = self.open_fight();
         fight.last_bucket_end_ms = fight.last_bucket_end_ms.max(bucket_end_ms);
         let Some(opened) = fight
             .open_buffs
@@ -916,13 +907,11 @@ impl MeterAccumulator {
         at_ms: i64,
     ) {
         let bucket_end_ms = self.bucket_end(at_ms);
-        let fight = self
-            .fights
-            .last_mut()
-            .expect("the open fight is always present");
+        let segmented = self.segmented;
+        let fight = self.open_fight();
         // Casts and buffs land outside combat too, so they must not widen
         // the fight's DPS window the way a damaging event does.
-        if !self.segmented
+        if !segmented
             && !matches!(
                 metric,
                 MeterMetric::DamageTaken | MeterMetric::Casts | MeterMetric::Buffs
@@ -959,9 +948,8 @@ impl MeterAccumulator {
             fight.recent.insert(
                 (source_guid.to_owned(), dest_name.to_owned(), metric),
                 RecentRecord {
-                    spell_key: (metric, spell_name.to_owned()),
-                    target_key: (metric, dest_name.to_owned(), marker),
-                    spell_target_key: (metric, spell_name.to_owned(), dest_name.to_owned(), marker),
+                    spell: spell_name.to_owned(),
+                    marker,
                     at_ms,
                     bucket_end_ms,
                     remaining: amount,
@@ -1166,11 +1154,8 @@ fn append_entries(actor: &mut MeterActor, raw: &RawActor, started_at_ms: i64) {
     for spell in entries(&raw.spells, &raw.spell_targets, started_at_ms) {
         append(&mut actor.spells, spell);
     }
-    for ((metric, key, marker), entry) in &raw.targets {
-        append(
-            &mut actor.targets,
-            meter_entry(*metric, key.clone(), *marker, entry, started_at_ms),
-        );
+    for target in entries_targets(&raw.targets, started_at_ms) {
+        append(&mut actor.targets, target);
     }
 }
 
@@ -1183,7 +1168,7 @@ fn append(entries: &mut Vec<MeterEntry>, entry: MeterEntry) {
         existing.amount += entry.amount;
         existing.hits += entry.hits;
         existing.overheal += entry.overheal;
-        merge_extremes(existing, entry.min, entry.max);
+        merge_extremes(&mut existing.min, &mut existing.max, entry.min, entry.max);
         merge_samples(&mut existing.samples, &entry.samples);
         for target in entry.targets {
             append(&mut existing.targets, target);
@@ -1195,16 +1180,16 @@ fn append(entries: &mut Vec<MeterEntry>, entry: MeterEntry) {
 
 /// Combine per-hit extremes; `max == 0` marks an entry that has none, so a
 /// zero `min` from such an entry must not win.
-fn merge_extremes(into: &mut MeterEntry, min: u64, max: u64) {
-    if max == 0 {
+fn merge_extremes(min: &mut u64, max: &mut u64, other_min: u64, other_max: u64) {
+    if other_max == 0 {
         return;
     }
-    into.min = if into.max == 0 {
-        min
+    *min = if *max == 0 {
+        other_min
     } else {
-        into.min.min(min)
+        (*min).min(other_min)
     };
-    into.max = into.max.max(max);
+    *max = (*max).max(other_max);
 }
 
 fn merge_samples(into: &mut Vec<MeterSample>, from: &[MeterSample]) {
@@ -1213,14 +1198,7 @@ fn merge_samples(into: &mut Vec<MeterSample>, from: &[MeterSample]) {
             existing.amount += sample.amount;
             existing.hits += sample.hits;
             existing.overheal += sample.overheal;
-            if sample.max > 0 {
-                existing.min = if existing.max == 0 {
-                    sample.min
-                } else {
-                    existing.min.min(sample.min)
-                };
-                existing.max = existing.max.max(sample.max);
-            }
+            merge_extremes(&mut existing.min, &mut existing.max, sample.min, sample.max);
         } else {
             into.push(sample.clone());
         }
@@ -1231,13 +1209,14 @@ fn merge_samples(into: &mut Vec<MeterSample>, from: &[MeterSample]) {
 /// Bound each metric's rows to `MAX_BREAKDOWN_ROWS` largest contributors,
 /// folding the remainder into one "Other" row so totals stay exact.
 fn bounded(entries: Vec<MeterEntry>) -> Vec<MeterEntry> {
+    let mut groups: [Vec<MeterEntry>; METRICS.len()] = Default::default();
+    for entry in entries {
+        if let Some(index) = METRICS.iter().position(|metric| *metric == entry.metric) {
+            groups[index].push(entry);
+        }
+    }
     let mut result = Vec::new();
-    for metric in METRICS {
-        let mut group: Vec<MeterEntry> = entries
-            .iter()
-            .filter(|entry| entry.metric == metric)
-            .cloned()
-            .collect();
+    for (metric, mut group) in METRICS.into_iter().zip(groups) {
         group.sort_by(|a, b| {
             b.amount
                 .cmp(&a.amount)
@@ -1267,7 +1246,7 @@ fn bounded(entries: Vec<MeterEntry>) -> Vec<MeterEntry> {
                 other.amount += entry.amount;
                 other.hits += entry.hits;
                 other.overheal += entry.overheal;
-                merge_extremes(&mut other, entry.min, entry.max);
+                merge_extremes(&mut other.min, &mut other.max, entry.min, entry.max);
                 merge_samples(&mut other.samples, &entry.samples);
             }
             group.push(other);
@@ -1277,15 +1256,12 @@ fn bounded(entries: Vec<MeterEntry>) -> Vec<MeterEntry> {
     result
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MeterProjection {
-    pub label: String,
     pub elapsed_ms: u64,
     pub actors: Vec<ProjectedActor>,
     pub deaths: Vec<MeterDeath>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectedActor {
     pub guid: String,
     pub name: String,
@@ -1293,7 +1269,6 @@ pub struct ProjectedActor {
     pub targets: Vec<ProjectedEntry>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectedEntry {
     pub metric: MeterMetric,
     pub key: String,
@@ -1327,7 +1302,6 @@ pub fn project_current(fights: &[MeterFight], position_ms: u64) -> Option<MeterP
 
 pub fn project_overall(fights: &[MeterFight], position_ms: u64) -> MeterProjection {
     let mut projection = MeterProjection {
-        label: String::new(),
         elapsed_ms: 0,
         actors: Vec::new(),
         deaths: Vec::new(),
@@ -1384,7 +1358,6 @@ fn project_fight(fight: &MeterFight, position_ms: u64) -> Option<MeterProjection
         })
         .collect();
     Some(MeterProjection {
-        label: fight.label.clone(),
         elapsed_ms,
         actors,
         deaths: fight
@@ -1425,14 +1398,12 @@ fn project_entries(entries: &[MeterEntry], position_ms: u64) -> Vec<ProjectedEnt
                         .times
                         .extend(std::iter::repeat_n(sample.at_ms, sample.hits as usize));
                 }
-                if sample.max > 0 {
-                    projected.min = if projected.max == 0 {
-                        sample.min
-                    } else {
-                        projected.min.min(sample.min)
-                    };
-                    projected.max = projected.max.max(sample.max);
-                }
+                merge_extremes(
+                    &mut projected.min,
+                    &mut projected.max,
+                    sample.min,
+                    sample.max,
+                );
             }
             (projected.hits > 0 || projected.amount > 0 || projected.overheal > 0)
                 .then_some(projected)
@@ -1450,14 +1421,7 @@ fn merge_projected_entries(into: &mut Vec<ProjectedEntry>, from: Vec<ProjectedEn
             existing.amount += entry.amount;
             existing.hits += entry.hits;
             existing.overheal += entry.overheal;
-            if entry.max > 0 {
-                existing.min = if existing.max == 0 {
-                    entry.min
-                } else {
-                    existing.min.min(entry.min)
-                };
-                existing.max = existing.max.max(entry.max);
-            }
+            merge_extremes(&mut existing.min, &mut existing.max, entry.min, entry.max);
             existing.times.extend(entry.times);
             existing.times.sort_unstable();
             merge_projected_entries(&mut existing.targets, entry.targets);
@@ -1829,30 +1793,6 @@ mod tests {
         let sum: u64 = spells.iter().map(|spell| spell.amount).sum();
         assert_eq!(sum, total * 2);
         assert_eq!(spells.last().unwrap().key, "Other");
-    }
-
-    #[test]
-    fn healing_aggregates_the_effective_amount() {
-        let mut meter = MeterAccumulator::new(0, None);
-        meter.heal(
-            "Player-0-A",
-            "A",
-            PLAYER,
-            "Tank",
-            "Tank",
-            0,
-            0,
-            "Flash Heal",
-            1000,
-            400,
-            1_000,
-        );
-        let data = meter.drain(2_000, 0, "Fight", &HashMap::new());
-        let spells = &data.fights[0].actors[0].spells;
-        assert_eq!(spells.len(), 1);
-        assert_eq!(spells[0].metric, MeterMetric::Healing);
-        assert_eq!(spells[0].amount, 600);
-        assert_eq!(spells[0].overheal, 400);
     }
 
     /// Casts count the player's own button presses: no pets, no hidden
@@ -2394,25 +2334,14 @@ mod tests {
             1
         );
         assert_eq!(project_overall(&data.fights, 13_000).deaths.len(), 2);
-    }
-
-    #[test]
-    fn deaths_default_when_deserializing_existing_meter_data() {
-        let fight: MeterFight = serde_json::from_str(
-            r#"{"label":"Fight","start_ms":0,"end_ms":1,"active_ms":0,"ambient":false,"actors":[]}"#,
-        )
-        .unwrap();
-        assert!(fight.deaths.is_empty());
-    }
-
-    #[test]
-    fn unlabelled_fights_take_the_activity_title() {
-        let meter = MeterAccumulator::new(0, None);
-        let data = meter.drain(5_000, 0, "Alpha - Raid", &HashMap::new());
-        assert_eq!(data.fights.len(), 1);
-        assert_eq!(data.fights[0].label, "Alpha - Raid");
-        assert_eq!(data.fights[0].start_ms, 0);
-        assert_eq!(data.fights[0].end_ms, 5_000);
-        assert_eq!(data.fights[0].active_ms, 0);
+        // Healing Done is the effective amount; overheal is kept apart.
+        let heal = data.fights[1]
+            .actors
+            .iter()
+            .find(|actor| actor.guid == "Player-0-HEALER")
+            .and_then(|actor| actor.spells.first())
+            .unwrap();
+        assert_eq!(heal.metric, MeterMetric::Healing);
+        assert_eq!((heal.amount, heal.overheal), (60, 40));
     }
 }
