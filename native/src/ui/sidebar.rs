@@ -119,6 +119,8 @@ impl Sidebar {
         // Selection, not activation: arrow keys move the selection without
         // activating. `apply` selects the snapshot's category programmatically,
         // which is recognised here as the current category and not re-sent.
+        // Before the first snapshot GTK auto-selects the first row; ignoring
+        // that keeps it from overwriting the saved category.
         let current: Rc<RefCell<Option<Category>>> = Rc::default();
         {
             let sink = Rc::clone(&sink);
@@ -132,7 +134,11 @@ impl Sidebar {
                 else {
                     return;
                 };
-                if current.borrow().as_ref() == Some(category) {
+                if current
+                    .borrow()
+                    .as_ref()
+                    .is_none_or(|current| current == category)
+                {
                     return;
                 }
                 sink(ShellAction::Command(
