@@ -15,14 +15,13 @@
 //! sidecar/media paths, so no second in-memory index is needed.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::de::{IgnoredAny, Visitor};
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -73,14 +72,8 @@ pub struct SkippedEntry {
 pub struct LibraryIndex {
     /// Reverse chronological.
     pub entries: Arc<Vec<LibraryEntry>>,
-    /// Per-entry recorded activity start used for multi-POV correlation,
-    /// parallel to `entries`, so incremental updates can rebuild groups
-    /// exactly like a full scan would.
-    pub correlation_starts: Vec<i64>,
     pub correlations: Arc<Vec<CorrelatedActivity>>,
     pub skipped: Vec<SkippedEntry>,
-    /// Bounded summary: how many unrelated/unsupported files were ignored.
-    pub ignored_files: usize,
 }
 
 impl LibraryIndex {
@@ -94,15 +87,12 @@ impl LibraryIndex {
             .position(|candidate| candidate.id == entry.id)
         {
             entries.remove(existing);
-            self.correlation_starts.remove(existing);
         }
         let position = match entries.binary_search_by(|probe| entry_order(probe, &entry)) {
             Ok(position) | Err(position) => position,
         };
-        let start = entry.start_unix_ms;
         entries.insert(position, entry);
-        self.correlation_starts.insert(position, start);
-        self.correlations = Arc::new(correlate(entries, &self.correlation_starts));
+        self.correlations = Arc::new(correlate(entries));
     }
 
     /// Drop the given ids (those actually present), rebuilding the correlation
@@ -111,18 +101,9 @@ impl LibraryIndex {
     pub fn remove_entries(&mut self, ids: &[RecordingId]) {
         let before = self.entries.len();
         let entries = Arc::make_mut(&mut self.entries);
-        let removed: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| ids.contains(&entry.id))
-            .map(|(position, _)| position)
-            .collect();
-        for position in removed.into_iter().rev() {
-            entries.remove(position);
-            self.correlation_starts.remove(position);
-        }
+        entries.retain(|entry| !ids.contains(&entry.id));
         if entries.len() != before {
-            self.correlations = Arc::new(correlate(entries, &self.correlation_starts));
+            self.correlations = Arc::new(correlate(entries));
         }
     }
 }
@@ -196,39 +177,19 @@ impl Storage {
     // --- Scan ---
 
     /// Read every sidecar at the configured directory level. Unrelated files are
-    /// counted, unreadable sidecars are reported, and nothing is repaired.
+    /// ignored, unreadable sidecars are reported, and nothing is repaired.
     pub fn scan(&self) -> LibraryIndex {
         let mut index = LibraryIndex::default();
-        // Loaded in directory order, sorted once at the end.
-        let mut scanned: Vec<(LibraryEntry, i64)> = Vec::new();
+        let mut entries = Vec::new();
 
-        let Ok(read_dir) = fs::read_dir(&self.root) else {
-            return index;
-        };
-        let mut paths: Vec<PathBuf> = read_dir
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-            .map(|entry| entry.path())
-            .collect();
-        // Deterministic order regardless of directory iteration order.
-        paths.sort();
-
-        for path in paths {
-            match path.extension().and_then(|value| value.to_str()) {
-                Some(SIDECAR_EXTENSION) => {}
-                // Media is discovered through its sidecar; the startup sweep
-                // deals with anything unreferenced.
-                Some(MEDIA_EXTENSION) => continue,
-                _ => {
-                    index.ignored_files += 1;
-                    continue;
-                }
+        // Media is discovered through its sidecar; the startup sweep deals
+        // with anything unreferenced.
+        for path in list_files(&self.root) {
+            if path.extension().and_then(|value| value.to_str()) != Some(SIDECAR_EXTENSION) {
+                continue;
             }
-
             match self.load_sidecar(&path) {
-                Ok(sidecar) => {
-                    scanned.push((sidecar.entry, sidecar.correlation_start_ms));
-                }
+                Ok(entry) => entries.push(entry),
                 Err(reason) => index.skipped.push(SkippedEntry {
                     sidecar_path: path,
                     reason,
@@ -237,15 +198,13 @@ impl Storage {
         }
 
         // The one library ordering: newest first, ties broken by media path.
-        scanned.sort_by(|(left, _), (right, _)| entry_order(left, right));
-        let (entries, starts): (Vec<LibraryEntry>, Vec<i64>) = scanned.into_iter().unzip();
-        index.correlations = Arc::new(correlate(&entries, &starts));
-        index.correlation_starts = starts;
+        entries.sort_by(entry_order);
+        index.correlations = Arc::new(correlate(&entries));
         index.entries = Arc::new(entries);
         index
     }
 
-    fn load_sidecar(&self, path: &Path) -> Result<LoadedSidecar, String> {
+    fn load_sidecar(&self, path: &Path) -> Result<LibraryEntry, String> {
         // The meter is most of a sidecar and only the player needs it
         // (`load_meter`): compact native sidecars are read up to it, anything
         // else is streamed past it.
@@ -261,7 +220,7 @@ impl Storage {
                     Err(native_error) => {
                         let probe: SidecarProbe = serde_json::from_str(&text)
                             .map_err(|error| format!("invalid JSON: {error}"))?;
-                        if probe.schema_version {
+                        if probe.schema_version.is_some() {
                             return Err(format!("invalid native sidecar: {native_error}"));
                         }
                         return load_legacy_sidecar(path, &text);
@@ -278,14 +237,10 @@ impl Storage {
         let media_path = self.root.join(&sidecar.media_file);
         self.check_owned(&media_path)?;
         let has_content = media_has_content(&media_path)?;
-        let start = sidecar.start_unix_ms;
         let mut entry = sidecar.into_entry(media_path, path.to_path_buf());
         entry.media.has_content = has_content;
         entry.validate().map_err(|error| error.to_string())?;
-        Ok(LoadedSidecar {
-            entry,
-            correlation_start_ms: start,
-        })
+        Ok(entry)
     }
 
     // --- Finalization ---
@@ -443,7 +398,7 @@ impl Storage {
         let probe: SidecarProbe = serde_json::from_str(&text)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
 
-        let json = if probe.schema_version {
+        let json = if probe.schema_version.is_some() {
             let mut sidecar: NativeSidecar = serde_json::from_str(&text)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
             sidecar.protected = updated.protected;
@@ -674,17 +629,7 @@ impl Storage {
         ]);
 
         for (directory, reason) in directories {
-            let Ok(read_dir) = fs::read_dir(&directory) else {
-                continue;
-            };
-            let mut paths: Vec<PathBuf> = read_dir
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-                .map(|entry| entry.path())
-                .collect();
-            paths.sort();
-
-            for path in paths {
+            for path in list_files(&directory) {
                 if directory == self.root {
                     let extension = path.extension().and_then(|value| value.to_str());
                     let sweepable = matches!(extension, Some(MEDIA_EXTENSION) | Some("tmp"));
@@ -771,178 +716,41 @@ fn read_native_head(path: &Path) -> Option<NativeSidecar<IgnoredAny>> {
     }
 }
 
-fn load_legacy_sidecar(path: &Path, text: &str) -> Result<LoadedSidecar, String> {
+/// Regular files directly in `directory`, sorted so the order does not depend
+/// on directory iteration. A missing directory has none.
+fn list_files(directory: &Path) -> Vec<PathBuf> {
+    let Ok(read_dir) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = read_dir
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.path())
+        .collect();
+    paths.sort();
+    paths
+}
+
+fn load_legacy_sidecar(path: &Path, text: &str) -> Result<LibraryEntry, String> {
     let legacy: LegacySidecar =
         serde_json::from_str(text).map_err(|error| format!("invalid legacy sidecar: {error}"))?;
     let media_path = path.with_extension(MEDIA_EXTENSION);
     let has_content = media_has_content(&media_path)?;
+    // Legacy sidecars without a recorded start fall back to the media
+    // mtime, which two POVs of one activity rarely share.
     let mtime_ms = file_modified_ms(&media_path).unwrap_or(0);
     let mut entry = legacy.into_entry(media_path, path.to_path_buf(), mtime_ms)?;
     entry.media.has_content = has_content;
-    // Legacy sidecars without a recorded start fall back to the media
-    // mtime, which two POVs of one activity rarely share.
-    let correlation_start_ms = entry.start_unix_ms;
-    Ok(LoadedSidecar {
-        entry,
-        correlation_start_ms,
-    })
+    Ok(entry)
 }
 
-struct LoadedSidecar {
-    entry: LibraryEntry,
-    /// Recorded activity start used for multi-POV correlation.
-    correlation_start_ms: i64,
-}
-
-/// Lenient classification probe: whether a
-/// `schema_version` key is present at all (native, whatever its value) and
-/// which media file the sidecar names. The meter payload can be tens of
-/// megabytes, so unknown fields are streamed past instead of materialized.
-#[derive(Debug, Default)]
+/// Classification probe: whether a non-null `schema_version` is present (native,
+/// whatever its value) and which media file the sidecar names. Unknown fields,
+/// the meter among them, are skipped instead of materialized.
+#[derive(Deserialize)]
 struct SidecarProbe {
-    schema_version: bool,
+    schema_version: Option<IgnoredAny>,
     media_file: Option<String>,
-}
-
-impl<'de> Deserialize<'de> for SidecarProbe {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct ProbeVisitor;
-
-        impl<'de> Visitor<'de> for ProbeVisitor {
-            type Value = SidecarProbe;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a JSON sidecar")
-            }
-
-            // Whatever is not an object is neither native nor a media
-            // reference; the sibling media name keeps applying, as before.
-            fn visit_bool<E>(self, _value: bool) -> Result<SidecarProbe, E> {
-                Ok(SidecarProbe::default())
-            }
-
-            fn visit_i64<E>(self, _value: i64) -> Result<SidecarProbe, E> {
-                Ok(SidecarProbe::default())
-            }
-
-            fn visit_u64<E>(self, _value: u64) -> Result<SidecarProbe, E> {
-                Ok(SidecarProbe::default())
-            }
-
-            fn visit_f64<E>(self, _value: f64) -> Result<SidecarProbe, E> {
-                Ok(SidecarProbe::default())
-            }
-
-            fn visit_str<E>(self, _value: &str) -> Result<SidecarProbe, E> {
-                Ok(SidecarProbe::default())
-            }
-
-            fn visit_unit<E>(self) -> Result<SidecarProbe, E> {
-                Ok(SidecarProbe::default())
-            }
-
-            fn visit_seq<A>(self, mut sequence: A) -> Result<SidecarProbe, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                while sequence.next_element::<IgnoredAny>()?.is_some() {}
-                Ok(SidecarProbe::default())
-            }
-
-            fn visit_map<M>(self, mut map: M) -> Result<SidecarProbe, M::Error>
-            where
-                M: serde::de::MapAccess<'de>,
-            {
-                let mut probe = SidecarProbe::default();
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        // Present with any value, `null` included.
-                        "schema_version" => {
-                            map.next_value::<IgnoredAny>()?;
-                            probe.schema_version = true;
-                        }
-                        // A duplicated key keeps the last occurrence.
-                        "media_file" => probe.media_file = map.next_value::<MediaFile>()?.0,
-                        _ => {
-                            map.next_value::<IgnoredAny>()?;
-                        }
-                    }
-                }
-                Ok(probe)
-            }
-        }
-
-        deserializer.deserialize_any(ProbeVisitor)
-    }
-}
-
-/// A sidecar `media_file`: a string names the media; every other value —
-/// `null`, a number, a container — is consumed leniently and falls back to
-/// the sibling media name.
-struct MediaFile(Option<String>);
-
-impl<'de> Deserialize<'de> for MediaFile {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct MediaFileVisitor;
-
-        impl<'de> Visitor<'de> for MediaFileVisitor {
-            type Value = MediaFile;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a media file name")
-            }
-
-            fn visit_str<E>(self, name: &str) -> Result<MediaFile, E> {
-                Ok(MediaFile(Some(name.to_owned())))
-            }
-
-            fn visit_bool<E>(self, _value: bool) -> Result<MediaFile, E> {
-                Ok(MediaFile(None))
-            }
-
-            fn visit_i64<E>(self, _value: i64) -> Result<MediaFile, E> {
-                Ok(MediaFile(None))
-            }
-
-            fn visit_u64<E>(self, _value: u64) -> Result<MediaFile, E> {
-                Ok(MediaFile(None))
-            }
-
-            fn visit_f64<E>(self, _value: f64) -> Result<MediaFile, E> {
-                Ok(MediaFile(None))
-            }
-
-            fn visit_unit<E>(self) -> Result<MediaFile, E> {
-                Ok(MediaFile(None))
-            }
-
-            fn visit_seq<A>(self, mut sequence: A) -> Result<MediaFile, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                while sequence.next_element::<IgnoredAny>()?.is_some() {}
-                Ok(MediaFile(None))
-            }
-
-            fn visit_map<M>(self, mut map: M) -> Result<MediaFile, M::Error>
-            where
-                M: serde::de::MapAccess<'de>,
-            {
-                while map.next_key::<IgnoredAny>()?.is_some() {
-                    map.next_value::<IgnoredAny>()?;
-                }
-                Ok(MediaFile(None))
-            }
-        }
-
-        deserializer.deserialize_any(MediaFileVisitor)
-    }
 }
 
 // --- Native sidecar ---
@@ -1605,12 +1413,13 @@ fn entry_order(left: &LibraryEntry, right: &LibraryEntry) -> std::cmp::Ordering 
 /// Correlation: identical unique hash and activity start times within one
 /// minute. Clips, solo shuffle, and manual recordings only ever group with the
 /// literally identical video, which for a local-only library means never.
-fn correlate(entries: &[LibraryEntry], starts: &[i64]) -> Vec<CorrelatedActivity> {
+fn correlate(entries: &[LibraryEntry]) -> Vec<CorrelatedActivity> {
     let mut correlated: Vec<CorrelatedActivity> = Vec::new();
     let mut primary_starts: Vec<i64> = Vec::new();
     let mut primaries_by_hash: HashMap<&str, Vec<usize>> = HashMap::new();
 
-    for (entry, start) in entries.iter().zip(starts.iter().copied()) {
+    for entry in entries {
+        let start = entry.start_unix_ms;
         let matched = entry
             .activity_hash
             .as_deref()
@@ -1706,7 +1515,7 @@ fn shift_timeline(
 /// line up with the timeline bands. Fights wholly outside the media are
 /// dropped; overlapping bounds clamp into the media and the end never precedes
 /// the start. `active_ms` is activity-invariant.
-pub fn shift_meter(
+fn shift_meter(
     meter: &MeterData,
     activity_start_ms: i64,
     media_start_ms: i64,
@@ -2439,13 +2248,12 @@ mod tests {
     fn legacy_sidecars_load_with_their_contract_intact() {
         let tree = TempTree::new("legacy-scan");
         let names = install_legacy_fixtures(&tree);
-        // One unrelated file that must only be counted.
+        // One unrelated file that must be ignored.
         tree.write("notes.txt", "not a recording");
 
         let storage = tree.storage();
         let index = storage.scan();
         assert_eq!(index.entries.len(), names.len());
-        assert_eq!(index.ignored_files, 1);
         assert!(index.skipped.is_empty(), "{:?}", index.skipped);
 
         let raid = index
@@ -2902,26 +2710,20 @@ mod tests {
     }
 
     /// The sweep resolves references from sidecars whatever the scanner thinks
-    /// of them: a sidecar that names its media, the sibling fallback when no
-    /// `media_file` is found (even a non-string one), and valid JSON that is
-    /// not an object; malformed JSON references nothing and its media is swept.
+    /// of them: a sidecar that names its media and the sibling fallback when
+    /// no `media_file` is found; malformed JSON references nothing and its
+    /// media is swept.
     #[test]
     fn sweep_honors_references_from_sidecars_that_fail_to_load() {
         let tree = TempTree::new("sweep-references");
         let storage = tree.storage();
         tree.write(
             "rejected.json",
-            r#"{"schema_version":null,"media_file":"named.mp4"}"#,
+            r#"{"schema_version":1,"media_file":"named.mp4"}"#,
         );
         tree.write("named.mp4", "media");
         tree.write("sibling.json", r#"{"category":"Raids","duration":10}"#);
         tree.write("sibling.mp4", "media");
-        tree.write("wrongtype.json", r#"{"media_file":5}"#);
-        tree.write("wrongtype.mp4", "media");
-        // Valid JSON that is not an object: no reference at all, but the
-        // sibling media name keeps applying.
-        tree.write("nonobject.json", r#"["not","an","object"]"#);
-        tree.write("nonobject.mp4", "media");
         // Malformed JSON references nothing, so its media is swept.
         tree.write("truncated.json", r#"{"media_file":"lost.mp4""#);
         tree.write("lost.mp4", "media");
@@ -2937,6 +2739,5 @@ mod tests {
         assert!(!tree.library().join("lost.mp4").exists());
         assert!(tree.library().join("named.mp4").exists());
         assert!(tree.library().join("sibling.mp4").exists());
-        assert!(tree.library().join("wrongtype.mp4").exists());
     }
 }
