@@ -35,7 +35,7 @@ use crate::media_jobs::{MediaConfig, MediaControl, MediaEvent, MediaJob, MediaWo
 use crate::parser::{CombatEvent, ParseTimeContext, ParsedEvent, PlayerObservationKind};
 use crate::recorder::{
     CaptureArtifacts, CaptureConfig, Recorder, RecorderError, RecorderEvent, RecordingMode,
-    StartRequest, Timeouts,
+    ReplaySave, StartRequest, Timeouts,
 };
 use crate::storage::{EntryUpdate, LibraryIndex, Storage, now_unix_ms};
 
@@ -880,6 +880,12 @@ impl Coordinator {
         let capacity_ms = u64::from(self.config.capture.replay_buffer_seconds) * 1_000;
         let lead_in_ms = i64::from(self.config.capture.extra_lead_in_seconds) * 1_000;
         let requested_replay_ms = (late_by_ms + lead_in_ms).clamp(0, capacity_ms as i64) as u64;
+        tracing::info!(
+            late_by_ms,
+            requested_replay_ms,
+            save = ?ReplaySave::for_pre_roll(requested_replay_ms),
+            "starting capture"
+        );
         self.start_capture(draft, requested_replay_ms, RecordingMode::Automatic);
     }
 
