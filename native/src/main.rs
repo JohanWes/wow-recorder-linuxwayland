@@ -18,7 +18,7 @@ mod ui;
 use ui::tray_backend::TrayBackend;
 
 #[cfg(not(feature = "development"))]
-const APP_ID: &str = "io.github.JohanWes.WarcraftRecorder";
+const APP_ID: &str = warcraft_recorder::config::APP_ID;
 #[cfg(feature = "development")]
 const APP_ID: &str = "io.github.JohanWes.WarcraftRecorder.Devel";
 
@@ -49,7 +49,9 @@ fn main() {
     };
 
     init_logging(&setup.data_dir);
-    let options = shell_options(&setup);
+    // Loaded once: the shell reads its startup flags, the coordinator the rest.
+    let config = Config::load(&setup.config_path);
+    let options = shell_options(&setup, config.as_ref().ok());
 
     // One latch shared by everything that can make the shell's drain useful,
     // so a burst of wakes costs a single queued main-loop callback.
@@ -58,7 +60,7 @@ fn main() {
         let pending = Arc::clone(&wake_pending);
         Arc::new(move || ui::wake_shell(&pending))
     };
-    let coordinator = Rc::new(RefCell::new(coordinator::start(setup, {
+    let coordinator = Rc::new(RefCell::new(coordinator::start(setup, config, {
         let wake = Arc::clone(&wake);
         Box::new(move || wake())
     })));
@@ -91,8 +93,8 @@ fn main() {
 /// The shell options that come from outside the GTK loop: paths the shell
 /// launches but never reads, plus the initial interface flags read once
 /// before the loop starts (live values arrive with the first snapshot).
-fn shell_options(setup: &coordinator::Setup) -> ui::ShellOptions {
-    let config = Config::load(&setup.config_path).unwrap_or_default();
+fn shell_options(setup: &coordinator::Setup, config: Option<&Config>) -> ui::ShellOptions {
+    let config = config.cloned().unwrap_or_default();
     ui::ShellOptions {
         data_dir: setup.data_dir.clone(),
         config_dir: config_dir(&setup.config_path),

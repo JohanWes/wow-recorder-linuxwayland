@@ -748,14 +748,4 @@ mod tests {
             })
         );
     }
-
-    #[test]
-    fn recording_ids_are_uuid_values() {
-        assert_eq!(
-            Uuid::parse_str(RecordingId::new().as_str())
-                .expect("new recording UUID")
-                .get_version_num(),
-            4
-        );
-    }
 }

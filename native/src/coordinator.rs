@@ -244,15 +244,20 @@ impl Setup {
 /// Start the coordinator and its media worker. `wake` runs whenever a new
 /// snapshot or the stopped signal has been queued, so the shell can react
 /// immediately instead of waiting out its next poll. It is called from the
-/// coordinator thread and must be cheap and nonblocking.
-pub fn start(setup: Setup, wake: Box<dyn Fn() + Send>) -> CoordinatorHandle {
+/// coordinator thread and must be cheap and nonblocking. `config` is the
+/// result of loading `setup.config_path`, done once by the caller.
+pub fn start(
+    setup: Setup,
+    config: Result<Config, ConfigError>,
+    wake: Box<dyn Fn() + Send>,
+) -> CoordinatorHandle {
     let (commands_tx, commands_rx) = mpsc::sync_channel(64);
     let (snapshot_tx, snapshots) = mpsc::sync_channel(1);
     let (stopped_tx, stopped) = mpsc::sync_channel(1);
     let join = std::thread::Builder::new()
         .name("coordinator".to_owned())
         .spawn(move || {
-            let mut coordinator = Coordinator::new(setup, commands_rx, snapshot_tx, wake);
+            let mut coordinator = Coordinator::new(setup, config, commands_rx, snapshot_tx, wake);
             coordinator.startup();
             while coordinator.tick() {}
             let _ = stopped_tx.try_send(());
@@ -352,21 +357,25 @@ pub struct Coordinator {
 impl Coordinator {
     pub fn new(
         setup: Setup,
+        config: Result<Config, ConfigError>,
         commands: Receiver<Command>,
         snapshot_tx: SyncSender<Arc<AppSnapshot>>,
         wake: Box<dyn Fn() + Send>,
     ) -> Self {
-        let (config, mut problems) = match Config::load(&setup.config_path) {
+        let (config, mut problems) = match config {
             Ok(config) => (config, Vec::new()),
             Err(ConfigError::NotFound(_)) => (Config::default(), Vec::new()),
-            Err(error) => (
-                Config::default(),
-                vec![make_problem(
-                    "Settings could not be loaded; defaults are in use.",
-                    Some(error.to_string()),
-                    Some(RecoveryAction::OpenSettings),
-                )],
-            ),
+            Err(error) => {
+                tracing::warn!(%error, "settings could not be loaded; defaults are in use");
+                (
+                    Config::default(),
+                    vec![make_problem(
+                        "Settings could not be loaded; defaults are in use.",
+                        Some(error.to_string()),
+                        Some(RecoveryAction::OpenSettings),
+                    )],
+                )
+            }
         };
         problems.truncate(MAX_PROBLEMS);
 
@@ -2137,6 +2146,7 @@ mod tests {
         ActiveRecording, CaptureArtifacts, Coordinator, EndingCapture, EntryUpdate, MediaConfig,
         RecordingDraft, RecordingMode, Setup, Storage, Timeouts, now_unix_ms,
     };
+    use crate::config::{CONFIG_FILENAME, Config};
     use crate::domain::{
         ActivityDetails, Category, GameFlavor, LibraryEntry, MediaFacts, MeterData, Outcome,
         RecordingId, WorkKind,
@@ -2162,7 +2172,7 @@ mod tests {
             let (snapshot_tx, _snapshots) = mpsc::sync_channel(1);
             let mut coordinator = Coordinator::new(
                 Setup {
-                    config_path: root.join("config.json"),
+                    config_path: root.join(CONFIG_FILENAME),
                     data_dir: root.join("recorder"),
                     gsr_binary: PathBuf::from("true"),
                     media: MediaConfig::default(),
@@ -2172,6 +2182,7 @@ mod tests {
                     poll_interval: Duration::from_millis(5),
                     test_duration: Duration::from_millis(200),
                 },
+                Ok(Config::default()),
                 commands_rx,
                 snapshot_tx,
                 Box::new(|| {}),
@@ -2257,7 +2268,7 @@ mod tests {
             let (snapshot_tx, _snapshots) = mpsc::sync_channel(1);
             let mut coordinator = Coordinator::new(
                 Setup {
-                    config_path: root.join("config.json"),
+                    config_path: root.join(CONFIG_FILENAME),
                     data_dir: root.join("recorder"),
                     gsr_binary: PathBuf::from("true"),
                     media: MediaConfig::default(),
@@ -2267,6 +2278,7 @@ mod tests {
                     poll_interval: Duration::from_millis(5),
                     test_duration: Duration::from_millis(200),
                 },
+                Ok(Config::default()),
                 commands_rx,
                 snapshot_tx,
                 Box::new(|| {}),

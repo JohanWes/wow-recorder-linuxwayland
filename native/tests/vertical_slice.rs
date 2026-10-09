@@ -17,8 +17,8 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
 use warcraft_recorder::config::{
-    ActivitySettings, AuthorizedPath, CaptureSettings, Config, FlavorConfig, ManualSettings,
-    StorageSettings,
+    ActivitySettings, AuthorizedPath, CONFIG_FILENAME, CaptureSettings, Config, FlavorConfig,
+    ManualSettings, StorageSettings,
 };
 use warcraft_recorder::coordinator::{AppSnapshot, ClipRange, Command, Coordinator, Setup, start};
 use warcraft_recorder::domain::{
@@ -74,7 +74,9 @@ impl Harness {
     ) -> Self {
         let (commands, commands_rx) = mpsc::sync_channel(64);
         let (snapshot_tx, snapshots) = mpsc::sync_channel(1);
-        let mut coordinator = Coordinator::new(setup, commands_rx, snapshot_tx, Box::new(|| {}));
+        let config = Config::load(&setup.config_path);
+        let mut coordinator =
+            Coordinator::new(setup, config, commands_rx, snapshot_tx, Box::new(|| {}));
         coordinator.startup();
         let mut harness = Self {
             root,
@@ -186,7 +188,7 @@ fn armed(snapshot: &AppSnapshot) -> bool {
 
 fn setup(root: &Path) -> Setup {
     Setup {
-        config_path: root.join("config.json"),
+        config_path: root.join(CONFIG_FILENAME),
         data_dir: root.join("recorder"),
         gsr_binary: fixture_bin("fake-gsr.sh"),
         media: MediaConfig {
@@ -270,7 +272,7 @@ fn write_config(root: &Path, library: &Path, capture_root: &Path, log_dir: &Path
         },
         ..Default::default()
     };
-    config.save(&root.join("config.json")).unwrap();
+    config.save(&root.join(CONFIG_FILENAME)).unwrap();
 }
 
 fn empty_snapshot() -> AppSnapshot {
@@ -699,7 +701,7 @@ fn a_superseding_encounter_keeps_both_pulls() {
 #[test]
 fn dismissing_the_release_notes_ends_them_for_good() {
     let harness = Harness::new("dismissals");
-    let config_path = harness.root.join("config.json");
+    let config_path = harness.root.join(CONFIG_FILENAME);
     let mut config = Config::load(&config_path).expect("load the harness config");
     // What an install updated from an earlier version looks like: the field
     // is missing from its config file, so it deserializes empty.
@@ -745,7 +747,7 @@ fn dismissing_the_release_notes_ends_them_for_good() {
 #[test]
 fn replay_buffer_waits_for_wow_to_run() {
     let (root, library, capture_root, log_file) = spawn_tree("standby");
-    let config_path = root.join("config.json");
+    let config_path = root.join(CONFIG_FILENAME);
     let mut config = Config::load(&config_path).unwrap();
     config.capture.capture_target_token = Some("token".to_owned());
     config.save(&config_path).unwrap();
@@ -956,7 +958,9 @@ fn completion_eviction_updates_the_index_without_a_full_rescan() {
 fn production_handle_starts_and_shuts_down() {
     let (root, ..) = spawn_tree("handle");
 
-    let mut handle = start(setup(&root), Box::new(|| {}));
+    let setup = setup(&root);
+    let config = Config::load(&setup.config_path);
+    let mut handle = start(setup, config, Box::new(|| {}));
     let mut snapshot = handle.snapshots.recv_timeout(STEP_TIMEOUT);
     while let Ok(current) = &snapshot {
         if current.status == RecorderStatus::Ready {

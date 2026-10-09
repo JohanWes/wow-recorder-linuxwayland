@@ -21,7 +21,7 @@ use crate::domain::{
     StorageLimit,
 };
 
-pub const CONFIG_VERSION: u32 = 1;
+const CONFIG_VERSION: u32 = 1;
 pub const APP_ID: &str = "io.github.JohanWes.WarcraftRecorder";
 pub const CONFIG_FILENAME: &str = "config.json";
 
@@ -253,7 +253,10 @@ impl Default for InterfaceSettings {
     }
 }
 
+/// Keys missing from the file take their defaults, so a hand-edited or older
+/// config is not rejected over one absent field.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub version: u32,
     pub flavors: FlavorSettings,
@@ -324,7 +327,12 @@ impl Config {
             );
         }
 
-        if !self.any_flavor_enabled() {
+        if !self
+            .flavors
+            .in_field_order()
+            .iter()
+            .any(|(_, flavor)| flavor.enabled)
+        {
             problems.push(ValidationProblem::new(
                 "flavors",
                 "Enable at least one World of Warcraft flavor.",
@@ -343,14 +351,6 @@ impl Config {
         }
 
         problems
-    }
-
-    fn any_flavor_enabled(&self) -> bool {
-        self.flavors.retail.enabled
-            || self.flavors.retail_ptr.enabled
-            || self.flavors.classic.enabled
-            || self.flavors.classic_ptr.enabled
-            || self.flavors.era.enabled
     }
 
     fn persistence_problems(&self) -> Vec<ValidationProblem> {
@@ -417,7 +417,7 @@ impl Config {
             .capture
             .capture_target_token
             .as_ref()
-            .is_some_and(|token| token.is_empty())
+            .is_some_and(String::is_empty)
         {
             problems.push(ValidationProblem::new(
                 "capture.capture_target_token",
@@ -446,19 +446,26 @@ impl Config {
         problems
     }
 
+    /// A file that is rejected is copied to `<name>.bad` first: the caller
+    /// falls back to defaults, and its next save replaces the original.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let bytes = fs::read(path).map_err(|source| map_read_error(path, source))?;
-        let config: Self =
-            serde_json::from_slice(&bytes).map_err(|source| ConfigError::InvalidJson {
+        let result = match serde_json::from_slice::<Self>(&bytes) {
+            Err(source) => Err(ConfigError::InvalidJson {
                 path: path.to_owned(),
                 source,
-            })?;
-        let problems = config.persistence_problems();
-        if problems.is_empty() {
-            Ok(config)
-        } else {
-            Err(ConfigError::Validation(problems))
+            }),
+            Ok(config) => match config.persistence_problems() {
+                problems if problems.is_empty() => Ok(config),
+                problems => Err(ConfigError::Validation(problems)),
+            },
+        };
+        if result.is_err() {
+            let mut bad = path.as_os_str().to_owned();
+            bad.push(".bad");
+            let _ = fs::copy(path, bad);
         }
+        result
     }
 
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
@@ -900,6 +907,10 @@ mod tests {
             Config::load(&invalid_path),
             Err(ConfigError::InvalidJson { .. })
         ));
+        assert_eq!(
+            fs::read(directory.join("invalid.json.bad")).expect("rejected copy"),
+            b"{not-json"
+        );
 
         let path = directory.join(CONFIG_FILENAME);
         let existing = ready_config();
@@ -909,30 +920,16 @@ mod tests {
         let mut changed = existing;
         changed.capture.fps = 30;
         assert!(matches!(changed.save(&path), Err(ConfigError::Io { .. })));
+        // Invalid values are refused before anything is written.
+        changed.capture.fps = 240;
+        let Err(ConfigError::Validation(problems)) = changed.save(&path) else {
+            panic!("invalid save must fail validation")
+        };
+        assert_eq!(problems[0].field, "capture.fps");
         assert_eq!(
             fs::read(&path).expect("read preserved config"),
             existing_bytes
         );
-
-        fs::remove_dir_all(directory).expect("remove test directory");
-    }
-
-    #[test]
-    fn invalid_values_do_not_replace_a_valid_native_file() {
-        let directory = temporary_directory("invalid-save");
-        let path = directory.join(CONFIG_FILENAME);
-        let valid = ready_config();
-        valid.save(&path).expect("save valid config");
-        let bytes = fs::read(&path).expect("read valid config");
-
-        let mut invalid = valid;
-        invalid.capture.fps = 240;
-        let error = invalid.save(&path).expect_err("invalid save must fail");
-        let ConfigError::Validation(problems) = error else {
-            panic!("unexpected save error")
-        };
-        assert_eq!(problems[0].field, "capture.fps");
-        assert_eq!(fs::read(&path).expect("read preserved config"), bytes);
 
         fs::remove_dir_all(directory).expect("remove test directory");
     }
