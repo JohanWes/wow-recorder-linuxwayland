@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
+use gtk4::glib::ffi;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
@@ -64,6 +65,8 @@ thread_local! {
     /// the drain owns `Rc`s, so the closure looks the pump up here after GLib
     /// has already hopped it onto the main thread.
     static PUMP: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
+    /// Set by SIGTERM; the pump treats it like the tray's Quit.
+    static SIGTERM: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Run the shell's drain on the main thread. Safe to call from any thread and
@@ -88,6 +91,23 @@ fn run_pump() {
     if let Some(pump) = pump {
         pump();
     }
+}
+
+// glib-rs 0.22 moved `unix_signal_add` to the separate glib-unix crate; the C
+// function lives in the libglib that glib-sys already links.
+unsafe extern "C" {
+    fn g_unix_signal_add(
+        signum: i32,
+        handler: extern "C" fn(ffi::gpointer) -> ffi::gboolean,
+        data: ffi::gpointer,
+    ) -> u32;
+}
+
+/// Runs on the main loop, not in signal context, so it may touch the pump.
+extern "C" fn on_sigterm(_: ffi::gpointer) -> ffi::gboolean {
+    SIGTERM.set(true);
+    run_pump();
+    ffi::G_SOURCE_CONTINUE
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -349,6 +369,10 @@ pub fn run(
     tray_events: Receiver<TrayEvent>,
 ) -> i32 {
     register_spell_resources();
+    // SIGTERM (logout, `systemctl stop`, `kill`) takes the tray Quit path so
+    // the coordinator stops gpu-screen-recorder instead of orphaning it.
+    // SAFETY: a plain fn pointer and no data; GLib owns the source.
+    unsafe { g_unix_signal_add(libc::SIGTERM, on_sigterm, std::ptr::null_mut()) };
     let shell: Rc<RefCell<Option<window::Shell>>> = Rc::new(RefCell::new(None));
     {
         let shell_cell = Rc::clone(&shell);
@@ -417,7 +441,8 @@ pub fn run(
                     shell.present();
                 }
             }
-            let quit_requested = tray.as_ref().is_some_and(|tray| tray.quit_requested());
+            let quit_requested =
+                SIGTERM.get() || tray.as_ref().is_some_and(|tray| tray.quit_requested());
             if quit_requested && !shutdown_sent.get() {
                 shutdown_sent.set(coordinator.borrow().send(Command::Shutdown));
             }
