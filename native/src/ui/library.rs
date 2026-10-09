@@ -849,8 +849,14 @@ impl Inner {
     }
 
     fn apply_date_range(self: &Rc<Self>) {
-        let from = self.from_calendar.date();
-        let to = self.to_calendar.date();
+        let mut from = self.from_calendar.date();
+        let mut to = self.to_calendar.date();
+        // A backwards range means the user picked the ends the other way round.
+        if day_start_ms(&from) > day_start_ms(&to) {
+            std::mem::swap(&mut from, &mut to);
+            self.from_calendar.select_day(&from);
+            self.to_calendar.select_day(&to);
+        }
         // Inclusive local-day boundaries: 00:00:00.000 to 23:59:59.999. The end
         // is the start of the following local day minus a millisecond, so DST
         // days (23 or 25 hours) stay exactly one calendar day wide.
@@ -859,14 +865,12 @@ impl Inner {
             .add_days(1)
             .map(|next| day_start_ms(&next) - 1)
             .unwrap_or_else(|_| day_start_ms(&to) + 86_400_000 - 1);
-        if start <= end {
-            self.state.date_range.set(Some((start, end)));
-            self.date_label.set_text(&format!(
-                "{} – {}",
-                from.format("%Y-%m-%d").unwrap_or_default(),
-                to.format("%Y-%m-%d").unwrap_or_default()
-            ));
-        }
+        self.state.date_range.set(Some((start, end)));
+        self.date_label.set_text(&format!(
+            "{} – {}",
+            from.format("%Y-%m-%d").unwrap_or_default(),
+            to.format("%Y-%m-%d").unwrap_or_default()
+        ));
         self.refilter();
     }
 
