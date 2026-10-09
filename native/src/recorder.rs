@@ -951,8 +951,8 @@ fn text_tail(text: &str) -> String {
 
 /// `--list-audio-devices` prints one `name|description` line per source. The
 /// defaults always come first; every other source is passed to `-a` as
-/// `device:<name>` and sorted by its PulseAudio/PipeWire name: `*_input*`
-/// sources are inputs, everything else (output monitors) is an output.
+/// `device:<name>` and sorted by its PulseAudio/PipeWire name: `*.monitor`
+/// sources are outputs, everything else (virtual mics included) is an input.
 fn parse_audio_devices(text: &str) -> AudioDevices {
     let device = |id: &str, detail: &str| AudioDevice {
         id: id.to_string(),
@@ -970,10 +970,10 @@ fn parse_audio_devices(text: &str) -> AudioDevices {
         if name.is_empty() || name.starts_with("default_") {
             continue;
         }
-        let list = if name.contains("_input") {
-            &mut devices.inputs
-        } else {
+        let list = if name.ends_with(".monitor") {
             &mut devices.outputs
+        } else {
+            &mut devices.inputs
         };
         let id = format!("device:{name}");
         if !list.iter().any(|existing| existing.id == id) {
@@ -1345,21 +1345,24 @@ mod tests {
         assert_eq!(devices.outputs[0].label, "Default output device");
         recorder.shutdown().unwrap();
 
-        // Duplicates collapse, lines without `|` are ignored, and an empty
-        // description falls back to the id.
+        // Duplicates collapse, lines without `|` are ignored, an empty
+        // description falls back to the id, and a virtual mic is an input.
         let parsed = parse_audio_devices(
-            "bluez_output.x|Headset\nbluez_output.x|Headset\nnoise\nbluez_output.y|\n",
+            "bluez_output.x.monitor|Headset\nbluez_output.x.monitor|Headset\nnoise\nbluez_output.y.monitor|\neasyeffects_source|Easy Effects Source\n",
         );
         assert_eq!(
             ids(&parsed.outputs),
             [
                 "default_output",
-                "device:bluez_output.x",
-                "device:bluez_output.y"
+                "device:bluez_output.x.monitor",
+                "device:bluez_output.y.monitor"
             ]
         );
-        assert_eq!(parsed.outputs[2].label, "device:bluez_output.y");
-        assert_eq!(ids(&parsed.inputs), ["default_input"]);
+        assert_eq!(parsed.outputs[2].label, "device:bluez_output.y.monitor");
+        assert_eq!(
+            ids(&parsed.inputs),
+            ["default_input", "device:easyeffects_source"]
+        );
     }
 
     #[test]
