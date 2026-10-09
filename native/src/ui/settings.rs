@@ -478,6 +478,10 @@ pub fn row_sensitive(field: &str, config: &Config) -> bool {
 
 // --- Apply pipeline ---
 
+/// Opening of the feedback shown while `unsafe_reason` holds, so it can be
+/// told apart and cleared once the recorder is idle again.
+const UNSAFE_FEEDBACK: &str = "Settings cannot be applied";
+
 /// Reconfiguration is unsafe while capturing, overrunning, or finalizing or
 /// queueing media work.
 pub fn unsafe_reason(snapshot: &AppSnapshot) -> Option<&'static str> {
@@ -1071,9 +1075,11 @@ impl Settings {
         }
         if let Some(reason) = reason {
             self.set_feedback(
-                &format!("Settings cannot be applied {reason}. The fields stay visible; Apply is re-enabled when the recorder is idle."),
+                &format!("{UNSAFE_FEEDBACK} {reason}. The fields stay visible; Apply is re-enabled when the recorder is idle."),
                 "warning",
             );
+        } else if self.feedback.label().starts_with(UNSAFE_FEEDBACK) {
+            self.set_feedback("", "dim-label");
         }
 
         self.target_row
