@@ -80,10 +80,10 @@ Measured on an AMD Ryzen 7 9800X3D with a Radeon RX 9070:
 
 | Measurement | Value |
 |---|---|
-| Window open, empty library | about 147 MB RSS, 31 threads |
-| Tray only (started minimized) | about 57 MB RSS, 12 threads |
+| Window open, empty library | about 100 MB RSS, 24 threads |
+| Tray only (started minimized) | about 59 MB RSS, 13 threads |
 | CPU while idle | about 0% |
-| Startup scan, 58 recordings | about 1.0 s, about 30 MB above the empty baseline |
+| Startup scan, 38 recordings | about 55 ms, about 1 MB above the empty baseline |
 | Installed size | about 38 MB |
 | First download | about 18 MB |
 | Typical update | about 5 MB |
