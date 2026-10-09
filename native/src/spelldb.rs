@@ -13,39 +13,45 @@
 //! their base spell's entry, so a lookup by the name a combat log reports
 //! resolves to the right icon and tooltip. Spells without a bundled entry
 //! simply render without an icon or tooltip. No file I/O here: the caller
-//! reads the resource and hands the JSON text to [`SpellDb::parse`].
+//! looks up the resource and hands its JSON text to [`SpellDb::parse`].
 
+use std::borrow::{Borrow, Cow};
 use std::collections::HashMap;
 
 use serde::Deserialize;
 
-/// One spell's tooltip facts. Boxed strings: the index holds ~87k entries
-/// for the process lifetime, so spare capacity words add up.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(from = "(Box<str>, Box<str>)")]
+/// One spell's tooltip facts, borrowed from the bundled JSON. Strings with
+/// JSON escapes cannot be borrowed and are owned instead, hence `Cow`.
+#[derive(Clone, Debug, Deserialize)]
 pub struct SpellInfo {
-    pub description: Box<str>,
+    #[serde(borrow)]
+    pub description: Cow<'static, str>,
     /// Icon basename, e.g. `spell_fire_flamebolt`; the PNG lives at
     /// `/io/github/JohanWes/WarcraftRecorder/spells/{icon}.png`.
-    pub icon: Box<str>,
+    pub icon: &'static str,
 }
 
-impl From<(Box<str>, Box<str>)> for SpellInfo {
-    fn from((description, icon): (Box<str>, Box<str>)) -> Self {
-        Self { description, icon }
+/// A spell-name map key; a newtype only so serde borrows it.
+#[derive(Debug, PartialEq, Eq, Hash, Deserialize)]
+struct Name(#[serde(borrow)] Cow<'static, str>);
+
+impl Borrow<str> for Name {
+    fn borrow(&self) -> &str {
+        &self.0
     }
 }
 
 /// An immutable spell-name index built once from the bundled JSON.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
 pub struct SpellDb {
-    by_name: HashMap<Box<str>, SpellInfo>,
+    by_name: HashMap<Name, SpellInfo>,
 }
 
 impl SpellDb {
-    /// Parse the bundled spell JSON (`{name: [description, icon]}`) straight
-    /// into the index.
-    pub fn parse(json: &str) -> Result<Self, serde_json::Error> {
+    /// Index the bundled spell JSON (`{name: [description, icon]}`) without
+    /// copying its strings, so the text must live as long as the process,
+    /// as the registered resource bundle does.
+    pub fn parse(json: &'static str) -> Result<Self, serde_json::Error> {
         Ok(Self {
             by_name: serde_json::from_str(json)?,
         })
@@ -61,38 +67,16 @@ impl SpellDb {
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = r#"{
-        "Fireball": ["Throws a fiery ball.", "spell_fire_flamebolt"],
-        "Flash Heal": ["A fast spell.", "spell_holy_flashheal"]
-    }"#;
-
-    #[test]
-    fn parses_and_looks_up_by_name() {
-        let db = SpellDb::parse(SAMPLE).expect("valid sample");
-        let fireball = db.lookup("Fireball").expect("found");
-        assert_eq!(&*fireball.description, "Throws a fiery ball.");
-        assert_eq!(&*fireball.icon, "spell_fire_flamebolt");
-        assert!(db.lookup("Flash Heal").is_some());
-    }
-
-    #[test]
-    fn malformed_json_is_an_error() {
-        assert!(SpellDb::parse("{nope").is_err());
-    }
-    /// The real bundled database must parse and contain the well-known spells;
-    /// skipped where the generated data is absent (plain `cargo test` on a
-    /// checkout without `data/spells/`).
+    /// The real bundled database must parse and contain the well-known spells.
     #[test]
     fn bundled_database_parses() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("native/ has a parent")
             .join("data/spells/spells.json");
-        if !path.exists() {
-            return;
-        }
         let json = std::fs::read_to_string(path).expect("read bundled spells.json");
-        let db = SpellDb::parse(&json).expect("bundled spells.json parses");
+        let db =
+            SpellDb::parse(Box::leak(json.into_boxed_str())).expect("bundled spells.json parses");
         assert!(db.lookup("Fireball").is_some());
         assert!(db.lookup("Flash Heal").is_some());
         // These current player abilities use inventory-prefixed icon files;

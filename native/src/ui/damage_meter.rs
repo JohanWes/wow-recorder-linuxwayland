@@ -1794,7 +1794,11 @@ impl Inner {
                     gtk4::gio::ResourceLookupFlags::NONE,
                 )
                 .ok()?;
-                SpellDb::parse(std::str::from_utf8(&bytes).ok()?).ok()
+                // The bundle stays registered for the process lifetime, so
+                // leaking this handle keeps nothing extra alive and lets the
+                // index borrow the mapped text instead of copying it.
+                let bytes: &'static [u8] = Box::leak(Box::new(bytes));
+                SpellDb::parse(std::str::from_utf8(bytes).ok()?).ok()
             })
             .await;
             let Ok(Some(db)) = parsed else {
@@ -1809,9 +1813,9 @@ impl Inner {
     }
 
     /// The row's icon basename if the database knows this spell.
-    fn spell_icon_basename(&self, name: &str) -> Option<Box<str>> {
+    fn spell_icon_basename(&self, name: &str) -> Option<&'static str> {
         let db = self.spell_db.borrow();
-        db.as_ref()?.lookup(name).map(|info| info.icon.clone())
+        db.as_ref()?.lookup(name).map(|info| info.icon)
     }
 
     /// A cached icon texture for `basename`, decoded once from the resource.
@@ -1820,12 +1824,10 @@ impl Inner {
             return Some(texture.clone());
         }
         let resource = format!("{SPELL_ICON_RESOURCE}{basename}.png");
-        if gtk4::gio::resources_lookup_data(&resource, gtk4::gio::ResourceLookupFlags::NONE)
-            .is_err()
-        {
-            return None;
-        }
-        let texture = Texture::from_resource(&resource);
+        let bytes =
+            gtk4::gio::resources_lookup_data(&resource, gtk4::gio::ResourceLookupFlags::NONE)
+                .ok()?;
+        let texture = Texture::from_bytes(&bytes).ok()?;
         self.icons
             .borrow_mut()
             .insert(basename.to_owned(), texture.clone());
@@ -1838,7 +1840,7 @@ impl Inner {
         let Some(basename) = self.spell_icon_basename(spell) else {
             return false;
         };
-        let Some(texture) = self.icon_texture(&basename) else {
+        let Some(texture) = self.icon_texture(basename) else {
             return false;
         };
         let icon = gtk4::Picture::for_paintable(&texture);
@@ -1875,7 +1877,7 @@ impl Inner {
         else {
             return;
         };
-        if let Some(texture) = self.icon_texture(&info.icon) {
+        if let Some(texture) = self.icon_texture(info.icon) {
             self.tooltip_icon.set_paintable(Some(&texture));
             self.tooltip_icon.set_visible(true);
         } else {
