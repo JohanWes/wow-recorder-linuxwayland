@@ -186,7 +186,7 @@ impl Default for CaptureSettings {
             fps: 60,
             codec: Codec::H264,
             bitrate_kbps: 20_000,
-            replay_buffer_seconds: 180,
+            replay_buffer_seconds: 60,
             extra_lead_in_seconds: 0,
             replay_storage: ReplayStorage::Ram,
             capture_cursor: false,
