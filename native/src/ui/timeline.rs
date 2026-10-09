@@ -283,7 +283,7 @@ impl Timeline {
         let timeline = Self { widget, state };
         timeline.connect_draw();
         timeline.connect_pointer();
-        timeline.connect_tooltip_and_keys();
+        timeline.connect_tooltip();
         timeline
     }
 
@@ -496,7 +496,7 @@ impl Timeline {
         self.widget.add_controller(drag);
     }
 
-    fn connect_tooltip_and_keys(&self) {
+    fn connect_tooltip(&self) {
         // Hover/focus label: nearest marker within 8 px, else the timestamp.
         let state = Rc::clone(&self.state);
         self.widget
@@ -516,28 +516,6 @@ impl Timeline {
                 tooltip.set_text(Some(&text));
                 true
             });
-
-        // Keyboard seeking on the focused track: Left/Right nudge 5 s, matching
-        // the player shortcut interval.
-        let key = gtk4::EventControllerKey::new();
-        let state = Rc::clone(&self.state);
-        key.connect_key_pressed(move |_, keyval, _, _| {
-            let duration = state.duration_ms.get();
-            if duration == 0 {
-                return gtk4::glib::Propagation::Proceed;
-            }
-            let position = state.position_ms.get();
-            let target = match keyval {
-                gtk4::gdk::Key::Left => position.saturating_sub(5_000),
-                gtk4::gdk::Key::Right => (position + 5_000).min(duration),
-                _ => return gtk4::glib::Propagation::Proceed,
-            };
-            if let Some(on_seek) = state.on_seek.borrow().as_ref() {
-                on_seek(target, false);
-            }
-            gtk4::glib::Propagation::Stop
-        });
-        self.widget.add_controller(key);
     }
 }
 
