@@ -7,6 +7,29 @@ Notable changes to the native Linux/Wayland application. The format follows
 Release history before the native rewrite belongs to the upstream Electron
 project, [aza547/wow-recorder](https://github.com/aza547/wow-recorder).
 
+## 1.0.15 - 2026-10-10
+
+### Changed
+- Starting a recording saves only the lead-in it needs from the replay buffer
+  instead of the whole buffer, which was hundreds of megabytes written per
+  capture, and saves nothing when no lead-in is needed.
+- Finishing a recording joins the lead-in to the recording without a separate
+  trim pass. The lead-in can be up to one keyframe interval longer than
+  configured, and the timeline is placed against its measured length.
+- The bundled gpu-screen-recorder is updated from 5.13.9 to 6.1.3 and is
+  driven through its IPC socket instead of signals and a hook script.
+- The default replay buffer is 60 seconds instead of 180, so new installs hold
+  a third of the buffer in RAM while World of Warcraft is open. Existing
+  settings keep their value.
+- Playing a recording uses less memory: the player's queues are capped at
+  8 MiB each instead of 64 MiB.
+- The log records the combat-log delay, lead-in and replay save for every
+  capture start.
+
+### Fixed
+- A recording without lead-in is stored as MP4 like every other recording
+  instead of a copy of gpu-screen-recorder's Matroska file.
+
 ## 1.0.14 - 2026-10-09
 
 ### Changed

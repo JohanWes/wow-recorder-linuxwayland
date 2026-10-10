@@ -4,6 +4,21 @@ Commit subjects per release, written by `scripts/generate-release-notes.sh` and
 compiled into the binary: the "What's new" dialog reads the section matching the
 running version. Only `## <version>` headings and `- ` lines are parsed.
 
+## 1.0.15
+- Update README typical update size measured on the 1.0.14 release
+- Save only the replay the pre-roll needs and skip it at zero
+- Remux regular-only recordings to MP4 instead of copying the MKV
+- Lower the default replay buffer from 180 to 60 seconds
+- Log the detection delay, pre-roll and replay save at capture start
+- Correct sidecar load comment: non-compact sidecars are read whole
+- Bump bundled gpu-screen-recorder from 5.13.9 to 6.1.3
+- Drive gpu-screen-recorder through its IPC socket instead of signals
+- Concatenate the measured replay without the ffmpeg trim
+- Drop the gsr hook sandbox patch now that no hook runs
+- Cap player queues at 8 MiB from creation to cut playback memory
+- Log the real combat-log delay at capture start
+- Add performance handoff notes
+
 ## 1.0.14
 - Read native sidecars only up to the meter during library scan
 - Copy the meter through as raw JSON when protecting or tagging
