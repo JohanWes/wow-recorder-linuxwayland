@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::sync::OnceLock;
+
 use clapper_gtk::prelude::AvExt;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gtk4::glib;
 use gtk4::glib::prelude::Cast;
 
 /// Per-stream byte limit for playbin3's demuxer queue. The default is
 /// unlimited: the queue is sized by time, and GStreamer's AV1 parser only
 /// timestamps the first frame of these recordings, so the queue never counts
 /// itself full and reads the whole file into memory (5 GB for a long key).
-const DEMUX_QUEUE_BYTES: u32 = 64 * 1024 * 1024;
+///
+/// Kept small because it is paid several times over: the limit lands on both
+/// the source's and the decoder's queue, each fills completely within a second
+/// of loading, and glibc keeps the freed buffers of the previous recording in
+/// whichever arena the next one does not reuse. A local file needs no more
+/// than a few frames queued.
+const DEMUX_QUEUE_BYTES: u32 = 8 * 1024 * 1024;
 
 /// How precisely a seek has to land, which decides how much decoding GStreamer
 /// does before it can present a frame.
@@ -40,9 +49,9 @@ pub struct VideoStreamToken(clapper::VideoStream);
 impl PlayerBackend {
     pub fn new() -> Result<Self, &'static str> {
         clapper::init()?;
+        cap_demux_queues();
         let video = clapper_gtk::Video::new();
         let player = video.player().ok_or("ClapperGtk did not create a player")?;
-        cap_demux_queue(&player)?;
         Ok(Self { video, player })
     }
 
@@ -160,33 +169,50 @@ impl PlayerBackend {
     }
 }
 
-/// Clapper hides its pipeline, so a pass-through video filter is the way in:
-/// its first downstream event proves the chain is complete, and the walk up
-/// from there reaches playbin3 and every multiqueue inside it.
-fn cap_demux_queue(player: &clapper::Player) -> Result<(), &'static str> {
-    let filter = gst::ElementFactory::make("identity")
-        .build()
-        .map_err(|_| "GStreamer has no identity element")?;
-    let pad = filter
-        .static_pad("sink")
-        .ok_or("identity element has no sink pad")?;
-    pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, |pad, _| {
-        let mut object: Option<gst::Object> = pad.parent_element().map(Cast::upcast);
-        while let Some(parent) = object.as_ref().and_then(|object| object.parent()) {
-            object = Some(parent);
+/// Caps every multiqueue as it joins a bin. Clapper hides its pipeline, and
+/// anything of ours it links in (a filter, the sink) only gets there once the
+/// video chain is complete, by which time the source queue of the first
+/// recording has read 140 MB ahead. A tracer is the one hook that runs first.
+mod queue_cap {
+    use gst::subclass::prelude::*;
+    use gstreamer as gst;
+    use gtk4::glib;
+
+    #[derive(Default)]
+    pub struct QueueCap;
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for QueueCap {
+        const NAME: &'static str = "WarcraftRecorderQueueCap";
+        type Type = super::QueueCap;
+        type ParentType = gst::Tracer;
+    }
+
+    impl ObjectImpl for QueueCap {
+        fn constructed(&self) {
+            self.parent_constructed();
+            self.register_hook(TracerHook::BinAddPost);
         }
-        if let Some(pipeline) = object.and_then(|object| object.downcast::<gst::Bin>().ok()) {
-            // Every later recording gets a fresh source bin and queue, so the
-            // signal does the real work; connect first so none slips between.
-            pipeline.connect_deep_element_added(|_, _, element| cap_if_multiqueue(element));
-            for element in pipeline.iterate_recurse().into_iter().flatten() {
-                cap_if_multiqueue(&element);
-            }
+    }
+
+    impl GstObjectImpl for QueueCap {}
+
+    impl TracerImpl for QueueCap {
+        fn bin_add_post(&self, _ts: u64, _bin: &gst::Bin, element: &gst::Element, _added: bool) {
+            super::cap_if_multiqueue(element);
         }
-        gst::PadProbeReturn::Remove
-    });
-    player.set_video_filter(Some(&filter));
-    Ok(())
+    }
+}
+
+glib::wrapper! {
+    pub struct QueueCap(ObjectSubclass<queue_cap::QueueCap>) @extends gst::Tracer, gst::Object;
+}
+
+/// GStreamer never unregisters a tracer's hooks, so the one instance lives for
+/// the process.
+fn cap_demux_queues() {
+    static TRACER: OnceLock<QueueCap> = OnceLock::new();
+    TRACER.get_or_init(glib::Object::new);
 }
 
 fn cap_if_multiqueue(element: &gst::Element) {
