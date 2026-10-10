@@ -899,6 +899,9 @@ impl Coordinator {
         let lead_in_ms = i64::from(self.config.capture.extra_lead_in_seconds) * 1_000;
         let requested_replay_ms = (late_by_ms + lead_in_ms).clamp(0, capacity_ms as i64) as u64;
         tracing::info!(
+            // How far behind the game the combat log was when it revealed the
+            // activity; live captures do not add this to the pre-roll.
+            log_delay_ms = now_unix_ms() - draft.started_at_ms,
             late_by_ms,
             requested_replay_ms,
             save_seconds = requested_replay_ms.div_ceil(1_000),
